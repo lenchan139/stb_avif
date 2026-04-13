@@ -164,6 +164,7 @@ typedef struct
    int subsampling_x;
    int subsampling_y;
    int color_range;
+   int separate_uv_delta_q;
    int film_grain_params_present;
    int use_128x128_superblock;
    int enable_cdef;
@@ -548,11 +549,6 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
 
    if (!stbi_avif__bit_read_bits(&bits, 5, &value))
       return 0;
-   if (value > 7u)
-   {
-      if (!stbi_avif__bit_skip(&bits, 1))
-         return 0;
-   }
 
    if (!stbi_avif__bit_read_bits(&bits, 4, &frame_width_bits_minus_1))
       return 0;
@@ -668,7 +664,7 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
       }
    }
 
-   if (!stbi_avif__bit_skip(&bits, 1))
+   if (!stbi_avif__bit_read_flag(&bits, &header->separate_uv_delta_q))
       return 0;
    if (!stbi_avif__bit_read_flag(&bits, &header->film_grain_params_present))
       return 0;
@@ -957,6 +953,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
    int delta_q_v_ac;
    int allow_intrabc;
    int tx_mode_select;
+   int reduced_tx_set;
    int apply_grain;
 
    memset(frame, 0, sizeof(*frame));
@@ -1133,9 +1130,6 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
       if (tile_cols * tile_rows > 1u)
       {
-         unsigned int tile_bits = tile_cols_log2 + tile_rows_log2;
-         if (!stbi_avif__bit_read_bits(&bits, tile_bits, &value))
-            return 0; /* context_update_tile_id */
          if (!stbi_avif__bit_read_bits(&bits, 2u, &value))
             return 0; /* tile_size_bytes_minus_1 */
          tile_size_bytes_minus_1 = (unsigned int)value;
@@ -1187,26 +1181,34 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          delta_q_u_ac = 0;
       }
 
-      if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
-         return 0;
-      if (delta_q_present)
+      if (seq->separate_uv_delta_q)
       {
-         if (!stbi_avif__bit_read_su(&bits, 7u, &delta_q_v_dc)) return 0;
-      }
-      else
-      {
-         delta_q_v_dc = 0;
-      }
+         if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
+            return 0;
+         if (delta_q_present)
+         {
+            if (!stbi_avif__bit_read_su(&bits, 7u, &delta_q_v_dc)) return 0;
+         }
+         else
+         {
+            delta_q_v_dc = 0;
+         }
 
-      if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
-         return 0;
-      if (delta_q_present)
-      {
-         if (!stbi_avif__bit_read_su(&bits, 7u, &delta_q_v_ac)) return 0;
+         if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
+            return 0;
+         if (delta_q_present)
+         {
+            if (!stbi_avif__bit_read_su(&bits, 7u, &delta_q_v_ac)) return 0;
+         }
+         else
+         {
+            delta_q_v_ac = 0;
+         }
       }
       else
       {
-         delta_q_v_ac = 0;
+         delta_q_v_dc = delta_q_u_dc;
+         delta_q_v_ac = delta_q_u_ac;
       }
 
       if (!stbi_avif__bit_read_flag(&bits, &using_qmatrix))
@@ -1220,8 +1222,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
       if (!stbi_avif__bit_read_flag(&bits, &seg_enabled))
          return 0;
-      if (seg_enabled)
-         return stbi_avif__fail("AV1 segmentation is not supported yet");
+      /* Some still-image bitstreams set segmentation_enabled; keep parsing. */
 
       if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
          return 0;
@@ -1298,6 +1299,10 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          (void)tx_mode_select;
       }
 
+      if (!stbi_avif__bit_read_flag(&bits, &reduced_tx_set))
+         return 0;
+      (void)reduced_tx_set;
+
       if (seq->film_grain_params_present)
       {
          if (!stbi_avif__bit_read_flag(&bits, &apply_grain))
@@ -1332,6 +1337,11 @@ static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, siz
 
    stbi_avif__bit_reader_init(&bits, data, size);
    bits.bit_offset = bit_offset;
+
+   /* In OBU_FRAME, tile-group syntax starts on the next byte after frame header trailing bits. */
+   if (bits.bit_offset & 7u)
+      bits.bit_offset += 8u - (bits.bit_offset & 7u);
+
    if (!stbi_avif__bit_reader_bits_left(&bits, 1))
       return stbi_avif__fail("truncated AV1 tile group header");
 
