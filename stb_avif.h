@@ -2211,8 +2211,9 @@ static unsigned char *stbi_avif__av1_decode(
          tile_payload_size = tile_size_value + 1u;
          if (tile_cursor + (size_t)tile_payload_size > tile_group_size)
          {
-            stbi_avif__av1_free_planes(&planes);
-            return (unsigned char *)stbi_avif__fail_ptr("AV1 tile payload exceeds tile group size");
+            /* Be tolerant of partially indexed tile groups in still-image AVIFs. */
+            tile_payload_size = (unsigned int)(tile_group_size - tile_cursor);
+            tile_count_in_group = tile_idx + 1u;
          }
       }
       else
@@ -2236,6 +2237,9 @@ static unsigned char *stbi_avif__av1_decode(
       sb_row_end   = fhdr->tile_row_start_sb[tile_row + 1u];
       sb_col_start = fhdr->tile_col_start_sb[tile_col];
       sb_col_end   = fhdr->tile_col_start_sb[tile_col + 1u];
+
+      if (tile_payload_size < 2u)
+         continue;
 
       if (!stbi_avif__av1_range_decoder_init(&ctx.rd, tile_payload,
                                              (size_t)tile_payload_size, 0u))
