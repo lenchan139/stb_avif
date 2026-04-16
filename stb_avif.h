@@ -1699,6 +1699,21 @@ static unsigned int stbi_avif__av1_read_literal(stbi_avif__av1_range_decoder *rd
    return result;
 }
 
+/* Read a uniform symbol in [0, n) from the range decoder */
+static unsigned int stbi_avif__av1_read_uniform(stbi_avif__av1_range_decoder *rd,
+                                                 unsigned int n)
+{
+   /* l = get_unsigned_bits(n) = floor(log2(n)) + 1 */
+   unsigned int l = 0, m, v, t;
+   t = n;
+   while (t > 0u) { ++l; t >>= 1u; }
+   m = (1u << l) - n;
+   v = stbi_avif__av1_read_literal(rd, l - 1u);
+   if (v < m)
+      return v;
+   return (v << 1u) - m + stbi_avif__av1_read_literal(rd, 1);
+}
+
 /*
  * =============================================================================
  *  DEFAULT CDF TABLES  (AV1 spec Appendix B)
@@ -6621,6 +6636,62 @@ static unsigned short stbi_avif__av1_palette_uv_mode_cdf[2][3] = {
    {32461u,32768u,0u}, {21488u,32768u,0u}
 };
 
+/* Palette Y size CDF [7 bsize_ctx][CDF_SIZE(7)] — 7 symbols, size = symbol + 2 → [2..8] */
+static unsigned short stbi_avif__av1_palette_y_size_cdf[7][8] = {
+   {7952u,13000u,18149u,21478u,25527u,29241u,32768u,0u},
+   {7139u,11421u,16195u,19544u,23666u,28073u,32768u,0u},
+   {7788u,12741u,17325u,20500u,24315u,28530u,32768u,0u},
+   {8271u,14064u,18246u,21564u,25071u,28533u,32768u,0u},
+   {12725u,19180u,21863u,24839u,27535u,30120u,32768u,0u},
+   {9711u,14888u,16923u,21052u,25661u,27875u,32768u,0u},
+   {14940u,20797u,21678u,24186u,27033u,28999u,32768u,0u}
+};
+
+/* Palette UV size CDF [7 bsize_ctx][CDF_SIZE(7)] */
+static unsigned short stbi_avif__av1_palette_uv_size_cdf[7][8] = {
+   {8713u,19979u,27128u,29609u,31331u,32272u,32768u,0u},
+   {5839u,15573u,23581u,26947u,29848u,31700u,32768u,0u},
+   {4426u,11260u,17999u,21483u,25863u,29430u,32768u,0u},
+   {3228u,9464u,14993u,18089u,22523u,27420u,32768u,0u},
+   {3768u,8886u,13091u,17852u,22495u,27207u,32768u,0u},
+   {2464u,8451u,12861u,21632u,25525u,28555u,32768u,0u},
+   {1269u,5435u,10433u,18963u,21700u,25865u,32768u,0u}
+};
+
+/* Palette Y color index CDF [7 sizes][5 ctx][CDF_SIZE(8)] — max 8 colors */
+static unsigned short stbi_avif__av1_palette_y_color_index_cdf[7][5][9] = {
+   /* size 2 (n=2) */
+   { {28710u,32768u,0u,0u,0u,0u,0u,0u,0u}, {16384u,32768u,0u,0u,0u,0u,0u,0u,0u}, {10553u,32768u,0u,0u,0u,0u,0u,0u,0u}, {27036u,32768u,0u,0u,0u,0u,0u,0u,0u}, {31603u,32768u,0u,0u,0u,0u,0u,0u,0u} },
+   /* size 3 (n=3) */
+   { {27877u,30490u,32768u,0u,0u,0u,0u,0u,0u}, {11532u,25697u,32768u,0u,0u,0u,0u,0u,0u}, {6544u,30234u,32768u,0u,0u,0u,0u,0u,0u}, {23018u,28072u,32768u,0u,0u,0u,0u,0u,0u}, {31915u,32385u,32768u,0u,0u,0u,0u,0u,0u} },
+   /* size 4 */
+   { {25572u,28046u,30045u,32768u,0u,0u,0u,0u,0u}, {9478u,21590u,27256u,32768u,0u,0u,0u,0u,0u}, {7248u,26837u,29824u,32768u,0u,0u,0u,0u,0u}, {19167u,24486u,28349u,32768u,0u,0u,0u,0u,0u}, {31400u,31825u,32250u,32768u,0u,0u,0u,0u,0u} },
+   /* size 5 */
+   { {24779u,26955u,28576u,30282u,32768u,0u,0u,0u,0u}, {8669u,20364u,24073u,28093u,32768u,0u,0u,0u,0u}, {4255u,27565u,29377u,31067u,32768u,0u,0u,0u,0u}, {19864u,23674u,26716u,29530u,32768u,0u,0u,0u,0u}, {31646u,31893u,32147u,32426u,32768u,0u,0u,0u,0u} },
+   /* size 6 */
+   { {23132u,25407u,26970u,28435u,30073u,32768u,0u,0u,0u}, {7443u,17242u,20717u,24762u,27982u,32768u,0u,0u,0u}, {6300u,24862u,26944u,28784u,30671u,32768u,0u,0u,0u}, {18916u,22895u,25267u,27435u,29652u,32768u,0u,0u,0u}, {31270u,31550u,31808u,32059u,32353u,32768u,0u,0u,0u} },
+   /* size 7 */
+   { {23105u,25199u,26464u,27684u,28931u,30318u,32768u,0u,0u}, {6950u,15447u,18952u,22681u,25567u,28563u,32768u,0u,0u}, {7560u,23474u,25490u,27203u,28921u,30708u,32768u,0u,0u}, {18544u,22373u,24457u,26195u,28119u,30045u,32768u,0u,0u}, {31198u,31451u,31670u,31882u,32123u,32391u,32768u,0u,0u} },
+   /* size 8 */
+   { {21689u,23883u,25163u,26352u,27506u,28827u,30195u,32768u,0u}, {6892u,15385u,17840u,21606u,24287u,26753u,29204u,32768u,0u}, {5651u,23182u,25042u,26518u,27982u,29392u,30900u,32768u,0u}, {19349u,22578u,24418u,25994u,27524u,29031u,30448u,32768u,0u}, {31028u,31270u,31504u,31705u,31927u,32153u,32392u,32768u,0u} }
+};
+
+/* Palette UV color index CDF [7 sizes][5 ctx][CDF_SIZE(8)] */
+static unsigned short stbi_avif__av1_palette_uv_color_index_cdf[7][5][9] = {
+   { {29089u,32768u,0u,0u,0u,0u,0u,0u,0u}, {16384u,32768u,0u,0u,0u,0u,0u,0u,0u}, {8713u,32768u,0u,0u,0u,0u,0u,0u,0u}, {29257u,32768u,0u,0u,0u,0u,0u,0u,0u}, {31610u,32768u,0u,0u,0u,0u,0u,0u,0u} },
+   { {25257u,29145u,32768u,0u,0u,0u,0u,0u,0u}, {12287u,27293u,32768u,0u,0u,0u,0u,0u,0u}, {7033u,27960u,32768u,0u,0u,0u,0u,0u,0u}, {20145u,25405u,32768u,0u,0u,0u,0u,0u,0u}, {30608u,31639u,32768u,0u,0u,0u,0u,0u,0u} },
+   { {24210u,27175u,29903u,32768u,0u,0u,0u,0u,0u}, {9888u,22386u,27214u,32768u,0u,0u,0u,0u,0u}, {5901u,26053u,29293u,32768u,0u,0u,0u,0u,0u}, {18318u,22152u,28333u,32768u,0u,0u,0u,0u,0u}, {30459u,31136u,31926u,32768u,0u,0u,0u,0u,0u} },
+   { {22980u,25479u,27781u,29986u,32768u,0u,0u,0u,0u}, {8413u,21408u,24859u,28874u,32768u,0u,0u,0u,0u}, {2257u,29449u,30594u,31598u,32768u,0u,0u,0u,0u}, {19189u,21202u,25915u,28620u,32768u,0u,0u,0u,0u}, {31844u,32044u,32281u,32518u,32768u,0u,0u,0u,0u} },
+   { {22217u,24567u,26637u,28683u,30548u,32768u,0u,0u,0u}, {7307u,16406u,19636u,24632u,28424u,32768u,0u,0u,0u}, {4441u,25064u,26879u,28942u,30919u,32768u,0u,0u,0u}, {17210u,20528u,23319u,26750u,29582u,32768u,0u,0u,0u}, {30674u,30953u,31396u,31735u,32207u,32768u,0u,0u,0u} },
+   { {21239u,23168u,25044u,26962u,28705u,30506u,32768u,0u,0u}, {6545u,15012u,18004u,21817u,25503u,28701u,32768u,0u,0u}, {3448u,26295u,27437u,28704u,30126u,31442u,32768u,0u,0u}, {15889u,18323u,21704u,24698u,26976u,29690u,32768u,0u,0u}, {30988u,31204u,31479u,31734u,31983u,32325u,32768u,0u,0u} },
+   { {21442u,23288u,24758u,26246u,27649u,28980u,30563u,32768u,0u}, {5863u,14933u,17552u,20668u,23683u,26411u,29273u,32768u,0u}, {3415u,25810u,26877u,27990u,29223u,30394u,31618u,32768u,0u}, {17965u,20084u,22232u,23974u,26274u,28402u,30390u,32768u,0u}, {31190u,31329u,31516u,31679u,31825u,32026u,32322u,32768u,0u} }
+};
+
+/* Palette color index context lookup [9] */
+static const int stbi_avif__av1_palette_color_index_ctx_lookup[9] = {
+   -1, -1, 0, -1, -1, 4, 3, 2, 1
+};
+
 /* Filter intra CDFs [22 block_sizes][CDF_SIZE(2)] */
 static unsigned short stbi_avif__av1_filter_intra_cdfs[22][3] = {
    {4621u,32768u,0u}, {6743u,32768u,0u}, {5893u,32768u,0u},
@@ -6884,6 +6955,10 @@ typedef struct
    unsigned short  coeff_br_cdf[5][2][21][5];
    unsigned short  palette_y_mode_cdf[7][3][3]; /* [bsize_ctx][mode_ctx][CDF_SIZE(2)] */
    unsigned short  palette_uv_mode_cdf[2][3];   /* [ctx][CDF_SIZE(2)] */
+   unsigned short  palette_y_size_cdf[7][8];    /* [bsize_ctx][CDF_SIZE(7)] */
+   unsigned short  palette_uv_size_cdf[7][8];   /* [bsize_ctx][CDF_SIZE(7)] */
+   unsigned short  palette_y_color_index_cdf[7][5][9]; /* [n-2][ctx][CDF_SIZE(8)] */
+   unsigned short  palette_uv_color_index_cdf[7][5][9];
    unsigned short  filter_intra_cdfs[22][3];     /* [block_size][CDF_SIZE(2)] */
    unsigned short  filter_intra_mode_cdf[6];     /* [CDF_SIZE(5)] */
 } stbi_avif__av1_decode_ctx;
@@ -7087,7 +7162,8 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
 
 /* AOM-compatible half butterfly: round((a*x + b*y) >> cos_bit) */
 #define STBI_AVIF_HALF_BTF(w0, in0, w1, in1, cos_bit) \
-   STBI_AVIF_ROUND_SHIFT((int)(w0) * (in0) + (int)(w1) * (in1), (cos_bit))
+   ((int)((((long)(w0) * (long)(in0)) + ((long)(w1) * (long)(in1)) + \
+   (1L << ((cos_bit) - 1))) >> (cos_bit)))
 
 /*
  * AV1 inverse DCT using AOM's exact stage-based implementation.
@@ -8008,9 +8084,16 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    unsigned int tx_size;
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_mode_raw;
+   int palette_y_size, palette_uv_size;
+   unsigned short palette_y_colors[8];
+   unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
+   unsigned char palette_y_map[64 * 64]; /* max block 64x64 in 4x4 units */
+   unsigned char palette_uv_map[64 * 64];
 
    if (px >= ctx->planes->width)  return 1;
    if (py >= ctx->planes->height) return 1;
+   palette_y_size = 0;
+   palette_uv_size = 0;
    if (px + pw > ctx->planes->width)  pw = ctx->planes->width  - px;
    if (py + ph > ctx->planes->height) ph = ctx->planes->height - py;
 
@@ -8085,8 +8168,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          ctx->left_modes[mi_r] = (unsigned char)y_mode;
    }
 
-   /* Angle delta for directional Y modes (1-8) on blocks >= 8x8 */
-   if (y_mode >= 1u && y_mode <= 8u && pw >= 8u && ph >= 8u) {
+   /* Angle delta for directional Y modes (1-8) on blocks >= BLOCK_8X8 */
+   if (y_mode >= 1u && y_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8) {
       stbi_avif__av1_read_symbol_adapt(&ctx->rd,
          ctx->angle_delta_cdf[y_mode - 1u], 7);
    }
@@ -8106,7 +8189,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    }
 
    /* UV angle delta */
-   if (uv_mode >= 1u && uv_mode <= 8u && cpw >= 8u && cph >= 8u)
+   if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
       stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
 
    /* CFL_PRED */
@@ -8136,21 +8219,247 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          if (pal_bctx > 6) pal_bctx = 6;
          if (y_mode == 0u) { /* DC_PRED */
             unsigned int pal_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-               ctx->palette_y_mode_cdf[pal_bctx][0], 2); /* mode_ctx=0 (no neighbors have palette) */
-            if (pal_flag)
-               return stbi_avif__fail("palette mode not supported");
+               ctx->palette_y_mode_cdf[pal_bctx][0], 2);
+            if (pal_flag) {
+               /* Read palette Y size: 7-symbol CDF, result = symbol + 2 → [2..8] */
+               unsigned int pal_size_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                  ctx->palette_y_size_cdf[pal_bctx], 7);
+               palette_y_size = (int)pal_size_sym + 2;
+
+               /* Read palette Y colors (cache=0 since we don't track neighbors) */
+               {
+                  int n = palette_y_size, idx = 0, bd = ctx->planes->bit_depth;
+                  /* No cache (n_cache=0), so read all colors directly */
+                  palette_y_colors[idx++] = (unsigned short)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bd);
+                  if (idx < n) {
+                     int min_bits = bd - 3;
+                     int bits = min_bits + (int)stbi_avif__av1_read_literal(&ctx->rd, 2);
+                     int range = (1 << bd) - (int)palette_y_colors[idx - 1] - 1;
+                     for (; idx < n; ++idx) {
+                        int delta = (int)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bits) + 1;
+                        int val = (int)palette_y_colors[idx - 1] + delta;
+                        if (val > (1 << bd) - 1) val = (1 << bd) - 1;
+                        palette_y_colors[idx] = (unsigned short)val;
+                        range -= (val - (int)palette_y_colors[idx - 1]);
+                        if (range > 0) {
+                           int log2r = 0, t = range;
+                           while (t > 1) { ++log2r; t >>= 1; }
+                           /* ceil_log2 */
+                           if ((1 << log2r) < range) ++log2r;
+                           if (log2r < bits) bits = log2r;
+                        } else {
+                           bits = 0;
+                        }
+                     }
+                  }
+               }
+
+               /* Read palette Y color map */
+               {
+                  int n = palette_y_size;
+                  int rows = (int)ph / 4; /* block height in 4x4 units = MI units */
+                  int cols = (int)pw / 4;
+                  int plane_w = cols; /* for palette map stride */
+                  int i, j;
+                  static const int weights[3] = { 2, 1, 2 };
+                  static const int hash_muls[3] = { 1, 2, 2 };
+                  if (rows < 1) rows = 1;
+                  if (cols < 1) cols = 1;
+
+                  /* First pixel: uniform */
+                  palette_y_map[0] = (unsigned char)stbi_avif__av1_read_uniform(&ctx->rd, (unsigned int)n);
+
+                  /* Wavefront decode */
+                  for (i = 1; i < rows + cols - 1; ++i) {
+                     int jstart = i < cols - 1 ? i : cols - 1;
+                     int jend = i - rows + 1 > 0 ? i - rows + 1 : 0;
+                     for (j = jstart; j >= jend; --j) {
+                        int r = i - j, c = j;
+                        int nb[3], scores[8], k, max_idx, max_score;
+                        unsigned char color_order[8];
+                        int color_ctx, color_idx, ctx_hash;
+
+                        nb[0] = (c - 1 >= 0) ? (int)palette_y_map[r * plane_w + c - 1] : -1;
+                        nb[1] = (c - 1 >= 0 && r - 1 >= 0) ? (int)palette_y_map[(r-1) * plane_w + c - 1] : -1;
+                        nb[2] = (r - 1 >= 0) ? (int)palette_y_map[(r-1) * plane_w + c] : -1;
+
+                        for (k = 0; k < 8; ++k) { scores[k] = 0; color_order[k] = (unsigned char)k; }
+                        for (k = 0; k < 3; ++k)
+                           if (nb[k] >= 0) scores[nb[k]] += weights[k];
+
+                        /* Sort top 3 by score (descending) */
+                        for (k = 0; k < 3; ++k) {
+                           int m;
+                           max_score = scores[k]; max_idx = k;
+                           for (m = k + 1; m < n; ++m)
+                              if (scores[m] > max_score) { max_score = scores[m]; max_idx = m; }
+                           if (max_idx != k) {
+                              int tmp_s = scores[max_idx]; unsigned char tmp_c = color_order[max_idx];
+                              for (m = max_idx; m > k; --m) { scores[m] = scores[m-1]; color_order[m] = color_order[m-1]; }
+                              scores[k] = tmp_s; color_order[k] = tmp_c;
+                           }
+                        }
+
+                        ctx_hash = 0;
+                        for (k = 0; k < 3; ++k) ctx_hash += scores[k] * hash_muls[k];
+                        if (ctx_hash < 0 || ctx_hash > 8) return stbi_avif__fail("palette ctx_hash out of range");
+                        color_ctx = stbi_avif__av1_palette_color_index_ctx_lookup[ctx_hash];
+                        if (color_ctx < 0 || color_ctx >= 5) {
+                           fprintf(stderr, "BAD Y color_ctx=%d hash=%d r=%d c=%d n=%d nb=[%d,%d,%d] scores=[%d,%d,%d]\n",
+                              color_ctx, ctx_hash, r, c, n, nb[0], nb[1], nb[2], scores[0], scores[1], scores[2]);
+                           return stbi_avif__fail("palette color_ctx out of range");
+                        }
+
+                        color_idx = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                           ctx->palette_y_color_index_cdf[n - 2][color_ctx], n);
+                        palette_y_map[r * plane_w + c] = color_order[color_idx];
+                     }
+                  }
+                  /* Extend last col/row */
+                  if (cols < plane_w) {
+                     for (i = 0; i < rows; ++i)
+                        for (j = cols; j < plane_w; ++j)
+                           palette_y_map[i * plane_w + j] = palette_y_map[i * plane_w + cols - 1];
+                  }
+                  for (i = rows; i < (int)ph / 4; ++i)
+                     for (j = 0; j < plane_w; ++j)
+                        palette_y_map[i * plane_w + j] = palette_y_map[(rows - 1) * plane_w + j];
+               }
+            }
          }
          if (uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
+            unsigned int pal_uv_ctx = palette_y_size > 0 ? 1u : 0u;
             unsigned int pal_uv_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-               ctx->palette_uv_mode_cdf[0], 2); /* palette_size[0]==0 → ctx=0 */
-            if (pal_uv_flag)
-               return stbi_avif__fail("palette UV mode not supported");
+               ctx->palette_uv_mode_cdf[pal_uv_ctx], 2);
+            if (pal_uv_flag) {
+               /* Read palette UV size */
+               unsigned int pal_uv_size_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                  ctx->palette_uv_size_cdf[pal_bctx], 7);
+               palette_uv_size = (int)pal_uv_size_sym + 2;
+
+               /* Read U colors (no cache) */
+               {
+                  int n = palette_uv_size, idx = 0, bd = ctx->planes->bit_depth;
+                  palette_uv_u_colors[idx++] = (unsigned short)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bd);
+                  if (idx < n) {
+                     int min_bits = bd - 3;
+                     int bits = min_bits + (int)stbi_avif__av1_read_literal(&ctx->rd, 2);
+                     int range = (1 << bd) - (int)palette_uv_u_colors[idx - 1];
+                     for (; idx < n; ++idx) {
+                        int delta = (int)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bits);
+                        int val = (int)palette_uv_u_colors[idx - 1] + delta;
+                        if (val > (1 << bd) - 1) val = (1 << bd) - 1;
+                        palette_uv_u_colors[idx] = (unsigned short)val;
+                        range -= (val - (int)palette_uv_u_colors[idx - 1]);
+                        if (range > 0) {
+                           int log2r = 0, t = range;
+                           while (t > 1) { ++log2r; t >>= 1; }
+                           if ((1 << log2r) < range) ++log2r;
+                           if (log2r < bits) bits = log2r;
+                        } else {
+                           bits = 0;
+                        }
+                     }
+                  }
+               }
+
+               /* Read V colors */
+               {
+                  int n = palette_uv_size, bd = ctx->planes->bit_depth;
+                  unsigned int v_delta_flag = stbi_avif__av1_read_literal(&ctx->rd, 1);
+                  if (v_delta_flag) {
+                     int min_bits_v = bd - 4;
+                     int max_val = 1 << bd;
+                     int bits = min_bits_v + (int)stbi_avif__av1_read_literal(&ctx->rd, 2);
+                     int vi;
+                     palette_uv_v_colors[0] = (unsigned short)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bd);
+                     for (vi = 1; vi < n; ++vi) {
+                        int delta = (int)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bits);
+                        if (delta && stbi_avif__av1_read_literal(&ctx->rd, 1)) delta = -delta;
+                        {
+                           int val = (int)palette_uv_v_colors[vi - 1] + delta;
+                           if (val < 0) val += max_val;
+                           if (val >= max_val) val -= max_val;
+                           palette_uv_v_colors[vi] = (unsigned short)val;
+                        }
+                     }
+                  } else {
+                     int vi;
+                     for (vi = 0; vi < n; ++vi)
+                        palette_uv_v_colors[vi] = (unsigned short)stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)bd);
+                  }
+               }
+
+               /* Read UV color map — same wavefront as Y but on chroma dimensions */
+               {
+                  int n = palette_uv_size;
+                  int rows = (int)cph / 4;
+                  int cols = (int)cpw / 4;
+                  int plane_w = cols;
+                  int i, j;
+                  static const int weights[3] = { 2, 1, 2 };
+                  static const int hash_muls[3] = { 1, 2, 2 };
+                  if (rows < 1) rows = 1;
+                  if (cols < 1) cols = 1;
+
+                  palette_uv_map[0] = (unsigned char)stbi_avif__av1_read_uniform(&ctx->rd, (unsigned int)n);
+
+                  for (i = 1; i < rows + cols - 1; ++i) {
+                     int jstart = i < cols - 1 ? i : cols - 1;
+                     int jend = i - rows + 1 > 0 ? i - rows + 1 : 0;
+                     for (j = jstart; j >= jend; --j) {
+                        int r = i - j, c = j;
+                        int nb[3], scores[8], k, max_idx, max_score;
+                        unsigned char color_order[8];
+                        int color_ctx, color_idx, ctx_hash;
+
+                        nb[0] = (c - 1 >= 0) ? (int)palette_uv_map[r * plane_w + c - 1] : -1;
+                        nb[1] = (c - 1 >= 0 && r - 1 >= 0) ? (int)palette_uv_map[(r-1) * plane_w + c - 1] : -1;
+                        nb[2] = (r - 1 >= 0) ? (int)palette_uv_map[(r-1) * plane_w + c] : -1;
+
+                        for (k = 0; k < 8; ++k) { scores[k] = 0; color_order[k] = (unsigned char)k; }
+                        for (k = 0; k < 3; ++k)
+                           if (nb[k] >= 0) scores[nb[k]] += weights[k];
+
+                        for (k = 0; k < 3; ++k) {
+                           int m;
+                           max_score = scores[k]; max_idx = k;
+                           for (m = k + 1; m < n; ++m)
+                              if (scores[m] > max_score) { max_score = scores[m]; max_idx = m; }
+                           if (max_idx != k) {
+                              int tmp_s = scores[max_idx]; unsigned char tmp_c = color_order[max_idx];
+                              for (m = max_idx; m > k; --m) { scores[m] = scores[m-1]; color_order[m] = color_order[m-1]; }
+                              scores[k] = tmp_s; color_order[k] = tmp_c;
+                           }
+                        }
+
+                        ctx_hash = 0;
+                        for (k = 0; k < 3; ++k) ctx_hash += scores[k] * hash_muls[k];
+                        color_ctx = stbi_avif__av1_palette_color_index_ctx_lookup[ctx_hash];
+
+                        color_idx = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                           ctx->palette_uv_color_index_cdf[n - 2][color_ctx], n);
+                        palette_uv_map[r * plane_w + c] = color_order[color_idx];
+                     }
+                  }
+                  /* Extend last col/row */
+                  if (cols < plane_w) {
+                     for (i = 0; i < rows; ++i)
+                        for (j = cols; j < plane_w; ++j)
+                           palette_uv_map[i * plane_w + j] = palette_uv_map[i * plane_w + cols - 1];
+                  }
+                  for (i = rows; i < (int)cph / 4; ++i)
+                     for (j = 0; j < plane_w; ++j)
+                        palette_uv_map[i * plane_w + j] = palette_uv_map[(rows - 1) * plane_w + j];
+               }
+            }
          }
       }
    }
 
    /* Filter intra mode info */
    if (ctx->seq->enable_filter_intra && y_mode == 0u
+       && palette_y_size == 0
        && pw <= 32u && ph <= 32u) {
       unsigned int fi_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
          ctx->filter_intra_cdfs[block_size < 22 ? block_size : 0], 2);
@@ -8169,7 +8478,24 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       unsigned int min_log2 = log2w < log2h ? log2w : log2h;
       unsigned int max_tx;
 
-      /* Compute largest TX size that fits */
+      /* AOM-matching tables for TX size decode */
+      static const unsigned char bsize_tx_cat[22] = {
+         0,0,0,0,1,1,1,2,2,2,3,3,3,3,3,3,1,1,2,2,3,3
+      };
+      static const unsigned char bsize_max_depth[22] = {
+         0,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
+      };
+      /* Adjusted square TX for each (block_size, depth): depth 0,1,2 */
+      static const unsigned char bsize_depth_sq_tx[22][3] = {
+         {0,0,0},{0,0,0},{0,0,0},{1,0,0},{1,1,0},{1,1,0},{2,1,0},
+         {2,2,1},{2,2,1},{3,2,1},{3,3,2},{3,3,2},{3,3,2},{3,3,2},
+         {3,3,2},{3,3,2},{0,0,0},{0,0,0},{1,1,1},{1,1,1},{2,2,2},{2,2,2}
+      };
+
+      if (py < 32u) fprintf(stderr, "  TX_ENTRY: log2w=%u log2h=%u min=%u txms=%d skip=%d bs=%d\n",
+         log2w, log2h, min_log2, ctx->tx_mode_select, skip, block_size);
+
+      /* Compute largest square TX size that fits for actual transform */
       if (min_log2 >= 5) max_tx = STBI_AVIF_TX_32X32;
       else if (min_log2 >= 4) max_tx = STBI_AVIF_TX_16X16;
       else if (min_log2 >= 3) max_tx = STBI_AVIF_TX_8X8;
@@ -8177,27 +8503,21 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       tx_size = max_tx;
 
       /* Read TX size from bitstream when tx_mode_select && !skip && block > 4x4 */
-      if (ctx->tx_mode_select && !skip && max_tx > STBI_AVIF_TX_4X4) {
+      if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4) {
          int tx_cat, max_depths, num_syms, depth;
          int tx_ctx = 0; /* simplified: context 0 */
 
-         /* Map max_tx to category: 8x8→0, 16x16→1, 32x32→2(or 3 for 64+ block) */
-         if (block_size >= STBI_AVIF_BLOCK_64X64) tx_cat = 3;
-         else if (max_tx >= STBI_AVIF_TX_32X32) tx_cat = 2;
-         else if (max_tx >= STBI_AVIF_TX_16X16) tx_cat = 1;
-         else tx_cat = 0;
-
-         /* max_depths: 0 for 4x4, 1 for 8x8, 2 for 16x16+ */
-         if (tx_cat == 0) max_depths = 1;
-         else max_depths = 2;
+         tx_cat = (int)bsize_tx_cat[block_size < 22 ? block_size : 0];
+         max_depths = (int)bsize_max_depth[block_size < 22 ? block_size : 0];
          num_syms = max_depths + 1;
 
          depth = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
             ctx->tx_size_cdf[tx_cat][tx_ctx], num_syms);
 
-         /* Convert depth to tx_size: depth 0 = max, depth d = d splits down */
-         tx_size = max_tx;
-         { int d; for (d = 0; d < depth; ++d) { if (tx_size > STBI_AVIF_TX_4X4) --tx_size; } }
+         tx_size = (unsigned int)bsize_depth_sq_tx[block_size < 22 ? block_size : 0]
+                                                  [depth < 3 ? depth : 2];
+         if (py < 32u) fprintf(stderr, "  TX_SIZE: max_tx=%u depth=%d final_tx=%u cat=%d num_syms=%d\n",
+            max_tx, depth, tx_size, tx_cat, num_syms);
       }
    }
 
@@ -8217,18 +8537,54 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    /* ======== PREDICTION ======== */
 
    /* Predict Y */
-   stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
-      ctx->planes->width, ctx->planes->height,
-      px, py, pw, ph, ctx->planes->bit_depth, y_mode);
+   if (palette_y_size > 0) {
+      /* Fill Y from palette color map */
+      unsigned int mi_r, mi_c;
+      int map_w = (int)pw / 4;
+      if (map_w < 1) map_w = 1;
+      for (mi_r = 0; mi_r < ph / 4u; ++mi_r) {
+         for (mi_c = 0; mi_c < pw / 4u; ++mi_c) {
+            unsigned short color = palette_y_colors[palette_y_map[mi_r * map_w + mi_c]];
+            unsigned int sr, sc;
+            for (sr = 0; sr < 4u && py + mi_r * 4u + sr < ctx->planes->height; ++sr)
+               for (sc = 0; sc < 4u && px + mi_c * 4u + sc < ctx->planes->width; ++sc)
+                  ctx->planes->y[(py + mi_r * 4u + sr) * ctx->planes->width + px + mi_c * 4u + sc] = color;
+         }
+      }
+   } else {
+      stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
+         ctx->planes->width, ctx->planes->height,
+         px, py, pw, ph, ctx->planes->bit_depth, y_mode);
+   }
 
    /* Predict UV */
    if (cpw > 0u && cph > 0u) {
-      stbi_avif__av1_predict_block(ctx->planes->u, ctx->planes->cw,
-         ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
-         ctx->planes->bit_depth, uv_mode);
-      stbi_avif__av1_predict_block(ctx->planes->v, ctx->planes->cw,
-         ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
-         ctx->planes->bit_depth, uv_mode);
+      if (palette_uv_size > 0) {
+         /* Fill UV from palette color map */
+         unsigned int mi_r, mi_c;
+         int map_w = (int)cpw / 4;
+         if (map_w < 1) map_w = 1;
+         for (mi_r = 0; mi_r < cph / 4u; ++mi_r) {
+            for (mi_c = 0; mi_c < cpw / 4u; ++mi_c) {
+               unsigned short u_color = palette_uv_u_colors[palette_uv_map[mi_r * map_w + mi_c]];
+               unsigned short v_color = palette_uv_v_colors[palette_uv_map[mi_r * map_w + mi_c]];
+               unsigned int sr, sc;
+               for (sr = 0; sr < 4u && cpy + mi_r * 4u + sr < ctx->planes->ch; ++sr) {
+                  for (sc = 0; sc < 4u && cpx + mi_c * 4u + sc < ctx->planes->cw; ++sc) {
+                     ctx->planes->u[(cpy + mi_r * 4u + sr) * ctx->planes->cw + cpx + mi_c * 4u + sc] = u_color;
+                     ctx->planes->v[(cpy + mi_r * 4u + sr) * ctx->planes->cw + cpx + mi_c * 4u + sc] = v_color;
+                  }
+               }
+            }
+         }
+      } else {
+         stbi_avif__av1_predict_block(ctx->planes->u, ctx->planes->cw,
+            ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
+            ctx->planes->bit_depth, uv_mode);
+         stbi_avif__av1_predict_block(ctx->planes->v, ctx->planes->cw,
+            ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
+            ctx->planes->bit_depth, uv_mode);
+      }
    }
 
    /* ======== RESIDUAL ======== */
@@ -8251,7 +8607,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          { 2, 4, 4, 4, 5 }, { 3, 5, 5, 5, 6 }
       };
 
-      /* Y residual */
+      /* Y residual (skip if palette) */
+      if (palette_y_size == 0)
       for (tx_row = 0; tx_row < ph; tx_row += tx_sz) {
          for (tx_col = 0; tx_col < pw; tx_col += tx_sz) {
             unsigned int txb_skip;
@@ -8296,6 +8653,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
+            if (py < 32u) fprintf(stderr, "  TXB row=%u col=%u txsz=%u skip=%u ctx=%d\n",
+               tx_row, tx_col, tx_sz, txb_skip, txb_skip_ctx);
             if (!txb_skip) {
                unsigned int tx_type_sym = 0;
                int eob, cul_level = 0;
@@ -8308,7 +8667,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   else if (ext_tx_set == 2)
                      tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                         ctx->intra_tx_cdf_set2[tx_size < 4 ? tx_size : 3][y_mode < 13 ? y_mode : 0], 5);
+                  if (py < 32u) fprintf(stderr, "  TX_TYPE: ext_set=%d sym=%u txsz=%u\n", ext_tx_set, tx_type_sym, tx_size);
                }
+               if (py < 32u) fprintf(stderr, "  TX_TYPE_FINAL: sym=%u reduced=%d\n", tx_type_sym, ctx->reduced_tx_set);
                eob = stbi_avif__av1_read_coeffs_after_skip(ctx, 0, (int)tx_size, (int)tx_type_sym,
                   coeffs, ctx->dc_qstep_y, ctx->ac_qstep_y, dc_sign_ctx_y, &cul_level);
                /* Update entropy context with cul_level */
@@ -8316,11 +8677,18 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   ctx->above_entropy[0][mi_tx_col + ti] = (unsigned char)cul_level;
                for (ti = 0; ti < tx_h_mi && (mi_tx_row % sb_mi_val) + ti < sb_mi_val; ti++)
                   ctx->left_entropy[0][(mi_tx_row % sb_mi_val) + ti] = (unsigned char)cul_level;
-               if (eob > 0)
+               if (eob > 0) {
+                  if (py < 32u) fprintf(stderr, "  RECON: dc_coeff=%d pred_at=(%u,%u) pred_val=%u\n",
+                     coeffs[0], px+tx_col, py+tx_row,
+                     (unsigned)ctx->planes->y[(py+tx_row)*ctx->planes->width+(px+tx_col)]);
                   stbi_avif__av1_reconstruct_tx_block(ctx->planes->y, ctx->planes->width,
                      ctx->planes->width, ctx->planes->height,
                      px + tx_col, py + tx_row, tx_sz, tx_sz, coeffs, (int)tx_size,
                      ctx->planes->bit_depth);
+                  if (py < 32u) fprintf(stderr, "  AFTER_RECON: val_at=(%u,%u)=%u\n",
+                     px+tx_col, py+tx_row,
+                     (unsigned)ctx->planes->y[(py+tx_row)*ctx->planes->width+(px+tx_col)]);
+               }
             } else {
                /* txb_skip: zero entropy ctx */
                for (ti = 0; ti < tx_w_mi && mi_tx_col + ti < ctx->mi_cols; ti++)
@@ -8331,8 +8699,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
 
-      /* U and V residual */
-      if (cpw > 0u && cph > 0u) {
+      /* U and V residual (skip if palette) */
+      if (cpw > 0u && cph > 0u && palette_uv_size == 0) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_sz / 4u;
          unsigned int uv_h_mi = uv_tx_sz / 4u;
@@ -8470,6 +8838,35 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
       if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row, mi_col, block_size)) return 0;
       stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, block_size, block_size);
       return 1;
+   }
+
+   /* AV1 spec: if block extends past frame edge, force split (no symbol read).
+    * For 8x8 blocks that extend: PARTITION_NONE is forced (handled above). */
+   {
+      int extends_right = (mi_col + bw4) > ctx->mi_cols;
+      int extends_down  = (mi_row + bh4) > ctx->mi_rows;
+      if (extends_right || extends_down) {
+         /* Force split */
+         sub_size = block_size - 3;
+         if (sub_size < 0) sub_size = 0;
+         if (block_size == STBI_AVIF_BLOCK_8X8) {
+            /* 8x8 that extends: just decode the visible sub-blocks */
+            if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row, mi_col, sub_size)) return 0;
+            if (mi_col + bw4/2u < ctx->mi_cols)
+               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row, mi_col + bw4/2u, sub_size)) return 0;
+            if (mi_row + bh4/2u < ctx->mi_rows)
+               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row + bh4/2u, mi_col, sub_size)) return 0;
+            if (mi_col + bw4/2u < ctx->mi_cols && mi_row + bh4/2u < ctx->mi_rows)
+               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row + bh4/2u, mi_col + bw4/2u, sub_size)) return 0;
+            stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, sub_size, block_size);
+         } else {
+            if (!stbi_avif__av1_decode_partition(ctx, mi_row,          mi_col,          sub_size)) return 0;
+            if (!stbi_avif__av1_decode_partition(ctx, mi_row,          mi_col + bw4/2u, sub_size)) return 0;
+            if (!stbi_avif__av1_decode_partition(ctx, mi_row + bh4/2u, mi_col,          sub_size)) return 0;
+            if (!stbi_avif__av1_decode_partition(ctx, mi_row + bh4/2u, mi_col + bw4/2u, sub_size)) return 0;
+         }
+         return 1;
+      }
    }
 
    partition = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
@@ -8770,6 +9167,10 @@ static unsigned char *stbi_avif__av1_decode(
    memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
    memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
    memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
+   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
+   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
+   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
+   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
    memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
    memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
 
