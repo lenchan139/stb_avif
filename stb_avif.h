@@ -1665,9 +1665,9 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
    for (i = 0; i < nsyms - 1; ++i)
    {
       if (i < symbol)
-         cdf[i] += (unsigned short)((32768u - cdf[i]) >> rate_shift);
-      else
          cdf[i] -= (unsigned short)(cdf[i] >> rate_shift);
+      else
+         cdf[i] += (unsigned short)((32768u - cdf[i]) >> rate_shift);
    }
 
    if (count < 32)
@@ -6454,10 +6454,15 @@ static const unsigned short stbi_avif__av1_scan_32x32[1024] = {
 #define STBI_AVIF_TX_64X64 4
 
 /* Mapping from TX size to ext_tx_set for intra */
-/* Set 0: only DCT_DCT, Set 1: 7 types, Set 2: 5 types */
-static const int stbi_avif__av1_ext_tx_set_intra[5] = { 2, 1, 1, 0, 0 };
+/* Set 0: only DCT_DCT, Set 1: 7 types (DTT4_IDTX_1DDCT), Set 2: 5 types (DTT4_IDTX) */
+static const int stbi_avif__av1_ext_tx_set_intra[5] = { 1, 1, 2, 0, 0 };
 /* Number of TX types per set: set0=1, set1=7, set2=5 */
 static const int stbi_avif__av1_num_tx_types[3] = { 1, 7, 5 };
+/* av1_ext_tx_inv: CDF symbol → TX_TYPE for each ext_tx_set
+ * Set 1 (DTT4_IDTX_1DDCT, 7 syms): from av1_ext_tx_inv[3]
+ * Set 2 (DTT4_IDTX, 5 syms): from av1_ext_tx_inv[2] */
+static const int stbi_avif__av1_ext_tx_inv_set1[7] = { 9, 0, 10, 11, 3, 1, 2 };
+static const int stbi_avif__av1_ext_tx_inv_set2[5] = { 9, 0, 3, 1, 2 };
 
 /* Map base_q_idx to TOKEN_CDF_Q_CTX (0-3) */
 static int stbi_avif__av1_get_q_ctx(unsigned int base_q_idx)
@@ -7606,54 +7611,278 @@ static void stbi_avif__av1_idct32(const int *input, int *output)
    output[31] = step[0] - step[31];
 }
 
+/* ---- IADST (Asymmetric DST) ---- */
+
+static const int stbi_avif__sinpi[5] = { 0, 1321, 2482, 3344, 3803 };
+
+static void stbi_avif__av1_iadst4(const int *input, int *output)
+{
+   const int *s = stbi_avif__sinpi;
+   long x0 = input[0], x1 = input[1], x2 = input[2], x3 = input[3];
+   long s0, s1, s2, s3, s4, s5, s6, s7;
+   if (!(x0 | x1 | x2 | x3)) { output[0]=output[1]=output[2]=output[3]=0; return; }
+   s0 = s[1] * x0; s1 = s[2] * x0; s2 = s[3] * x1;
+   s3 = s[4] * x2; s4 = s[1] * x2; s5 = s[2] * x3; s6 = s[4] * x3;
+   s7 = (x0 - x2) + x3;
+   s0 = s0 + s3; s1 = s1 - s4; s3 = s2; s2 = s[3] * s7;
+   s0 = s0 + s5; s1 = s1 - s6;
+   x0 = s0 + s3; x1 = s1 + s3; x2 = s2; x3 = s0 + s1 - s3;
+   output[0] = (int)((x0 + (1L << (COS_BIT-1))) >> COS_BIT);
+   output[1] = (int)((x1 + (1L << (COS_BIT-1))) >> COS_BIT);
+   output[2] = (int)((x2 + (1L << (COS_BIT-1))) >> COS_BIT);
+   output[3] = (int)((x3 + (1L << (COS_BIT-1))) >> COS_BIT);
+}
+
+static void stbi_avif__av1_iadst8(const int *input, int *output)
+{
+   const int *c = stbi_avif__cospi;
+   int bf1[8], step[8];
+   /* stage 1: input reorder */
+   bf1[0]=input[7]; bf1[1]=input[0]; bf1[2]=input[5]; bf1[3]=input[2];
+   bf1[4]=input[3]; bf1[5]=input[4]; bf1[6]=input[1]; bf1[7]=input[6];
+   /* stage 2 */
+   step[0] = STBI_AVIF_HALF_BTF(c[4],  bf1[0], c[60], bf1[1], COS_BIT);
+   step[1] = STBI_AVIF_HALF_BTF(c[60], bf1[0],-c[4],  bf1[1], COS_BIT);
+   step[2] = STBI_AVIF_HALF_BTF(c[20], bf1[2], c[44], bf1[3], COS_BIT);
+   step[3] = STBI_AVIF_HALF_BTF(c[44], bf1[2],-c[20], bf1[3], COS_BIT);
+   step[4] = STBI_AVIF_HALF_BTF(c[36], bf1[4], c[28], bf1[5], COS_BIT);
+   step[5] = STBI_AVIF_HALF_BTF(c[28], bf1[4],-c[36], bf1[5], COS_BIT);
+   step[6] = STBI_AVIF_HALF_BTF(c[52], bf1[6], c[12], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[12], bf1[6],-c[52], bf1[7], COS_BIT);
+   /* stage 3 */
+   bf1[0]=step[0]+step[4]; bf1[1]=step[1]+step[5]; bf1[2]=step[2]+step[6]; bf1[3]=step[3]+step[7];
+   bf1[4]=step[0]-step[4]; bf1[5]=step[1]-step[5]; bf1[6]=step[2]-step[6]; bf1[7]=step[3]-step[7];
+   /* stage 4 */
+   step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
+   step[4] = STBI_AVIF_HALF_BTF(c[16], bf1[4], c[48], bf1[5], COS_BIT);
+   step[5] = STBI_AVIF_HALF_BTF(c[48], bf1[4],-c[16], bf1[5], COS_BIT);
+   step[6] = STBI_AVIF_HALF_BTF(-c[48],bf1[6], c[16], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[16], bf1[6], c[48], bf1[7], COS_BIT);
+   /* stage 5 */
+   bf1[0]=step[0]+step[2]; bf1[1]=step[1]+step[3]; bf1[2]=step[0]-step[2]; bf1[3]=step[1]-step[3];
+   bf1[4]=step[4]+step[6]; bf1[5]=step[5]+step[7]; bf1[6]=step[4]-step[6]; bf1[7]=step[5]-step[7];
+   /* stage 6 */
+   step[0]=bf1[0]; step[1]=bf1[1];
+   step[2] = STBI_AVIF_HALF_BTF(c[32], bf1[2], c[32], bf1[3], COS_BIT);
+   step[3] = STBI_AVIF_HALF_BTF(c[32], bf1[2],-c[32], bf1[3], COS_BIT);
+   step[4]=bf1[4]; step[5]=bf1[5];
+   step[6] = STBI_AVIF_HALF_BTF(c[32], bf1[6], c[32], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[32], bf1[6],-c[32], bf1[7], COS_BIT);
+   /* stage 7: output with sign flips */
+   output[0]= step[0]; output[1]=-step[4]; output[2]= step[6]; output[3]=-step[2];
+   output[4]= step[3]; output[5]=-step[7]; output[6]= step[5]; output[7]=-step[1];
+}
+
+static void stbi_avif__av1_iadst16(const int *input, int *output)
+{
+   const int *c = stbi_avif__cospi;
+   int bf1[16], step[16];
+   /* stage 1 */
+   bf1[0]=input[15]; bf1[1]=input[0];  bf1[2]=input[13]; bf1[3]=input[2];
+   bf1[4]=input[11]; bf1[5]=input[4];  bf1[6]=input[9];  bf1[7]=input[6];
+   bf1[8]=input[7];  bf1[9]=input[8];  bf1[10]=input[5]; bf1[11]=input[10];
+   bf1[12]=input[3]; bf1[13]=input[12]; bf1[14]=input[1]; bf1[15]=input[14];
+   /* stage 2 */
+   step[0] = STBI_AVIF_HALF_BTF(c[2],  bf1[0], c[62], bf1[1], COS_BIT);
+   step[1] = STBI_AVIF_HALF_BTF(c[62], bf1[0],-c[2],  bf1[1], COS_BIT);
+   step[2] = STBI_AVIF_HALF_BTF(c[10], bf1[2], c[54], bf1[3], COS_BIT);
+   step[3] = STBI_AVIF_HALF_BTF(c[54], bf1[2],-c[10], bf1[3], COS_BIT);
+   step[4] = STBI_AVIF_HALF_BTF(c[18], bf1[4], c[46], bf1[5], COS_BIT);
+   step[5] = STBI_AVIF_HALF_BTF(c[46], bf1[4],-c[18], bf1[5], COS_BIT);
+   step[6] = STBI_AVIF_HALF_BTF(c[26], bf1[6], c[38], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[38], bf1[6],-c[26], bf1[7], COS_BIT);
+   step[8] = STBI_AVIF_HALF_BTF(c[34], bf1[8], c[30], bf1[9], COS_BIT);
+   step[9] = STBI_AVIF_HALF_BTF(c[30], bf1[8],-c[34], bf1[9], COS_BIT);
+   step[10]= STBI_AVIF_HALF_BTF(c[42], bf1[10],c[22], bf1[11],COS_BIT);
+   step[11]= STBI_AVIF_HALF_BTF(c[22], bf1[10],-c[42],bf1[11],COS_BIT);
+   step[12]= STBI_AVIF_HALF_BTF(c[50], bf1[12],c[14], bf1[13],COS_BIT);
+   step[13]= STBI_AVIF_HALF_BTF(c[14], bf1[12],-c[50],bf1[13],COS_BIT);
+   step[14]= STBI_AVIF_HALF_BTF(c[58], bf1[14],c[6],  bf1[15],COS_BIT);
+   step[15]= STBI_AVIF_HALF_BTF(c[6],  bf1[14],-c[58],bf1[15],COS_BIT);
+   /* stage 3 */
+   bf1[0]=step[0]+step[8];   bf1[1]=step[1]+step[9];
+   bf1[2]=step[2]+step[10];  bf1[3]=step[3]+step[11];
+   bf1[4]=step[4]+step[12];  bf1[5]=step[5]+step[13];
+   bf1[6]=step[6]+step[14];  bf1[7]=step[7]+step[15];
+   bf1[8]=step[0]-step[8];   bf1[9]=step[1]-step[9];
+   bf1[10]=step[2]-step[10]; bf1[11]=step[3]-step[11];
+   bf1[12]=step[4]-step[12]; bf1[13]=step[5]-step[13];
+   bf1[14]=step[6]-step[14]; bf1[15]=step[7]-step[15];
+   /* stage 4 */
+   step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
+   step[4]=bf1[4]; step[5]=bf1[5]; step[6]=bf1[6]; step[7]=bf1[7];
+   step[8] = STBI_AVIF_HALF_BTF(c[8],  bf1[8], c[56], bf1[9], COS_BIT);
+   step[9] = STBI_AVIF_HALF_BTF(c[56], bf1[8],-c[8],  bf1[9], COS_BIT);
+   step[10]= STBI_AVIF_HALF_BTF(c[40], bf1[10],c[24], bf1[11],COS_BIT);
+   step[11]= STBI_AVIF_HALF_BTF(c[24], bf1[10],-c[40],bf1[11],COS_BIT);
+   step[12]= STBI_AVIF_HALF_BTF(-c[56],bf1[12],c[8],  bf1[13],COS_BIT);
+   step[13]= STBI_AVIF_HALF_BTF(c[8],  bf1[12],c[56], bf1[13],COS_BIT);
+   step[14]= STBI_AVIF_HALF_BTF(-c[24],bf1[14],c[40], bf1[15],COS_BIT);
+   step[15]= STBI_AVIF_HALF_BTF(c[40], bf1[14],c[24], bf1[15],COS_BIT);
+   /* stage 5 */
+   bf1[0]=step[0]+step[4];   bf1[1]=step[1]+step[5];
+   bf1[2]=step[2]+step[6];   bf1[3]=step[3]+step[7];
+   bf1[4]=step[0]-step[4];   bf1[5]=step[1]-step[5];
+   bf1[6]=step[2]-step[6];   bf1[7]=step[3]-step[7];
+   bf1[8]=step[8]+step[12];  bf1[9]=step[9]+step[13];
+   bf1[10]=step[10]+step[14]; bf1[11]=step[11]+step[15];
+   bf1[12]=step[8]-step[12]; bf1[13]=step[9]-step[13];
+   bf1[14]=step[10]-step[14]; bf1[15]=step[11]-step[15];
+   /* stage 6 */
+   step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
+   step[4] = STBI_AVIF_HALF_BTF(c[16], bf1[4], c[48], bf1[5], COS_BIT);
+   step[5] = STBI_AVIF_HALF_BTF(c[48], bf1[4],-c[16], bf1[5], COS_BIT);
+   step[6] = STBI_AVIF_HALF_BTF(-c[48],bf1[6], c[16], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[16], bf1[6], c[48], bf1[7], COS_BIT);
+   step[8]=bf1[8]; step[9]=bf1[9]; step[10]=bf1[10]; step[11]=bf1[11];
+   step[12]= STBI_AVIF_HALF_BTF(c[16], bf1[12],c[48], bf1[13],COS_BIT);
+   step[13]= STBI_AVIF_HALF_BTF(c[48], bf1[12],-c[16],bf1[13],COS_BIT);
+   step[14]= STBI_AVIF_HALF_BTF(-c[48],bf1[14],c[16], bf1[15],COS_BIT);
+   step[15]= STBI_AVIF_HALF_BTF(c[16], bf1[14],c[48], bf1[15],COS_BIT);
+   /* stage 7 */
+   bf1[0]=step[0]+step[2];   bf1[1]=step[1]+step[3];
+   bf1[2]=step[0]-step[2];   bf1[3]=step[1]-step[3];
+   bf1[4]=step[4]+step[6];   bf1[5]=step[5]+step[7];
+   bf1[6]=step[4]-step[6];   bf1[7]=step[5]-step[7];
+   bf1[8]=step[8]+step[10];  bf1[9]=step[9]+step[11];
+   bf1[10]=step[8]-step[10]; bf1[11]=step[9]-step[11];
+   bf1[12]=step[12]+step[14]; bf1[13]=step[13]+step[15];
+   bf1[14]=step[12]-step[14]; bf1[15]=step[13]-step[15];
+   /* stage 8 */
+   step[0]=bf1[0]; step[1]=bf1[1];
+   step[2] = STBI_AVIF_HALF_BTF(c[32], bf1[2], c[32], bf1[3], COS_BIT);
+   step[3] = STBI_AVIF_HALF_BTF(c[32], bf1[2],-c[32], bf1[3], COS_BIT);
+   step[4]=bf1[4]; step[5]=bf1[5];
+   step[6] = STBI_AVIF_HALF_BTF(c[32], bf1[6], c[32], bf1[7], COS_BIT);
+   step[7] = STBI_AVIF_HALF_BTF(c[32], bf1[6],-c[32], bf1[7], COS_BIT);
+   step[8]=bf1[8]; step[9]=bf1[9];
+   step[10]= STBI_AVIF_HALF_BTF(c[32], bf1[10],c[32], bf1[11],COS_BIT);
+   step[11]= STBI_AVIF_HALF_BTF(c[32], bf1[10],-c[32],bf1[11],COS_BIT);
+   step[12]=bf1[12]; step[13]=bf1[13];
+   step[14]= STBI_AVIF_HALF_BTF(c[32], bf1[14],c[32], bf1[15],COS_BIT);
+   step[15]= STBI_AVIF_HALF_BTF(c[32], bf1[14],-c[32],bf1[15],COS_BIT);
+   /* stage 9: output with sign flips */
+   output[0] = step[0];  output[1] =-step[8];  output[2] = step[12]; output[3] =-step[4];
+   output[4] = step[6];  output[5] =-step[14]; output[6] = step[10]; output[7] =-step[2];
+   output[8] = step[3];  output[9] =-step[11]; output[10]= step[15]; output[11]=-step[7];
+   output[12]= step[5];  output[13]=-step[13]; output[14]= step[9];  output[15]=-step[1];
+}
+
+/* ---- Identity transforms ---- */
+#define STBI_AVIF_NEW_SQRT2 5793
+#define STBI_AVIF_NEW_SQRT2_BITS 12
+
+static void stbi_avif__av1_iidentity4(const int *input, int *output)
+{
+   int i;
+   for (i = 0; i < 4; ++i)
+      output[i] = (int)(((long)STBI_AVIF_NEW_SQRT2 * input[i] + (1L << (STBI_AVIF_NEW_SQRT2_BITS-1))) >> STBI_AVIF_NEW_SQRT2_BITS);
+}
+static void stbi_avif__av1_iidentity8(const int *input, int *output)
+{
+   int i;
+   for (i = 0; i < 8; ++i) output[i] = input[i] * 2;
+}
+static void stbi_avif__av1_iidentity16(const int *input, int *output)
+{
+   int i;
+   for (i = 0; i < 16; ++i)
+      output[i] = (int)(((long)STBI_AVIF_NEW_SQRT2 * 2 * input[i] + (1L << (STBI_AVIF_NEW_SQRT2_BITS-1))) >> STBI_AVIF_NEW_SQRT2_BITS);
+}
+static void stbi_avif__av1_iidentity32(const int *input, int *output)
+{
+   int i;
+   for (i = 0; i < 32; ++i) output[i] = input[i] * 4;
+}
+
 /*
  * 2D inverse transform: row transform then column transform.
  * Input: coefficients in scan order (already descanned to 2D).
  * Output: residual block.
  */
-static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz)
+static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type)
 {
    int buf[32];
    int temp[32 * 32];
    int i, j;
    int row_shift;
-   void (*idct_fn)(const int *, int *);
+   void (*row_fn)(const int *, int *);
+   void (*col_fn)(const int *, int *);
+   int ud_flip = 0, lr_flip = 0;
 
-   if (sz <= 4)       { idct_fn = stbi_avif__av1_idct4;  row_shift = 0; }
-   else if (sz <= 8)  { idct_fn = stbi_avif__av1_idct8;  row_shift = 1; }
-   else if (sz <= 16) { idct_fn = stbi_avif__av1_idct16; row_shift = 2; }
-   else               { idct_fn = stbi_avif__av1_idct32; row_shift = 2; }
+   /* Determine row and column transform functions based on tx_type */
+   /* tx_type: 0=DCT_DCT, 1=ADST_DCT, 2=DCT_ADST, 3=ADST_ADST,
+    * 4=FLIPADST_DCT, 5=DCT_FLIPADST, 6=FLIPADST_FLIPADST,
+    * 7=ADST_FLIPADST, 8=FLIPADST_ADST, 9=IDTX, 10=V_DCT, 11=H_DCT */
+   /* "vertical" = column, "horizontal" = row in AOM naming */
+   /* Row transform (horizontal in AOM) */
+   switch (tx_type) {
+      case 2: case 5: case 7:    /* row=ADST or FLIPADST(row mirrors) */
+         if (sz <= 4)       row_fn = stbi_avif__av1_iadst4;
+         else if (sz <= 8)  row_fn = stbi_avif__av1_iadst8;
+         else if (sz <= 16) row_fn = stbi_avif__av1_iadst16;
+         else               row_fn = stbi_avif__av1_idct32; /* fallback */
+         if (tx_type == 5 || tx_type == 7) lr_flip = 1;
+         break;
+      case 9: case 10:          /* row=IDTX */
+         if (sz <= 4)       row_fn = stbi_avif__av1_iidentity4;
+         else if (sz <= 8)  row_fn = stbi_avif__av1_iidentity8;
+         else if (sz <= 16) row_fn = stbi_avif__av1_iidentity16;
+         else               row_fn = stbi_avif__av1_iidentity32;
+         break;
+      default:                   /* row=DCT */
+         if (sz <= 4)       row_fn = stbi_avif__av1_idct4;
+         else if (sz <= 8)  row_fn = stbi_avif__av1_idct8;
+         else if (sz <= 16) row_fn = stbi_avif__av1_idct16;
+         else               row_fn = stbi_avif__av1_idct32;
+         break;
+   }
+   /* Column transform (vertical in AOM) */
+   switch (tx_type) {
+      case 1: case 4: case 8:    /* col=ADST or FLIPADST(col mirrors) */
+         if (sz <= 4)       col_fn = stbi_avif__av1_iadst4;
+         else if (sz <= 8)  col_fn = stbi_avif__av1_iadst8;
+         else if (sz <= 16) col_fn = stbi_avif__av1_iadst16;
+         else               col_fn = stbi_avif__av1_idct32; /* fallback */
+         if (tx_type == 4 || tx_type == 8) ud_flip = 1;
+         break;
+      case 9: case 11:          /* col=IDTX */
+         if (sz <= 4)       col_fn = stbi_avif__av1_iidentity4;
+         else if (sz <= 8)  col_fn = stbi_avif__av1_iidentity8;
+         else if (sz <= 16) col_fn = stbi_avif__av1_iidentity16;
+         else               col_fn = stbi_avif__av1_iidentity32;
+         break;
+      default:                   /* col=DCT */
+         if (sz <= 4)       col_fn = stbi_avif__av1_idct4;
+         else if (sz <= 8)  col_fn = stbi_avif__av1_idct8;
+         else if (sz <= 16) col_fn = stbi_avif__av1_idct16;
+         else               col_fn = stbi_avif__av1_idct32;
+         break;
+   }
+
+   if (sz <= 4)       row_shift = 0;
+   else if (sz <= 8)  row_shift = 1;
+   else               row_shift = 2;
 
    /* Row transforms (AOM reads input column-major: input[c * rows + r]) */
    for (i = 0; i < sz; ++i) {
       int out[32];
       for (j = 0; j < sz; ++j) buf[j] = coeffs[j * sz + i];
-      idct_fn(buf, out);
-      if (i == 0) {
-         static int idct_dbg = 0;
-         if (idct_dbg < 1) {
-            fprintf(stderr, "  ROW0-IDCT: in[0]=%d in[1]=%d out[0]=%d out[1]=%d out[31]=%d row_shift=%d sz=%d\n",
-               buf[0], buf[1], out[0], out[1], out[sz-1], row_shift, sz);
-            idct_dbg++;
-         }
-      }
+      row_fn(buf, out);
       for (j = 0; j < sz; ++j) temp[i * sz + j] = STBI_AVIF_ROUND_SHIFT(out[j], row_shift);
    }
 
    /* Column transforms */
    for (j = 0; j < sz; ++j) {
       int out[32];
-      for (i = 0; i < sz; ++i) buf[i] = temp[i * sz + j];
-      idct_fn(buf, out);
-      if (j == 0) {
-         static int idct_dbg2 = 0;
-         if (idct_dbg2 < 1) {
-            fprintf(stderr, "  COL0-IDCT: in[0]=%d in[1]=%d out[0]=%d out[1]=%d out[31]=%d col_shift=4 sz=%d\n",
-               temp[0], temp[sz], out[0], out[1], out[sz-1], sz);
-            idct_dbg2++;
-         }
+      int src_col = lr_flip ? (sz - 1 - j) : j;
+      for (i = 0; i < sz; ++i) buf[i] = temp[i * sz + src_col];
+      col_fn(buf, out);
+      if (ud_flip) {
+         for (i = 0; i < sz; ++i) coeffs[i * sz + j] = STBI_AVIF_ROUND_SHIFT(out[sz - 1 - i], 4);
+      } else {
+         for (i = 0; i < sz; ++i) coeffs[i * sz + j] = STBI_AVIF_ROUND_SHIFT(out[i], 4);
       }
-      for (i = 0; i < sz; ++i) coeffs[i * sz + j] = STBI_AVIF_ROUND_SHIFT(out[i], 4);
    }
 }
 
@@ -8022,7 +8251,7 @@ static void stbi_avif__av1_reconstruct_tx_block(
    unsigned int plane_w, unsigned int plane_h,
    unsigned int bx, unsigned int by,
    unsigned int bw, unsigned int bh,
-   int *coeffs, int tx_sz,
+   int *coeffs, int tx_sz, int tx_type,
    unsigned int bit_depth)
 {
    unsigned int x, y;
@@ -8035,7 +8264,7 @@ static void stbi_avif__av1_reconstruct_tx_block(
       fprintf(stderr, "  PRE-IDCT bx=%u by=%u sz=%d coeff[0]=%d coeff[1]=%d\n",
          bx, by, sz, coeffs[0], coeffs[1]);
    }
-   stbi_avif__av1_inverse_transform_2d(coeffs, sz);
+   stbi_avif__av1_inverse_transform_2d(coeffs, sz, tx_type);
 
    if (stbi_avif__dbg_recon_cnt < 3) {
       fprintf(stderr, "  POST-IDCT bx=%u by=%u sz=%d coeff[0]=%d coeff[1]=%d coeff[sz]=%d\n",
@@ -8657,6 +8886,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                tx_row, tx_col, tx_sz, txb_skip, txb_skip_ctx);
             if (!txb_skip) {
                unsigned int tx_type_sym = 0;
+               int tx_type_actual = 0;
                int eob, cul_level = 0;
                /* Read TX type only if not all-zero (AV1 spec order) */
                if (!ctx->reduced_tx_set) {
@@ -8668,6 +8898,11 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                         ctx->intra_tx_cdf_set2[tx_size < 4 ? tx_size : 3][y_mode < 13 ? y_mode : 0], 5);
                   if (py < 32u) fprintf(stderr, "  TX_TYPE: ext_set=%d sym=%u txsz=%u\n", ext_tx_set, tx_type_sym, tx_size);
+                  /* Convert symbol to actual TX_TYPE */
+                  if (ext_tx_set == 1 && tx_type_sym < 7)
+                     tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym];
+                  else if (ext_tx_set == 2 && tx_type_sym < 5)
+                     tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym];
                }
                if (py < 32u) fprintf(stderr, "  TX_TYPE_FINAL: sym=%u reduced=%d\n", tx_type_sym, ctx->reduced_tx_set);
                eob = stbi_avif__av1_read_coeffs_after_skip(ctx, 0, (int)tx_size, (int)tx_type_sym,
@@ -8684,7 +8919,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   stbi_avif__av1_reconstruct_tx_block(ctx->planes->y, ctx->planes->width,
                      ctx->planes->width, ctx->planes->height,
                      px + tx_col, py + tx_row, tx_sz, tx_sz, coeffs, (int)tx_size,
-                     ctx->planes->bit_depth);
+                     tx_type_actual, ctx->planes->bit_depth);
                   if (py < 32u) fprintf(stderr, "  AFTER_RECON: val_at=(%u,%u)=%u\n",
                      px+tx_col, py+tx_row,
                      (unsigned)ctx->planes->y[(py+tx_row)*ctx->planes->width+(px+tx_col)]);
@@ -8762,7 +8997,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      stbi_avif__av1_reconstruct_tx_block(plane_buf, ctx->planes->cw,
                         ctx->planes->cw, ctx->planes->ch,
                         cpx + uv_tx_col, cpy + uv_tx_row, uv_tx_sz, uv_tx_sz,
-                        coeffs, (int)uv_tx_size, ctx->planes->bit_depth);
+                        coeffs, (int)uv_tx_size, 0, ctx->planes->bit_depth);
                }
             }
          }
