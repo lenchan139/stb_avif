@@ -6543,6 +6543,28 @@ static int stbi_avif__av1_get_q_ctx(unsigned int base_q_idx)
    return 3;
 }
 
+static unsigned int stbi_avif__av1_qindex_with_delta(unsigned int base_q_idx, int delta)
+{
+   int q = (int)base_q_idx + delta;
+   if (q < 0) return 0u;
+   if (q > 255) return 255u;
+   return (unsigned int)q;
+}
+
+static int stbi_avif__av1_dc_qlookup_value(unsigned int bit_depth, unsigned int qindex)
+{
+   if (bit_depth <= 8u)
+      return (int)stbi_avif__av1_dc_qlookup[qindex];
+   return (int)stbi_avif__av1_dc_qlookup_10[qindex];
+}
+
+static int stbi_avif__av1_ac_qlookup_value(unsigned int bit_depth, unsigned int qindex)
+{
+   if (bit_depth <= 8u)
+      return (int)stbi_avif__av1_ac_qlookup[qindex];
+   return (int)stbi_avif__av1_ac_qlookup_10[qindex];
+}
+
 /*
  * AV1 coefficient context functions — using padded level buffer.
  * The padded buffer has stride = (1 << bhl) + 4 (TX_PAD_HOR=4).
@@ -7055,8 +7077,10 @@ typedef struct
    int                           q_ctx;
    int                           dc_qstep_y;
    int                           ac_qstep_y;
-   int                           dc_qstep_uv;
-   int                           ac_qstep_uv;
+   int                           dc_qstep_u;
+   int                           ac_qstep_u;
+   int                           dc_qstep_v;
+   int                           ac_qstep_v;
    unsigned char                *above_modes;
    unsigned char                *left_modes;
    unsigned char                *above_partition_ctx;
@@ -9643,6 +9667,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          int p;
          for (p = 1; p <= 2; ++p) {
             unsigned short *plane_buf = (p == 1) ? ctx->planes->u : ctx->planes->v;
+            int dc_qstep_plane = (p == 1) ? ctx->dc_qstep_u : ctx->dc_qstep_v;
+            int ac_qstep_plane = (p == 1) ? ctx->ac_qstep_u : ctx->ac_qstep_v;
             for (uv_tx_row = 0; uv_tx_row < cph; uv_tx_row += uv_tx_szh) {
                for (uv_tx_col = 0; uv_tx_col < cpw; uv_tx_col += uv_tx_szw) {
                   unsigned int mi_tx_col_uv = (cpx + uv_tx_col) / 4u;
@@ -9696,7 +9722,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      uv_tx2dszctx,
                      uv_tx_ctx,
                      (int)uv_tx_szw, (int)uv_tx_szh,
-                     coeffs, ctx->dc_qstep_uv, ctx->ac_qstep_uv,
+                     coeffs, dc_qstep_plane, ac_qstep_plane,
                      txb_skip_ctx_uv, dc_sign_ctx_uv, &cul_level_uv);
                   if (cpy < 32u) fprintf(stderr, "  UV_COEFF p=%d bx=%u by=%u eob=%d rng=%u dif=%llu\n",
                      p, cpx+uv_tx_col, cpy+uv_tx_row, eob, ctx->rd.rng, ctx->rd.dif);
@@ -10092,7 +10118,7 @@ static unsigned char *stbi_avif__av1_decode(
    unsigned int sb_row_start, sb_row_end, sb_col_start, sb_col_end;
    unsigned int tile_row, tile_col;
    int q_ctx;
-   short dc_q, ac_q;
+   unsigned int qidx_y_dc, qidx_y_ac, qidx_u_dc, qidx_u_ac, qidx_v_dc, qidx_v_ac;
 
    memset(&ctx, 0, sizeof(ctx));
    q_ctx = stbi_avif__av1_get_q_ctx(fhdr->base_q_idx);
@@ -10101,17 +10127,19 @@ static unsigned char *stbi_avif__av1_decode(
 
    fprintf(stderr, "base_q_idx=%u q_ctx=%d bit_depth=%u reduced_tx_set=%d tx_mode_select=%d\n", fhdr->base_q_idx, q_ctx, seq->bit_depth, fhdr->reduced_tx_set, fhdr->tx_mode_select);
 
-   if (seq->bit_depth <= 8u) {
-      dc_q = stbi_avif__av1_dc_qlookup[fhdr->base_q_idx < 256u ? fhdr->base_q_idx : 255u];
-      ac_q = stbi_avif__av1_ac_qlookup[fhdr->base_q_idx < 256u ? fhdr->base_q_idx : 255u];
-   } else {
-      dc_q = stbi_avif__av1_dc_qlookup_10[fhdr->base_q_idx < 256u ? fhdr->base_q_idx : 255u];
-      ac_q = stbi_avif__av1_ac_qlookup_10[fhdr->base_q_idx < 256u ? fhdr->base_q_idx : 255u];
-   }
-   ctx.dc_qstep_y  = (int)dc_q;
-   ctx.ac_qstep_y  = (int)ac_q;
-   ctx.dc_qstep_uv = (int)dc_q;
-   ctx.ac_qstep_uv = (int)ac_q;
+   qidx_y_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, 0);
+   qidx_y_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_y_dc);
+   qidx_u_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_dc);
+   qidx_u_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_ac);
+   qidx_v_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_dc);
+   qidx_v_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_ac);
+
+   ctx.dc_qstep_y = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_y_dc);
+   ctx.ac_qstep_y = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_y_ac);
+   ctx.dc_qstep_u = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_u_dc);
+   ctx.ac_qstep_u = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_u_ac);
+   ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
+   ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
 
    memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
    memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
