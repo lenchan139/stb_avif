@@ -7489,8 +7489,8 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
                                             int alpha)
 {
    unsigned int x, y;
-   unsigned int sx_max = 1u << (unsigned int)planes->subx;
-   unsigned int sy_max = 1u << (unsigned int)planes->suby;
+   unsigned int subsample_x_factor = 1u << (unsigned int)planes->subx;
+   unsigned int subsample_y_factor = 1u << (unsigned int)planes->suby;
    unsigned long long y_sum = 0u;
    unsigned int y_count = 0u;
    int y_avg;
@@ -7519,28 +7519,31 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
          unsigned int sx, sy;
          unsigned int lx0 = px + (x << (unsigned int)planes->subx);
          unsigned int ly0 = py + (y << (unsigned int)planes->suby);
-         unsigned long l_sum = 0u;
+         unsigned long luma_sum = 0u;
          unsigned int l_count = 0u;
-         int l_avg;
+         int luma_avg;
          int ac;
+         int cfl_term;
          int delta;
          int pred;
 
-         for (sy = 0u; sy < sy_max && ly0 + sy < planes->height; ++sy)
+         for (sy = 0u; sy < subsample_y_factor && ly0 + sy < planes->height; ++sy)
          {
             const unsigned short *yrow = planes->y + (ly0 + sy) * planes->width + lx0;
-            for (sx = 0u; sx < sx_max && lx0 + sx < planes->width; ++sx)
+            for (sx = 0u; sx < subsample_x_factor && lx0 + sx < planes->width; ++sx)
             {
-               l_sum += yrow[sx];
+               luma_sum += yrow[sx];
                ++l_count;
             }
          }
          if (l_count == 0u)
             continue;
 
-         l_avg = (int)(l_sum / l_count);
-         ac = l_avg - y_avg;
-         delta = (alpha * ac + (alpha >= 0 ? 4 : -4)) >> 3;
+         luma_avg = (int)(luma_sum / l_count);
+         ac = luma_avg - y_avg;
+         cfl_term = alpha * ac;
+         /* Round signed alpha*ac to nearest while applying AV1 CFL /8 scale. */
+         delta = (cfl_term + (cfl_term >= 0 ? 4 : -4)) >> 3;
          pred = (int)crow[x] + delta;
          crow[x] = stbi_avif__av1_clip_sample(pred, planes->bit_depth);
       }
