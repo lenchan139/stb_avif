@@ -7076,6 +7076,146 @@ static int stbi_avif__av1_paeth_predictor(int a, int b, int c)
    return c;
 }
 
+/* AV1 filter_intra taps: [mode][8_output_positions][7_weights]
+ * For each 4x2 sub-block, compute 8 output pixels using 7 reference samples:
+ *   p0 = top-left diagonal
+ *   p1..p4 = 4 samples from the row above the top of the current sub-block
+ *   p5 = left sample at row 0 of sub-block
+ *   p6 = left sample at row 1 of sub-block
+ * Result = (sum of weights * refs + 8) >> 4, clamped to [0, maxval] */
+static const signed char stbi_avif__filter_intra_taps[5][8][7] = {
+   { /* FILTER_DC */
+      {-6, 10,  0,  0,  0, 12,  0},
+      {-5,  2, 10,  0,  0,  9,  0},
+      {-3,  1,  1, 10,  0,  7,  0},
+      {-3,  1,  1,  2, 10,  5,  0},
+      {-4,  6,  0,  0,  0,  2, 12},
+      {-3,  2,  6,  0,  0,  2,  9},
+      {-3,  2,  2,  6,  0,  2,  7},
+      {-3,  1,  2,  2,  6,  3,  5},
+   },
+   { /* FILTER_V */
+      {-10, 16,  0,  0,  0, 10,  0},
+      { -6,  0, 16,  0,  0,  6,  0},
+      { -4,  0,  0, 16,  0,  4,  0},
+      { -2,  0,  0,  0, 16,  2,  0},
+      {-10, 16,  0,  0,  0,  0, 10},
+      { -6,  0, 16,  0,  0,  0,  6},
+      { -4,  0,  0, 16,  0,  0,  4},
+      { -2,  0,  0,  0, 16,  0,  2},
+   },
+   { /* FILTER_H */
+      {-8,  8,  0,  0,  0, 16,  0},
+      {-8,  0,  8,  0,  0, 16,  0},
+      {-8,  0,  0,  8,  0, 16,  0},
+      {-8,  0,  0,  0,  8, 16,  0},
+      {-4,  4,  0,  0,  0,  0, 16},
+      {-4,  0,  4,  0,  0,  0, 16},
+      {-4,  0,  0,  4,  0,  0, 16},
+      {-4,  0,  0,  0,  4,  0, 16},
+   },
+   { /* FILTER_D157 */
+      {-2,  8,  0,  0,  0, 10,  0},
+      {-1,  3,  8,  0,  0,  6,  0},
+      {-1,  2,  3,  8,  0,  4,  0},
+      { 0,  1,  2,  3,  8,  2,  0},
+      {-1,  4,  0,  0,  0,  3, 10},
+      {-1,  3,  4,  0,  0,  4,  6},
+      {-1,  2,  3,  4,  0,  4,  4},
+      {-1,  2,  2,  3,  4,  3,  3},
+   },
+   { /* FILTER_PAETH */
+      {-12, 14,  0,  0,  0, 14,  0},
+      {-10,  0, 14,  0,  0, 12,  0},
+      { -9,  0,  0, 14,  0, 11,  0},
+      { -8,  0,  0,  0, 14, 10,  0},
+      {-10, 12,  0,  0,  0,  0, 14},
+      { -9,  1, 12,  0,  0,  0, 12},
+      { -8,  0,  0, 12,  0,  1, 11},
+      { -7,  0,  0,  1, 12,  1,  9},
+   },
+};
+
+/* Filter intra prediction.
+ * Processes the block in 4x2 sub-blocks left-to-right, top-to-bottom.
+ * For each sub-block uses the 7-tap filter from above to compute 8 output pixels.
+ * After writing a sub-block, uses its output as references for subsequent sub-blocks. */
+static void stbi_avif__av1_filter_intra_predict(unsigned short *plane, unsigned int stride,
+   unsigned int plane_w, unsigned int plane_h,
+   unsigned int bx, unsigned int by, unsigned int bw, unsigned int bh,
+   unsigned int filter_mode, unsigned int bit_depth)
+{
+   unsigned int sbr, sbc, xx, yy;
+   unsigned int maxv = (1u << bit_depth) - 1u;
+   unsigned int mid = 1u << (bit_depth - 1u);
+   const signed char (*taps)[7] = stbi_avif__filter_intra_taps[filter_mode < 5u ? filter_mode : 0u];
+
+   for (sbr = 0; sbr < bh; sbr += 2u) {
+      for (sbc = 0; sbc < bw; sbc += 4u) {
+         unsigned int py0 = by + sbr;
+         unsigned int px0 = bx + sbc;
+         int p0, p1, p2, p3, p4, p5, p6;
+
+         /* p0: top-left diagonal */
+         if (sbr == 0u && sbc == 0u) {
+            p0 = (by > 0u && bx > 0u) ? (int)plane[(by-1u)*stride + bx-1u] :
+                 (by > 0u) ? (int)plane[(by-1u)*stride + bx] :
+                 (bx > 0u) ? (int)plane[by*stride + bx-1u] : (int)mid;
+         } else if (sbr == 0u) {
+            /* sbc > 0, sbr == 0: top-left is already-written output at (py0-1, px0-1)
+             * but py0 = by, so py0-1 = by-1. If by==0, no row above, use same-row left */
+            p0 = (by > 0u) ? (int)plane[(by-1u)*stride + px0-1u]
+                           : (int)plane[by*stride + px0-1u]; /* fallback: same row, just left of us */
+         } else {
+            /* sbr > 0: top-left = sample just above-left of current top row, already written */
+            p0 = (int)plane[(py0-1u)*stride + (px0 > 0u ? px0-1u : px0)];
+         }
+
+         /* p1..p4: 4 samples from the row above current sub-block */
+#define GETTOP(cx) \
+         (sbr == 0u ? \
+            (by > 0u ? (int)plane[(by-1u)*stride + ((cx) < plane_w ? (cx) : plane_w-1u)] : \
+                       (bx > 0u ? (int)plane[by*stride + bx-1u] : (int)mid)) : \
+            (int)plane[(py0-1u)*stride + ((cx) < plane_w ? (cx) : plane_w-1u)])
+         p1 = GETTOP(px0);
+         p2 = GETTOP(px0 + 1u);
+         p3 = GETTOP(px0 + 2u);
+         p4 = GETTOP(px0 + 3u);
+#undef GETTOP
+
+         /* p5: left neighbor at row 0 */
+         p5 = (sbc == 0u) ?
+              (bx > 0u ? (int)plane[py0*stride + bx-1u] :
+                         (by > 0u ? (int)plane[(by-1u)*stride + bx] : (int)mid)) :
+              (int)plane[py0*stride + px0-1u];
+
+         /* p6: left neighbor at row 1 */
+         {
+            unsigned int row1 = (py0+1u < plane_h) ? py0+1u : py0;
+            p6 = (sbc == 0u) ?
+                 (bx > 0u ? (int)plane[row1*stride + bx-1u] :
+                            (by > 0u ? (int)plane[(by-1u)*stride + bx] : (int)mid)) :
+                 (int)plane[row1*stride + px0-1u];
+         }
+
+         /* Apply taps: positions 0..3=row0, 4..7=row1 */
+         for (yy = 0u; yy < 2u; yy++) {
+            for (xx = 0u; xx < 4u; xx++) {
+               const signed char *w = taps[yy * 4u + xx];
+               int acc = w[0]*p0 + w[1]*p1 + w[2]*p2 + w[3]*p3 + w[4]*p4 + w[5]*p5 + w[6]*p6;
+               unsigned int oy = py0 + yy;
+               unsigned int ox = px0 + xx;
+               acc = (acc + 8) >> 4;
+               if (acc < 0) acc = 0;
+               if (acc > (int)maxv) acc = (int)maxv;
+               if (oy < plane_h && ox < plane_w)
+                  plane[oy*stride + ox] = (unsigned short)acc;
+            }
+         }
+      }
+   }
+}
+
 static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int stride,
                                           unsigned int plane_w,
@@ -8903,22 +9043,22 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       }
    }
 
-   if (py < 32u) fprintf(stderr, "  post-pal: y_pal=%d uv_pal=%d rng=%u\n", palette_y_size, palette_uv_size, ctx->rd.rng);
+   if (py < 64u) fprintf(stderr, "  post-pal: y_pal=%d uv_pal=%d rng=%u bx=%u by=%u\n", palette_y_size, palette_uv_size, ctx->rd.rng, px, py);
 
    /* Filter intra mode info */
+   {
+   unsigned int fi_flag = 0, fi_mode = 0;
    if (ctx->seq->enable_filter_intra && y_mode == 0u
        && palette_y_size == 0
        && pw <= 32u && ph <= 32u) {
-      unsigned int fi_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+      fi_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
          ctx->filter_intra_cdfs[block_size < 22 ? block_size : 0], 2);
       if (fi_flag) {
-         stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+         fi_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
             ctx->filter_intra_mode_cdf, 5);
-         /* We don't actually implement filter_intra prediction for now,
-            just consume the bits to keep the stream aligned. */
       }
    }
-   if (py < 32u) fprintf(stderr, "  post-filterintra: rng=%u\n", ctx->rd.rng);
+   if (py < 64u) fprintf(stderr, "  post-filterintra: rng=%u bx=%u by=%u pw=%u ph=%u fi=%u fm=%u\n", ctx->rd.rng, px, py, pw, ph, fi_flag, fi_mode);
 
    /* TX size */
    {
@@ -9023,6 +9163,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   ctx->planes->y[(py + mi_r * 4u + sr) * ctx->planes->width + px + mi_c * 4u + sc] = color;
          }
       }
+   } else if (fi_flag) {
+      stbi_avif__av1_filter_intra_predict(ctx->planes->y, ctx->planes->width,
+         ctx->planes->width, ctx->planes->height,
+         px, py, pw, ph, fi_mode, ctx->planes->bit_depth);
    } else {
       stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
          ctx->planes->width, ctx->planes->height,
@@ -9219,14 +9363,15 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   /* Compute dc_sign_ctx for UV */
                   {
                      int dc_sign_sum = 0;
-                     for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols + 1u) / 2u; ti++) {
+                     for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols >> (unsigned)ctx->planes->subx); ti++) {
                         unsigned int s = ((unsigned char)ctx->above_entropy[p][mi_tx_col_uv + ti]) >> 3;
                         if (s <= 2) dc_sign_sum += dc_signs[s];
                      }
-                     for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % (sb_mi_val / 2u)) + ti < sb_mi_val / 2u; ti++) {
-                        unsigned int s = ((unsigned char)ctx->left_entropy[p][(mi_tx_row_uv % (sb_mi_val / 2u)) + ti]) >> 3;
+                     { unsigned int sb_uv_h = sb_mi_val >> (unsigned)ctx->planes->suby;
+                     for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % sb_uv_h) + ti < sb_uv_h; ti++) {
+                        unsigned int s = ((unsigned char)ctx->left_entropy[p][(mi_tx_row_uv % sb_uv_h) + ti]) >> 3;
                         if (s <= 2) dc_sign_sum += dc_signs[s];
-                     }
+                     }}
                      dc_sign_ctx_uv = dc_sign_contexts[dc_sign_sum + 32];
                   }
 
@@ -9234,12 +9379,13 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   {
                      int above_ec = 0, left_ec = 0;
                      /* For square TX: OR together txb_w_unit entries and check nonzero */
-                     for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols + 1u) / 2u; ti++)
+                     for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols >> (unsigned)ctx->planes->subx); ti++)
                         above_ec |= ctx->above_entropy[p][mi_tx_col_uv + ti];
                      above_ec = above_ec != 0 ? 1 : 0;
-                     for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % (sb_mi_val / 2u)) + ti < sb_mi_val / 2u; ti++)
-                        left_ec |= ctx->left_entropy[p][(mi_tx_row_uv % (sb_mi_val / 2u)) + ti];
-                     left_ec = left_ec != 0 ? 1 : 0;
+                     { unsigned int sb_uv_h = sb_mi_val >> (unsigned)ctx->planes->suby;
+                     for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % sb_uv_h) + ti < sb_uv_h; ti++)
+                        left_ec |= ctx->left_entropy[p][(mi_tx_row_uv % sb_uv_h) + ti];
+                     left_ec = left_ec != 0 ? 1 : 0; }
                      {
                         /* ctx_offset: 10 if plane_bsize > tx_bsize, else 7 */
                         int ctx_offset = (cpw_mi > uv_w_mi || cph_mi > uv_h_mi) ? 10 : 7;
@@ -9265,10 +9411,11 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      p, cpx+uv_tx_col, cpy+uv_tx_row, eob, ctx->rd.rng, ctx->rd.dif);
 
                   /* Update entropy context with cul_level */
-                  for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols + 1u) / 2u; ti++)
+                  for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols >> (unsigned)ctx->planes->subx); ti++)
                      ctx->above_entropy[p][mi_tx_col_uv + ti] = (unsigned char)cul_level_uv;
-                  for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % (sb_mi_val / 2u)) + ti < sb_mi_val / 2u; ti++)
-                     ctx->left_entropy[p][(mi_tx_row_uv % (sb_mi_val / 2u)) + ti] = (unsigned char)cul_level_uv;
+                  { unsigned int sb_uv_h = sb_mi_val >> (unsigned)ctx->planes->suby;
+                  for (ti = 0; ti < uv_h_mi && (mi_tx_row_uv % sb_uv_h) + ti < sb_uv_h; ti++)
+                     ctx->left_entropy[p][(mi_tx_row_uv % sb_uv_h) + ti] = (unsigned char)cul_level_uv; }
 
                   if (eob > 0)
                      stbi_avif__av1_reconstruct_tx_block(plane_buf, ctx->planes->cw,
@@ -9281,6 +9428,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
    }
+
+   } /* end fi_flag/fi_mode scope */
 
    return 1;
 }
@@ -9729,8 +9878,8 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.above_skip  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.above_tx_intra = (signed char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.above_entropy[0] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
-   ctx.above_entropy[1] = (unsigned char *)STBI_AVIF_MALLOC((ctx.mi_cols + 1u) / 2u);
-   ctx.above_entropy[2] = (unsigned char *)STBI_AVIF_MALLOC((ctx.mi_cols + 1u) / 2u);
+   ctx.above_entropy[1] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_entropy[2] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    if (!ctx.above_modes || !ctx.left_modes || !ctx.above_partition_ctx ||
        !ctx.above_skip || !ctx.above_tx_intra || !ctx.above_entropy[0] || !ctx.above_entropy[1] || !ctx.above_entropy[2]) {
       STBI_AVIF_FREE(ctx.above_modes);
@@ -9751,8 +9900,8 @@ static unsigned char *stbi_avif__av1_decode(
    memset(ctx.above_tx_intra, -1, ctx.mi_cols);
    memset(ctx.left_tx_intra, -1, sizeof(ctx.left_tx_intra));
    memset(ctx.above_entropy[0], 0, ctx.mi_cols);
-   memset(ctx.above_entropy[1], 0, (ctx.mi_cols + 1u) / 2u);
-   memset(ctx.above_entropy[2], 0, (ctx.mi_cols + 1u) / 2u);
+   memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+   memset(ctx.above_entropy[2], 0, ctx.mi_cols);
    memset(ctx.left_entropy, 0, sizeof(ctx.left_entropy));
    memset(ctx.left_partition_ctx, 0, sizeof(ctx.left_partition_ctx));
    memset(ctx.left_skip, 0, sizeof(ctx.left_skip));
