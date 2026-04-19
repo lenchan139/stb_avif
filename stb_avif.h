@@ -7010,9 +7010,9 @@ typedef struct
    unsigned char                *above_partition_ctx;
    unsigned char                 left_partition_ctx[32]; /* max 128px/4 = 32 mi */
    unsigned char                *above_skip;       /* per mi-col skip context */
-   unsigned char                 left_skip[256];   /* per mi-row skip context, max 1024px/4 = 256 mi */
+   unsigned char                *left_skip;        /* per mi-row skip context */
    signed char                  *above_tx_intra;   /* per mi-col TX lw (log2 width -2), -1=none */
-   signed char                   left_tx_intra[256]; /* per mi-row TX lh, -1=none */
+   signed char                  *left_tx_intra;    /* per mi-row TX lh, -1=none */
    unsigned char                *above_entropy[3]; /* per-plane above entropy ctx */
    unsigned char                 left_entropy[3][32]; /* per-plane left entropy ctx */
    int                           reduced_tx_set;
@@ -7428,8 +7428,12 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
                {
                   /* AV1 spec: pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom
                    *                 + w_hor[x]*left[y] + (256-w_hor[x])*right + 256) >> 9 */
-                  int w_h = (int)stbi_avif__sm_weights[bw + x];
-                  int w_v = (int)stbi_avif__sm_weights[bh + y];
+                  unsigned int sm_bw = bw > 64u ? 64u : bw;
+                  unsigned int sm_bh = bh > 64u ? 64u : bh;
+                  unsigned int sm_x = bw > sm_bw ? (x * sm_bw) / bw : x;
+                  unsigned int sm_y = bh > sm_bh ? (y * sm_bh) / bh : y;
+                  int w_h = (int)stbi_avif__sm_weights[sm_bw + sm_x];
+                  int w_v = (int)stbi_avif__sm_weights[sm_bh + sm_y];
                   int right_px = (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)];
                   int bottom_px = (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)];
                   val = (w_v * (int)top[tix] + (256 - w_v) * bottom_px +
@@ -7439,7 +7443,9 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 10u: /* SMOOTH_V */
                {
                   /* pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom + 128) >> 8 */
-                  int w_v = (int)stbi_avif__sm_weights[bh + y];
+                   unsigned int sm_bh = bh > 64u ? 64u : bh;
+                   unsigned int sm_y = bh > sm_bh ? (y * sm_bh) / bh : y;
+                   int w_v = (int)stbi_avif__sm_weights[sm_bh + sm_y];
                   int bottom_px = (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)];
                   val = (w_v * (int)top[tix] + (256 - w_v) * bottom_px + 128) >> 8;
                }
@@ -7447,7 +7453,9 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 11u: /* SMOOTH_H */
                {
                   /* pred = (w_hor[x]*left[y] + (256-w_hor[x])*right + 128) >> 8 */
-                  int w_h = (int)stbi_avif__sm_weights[bw + x];
+                   unsigned int sm_bw = bw > 64u ? 64u : bw;
+                   unsigned int sm_x = bw > sm_bw ? (x * sm_bw) / bw : x;
+                   int w_h = (int)stbi_avif__sm_weights[sm_bw + sm_x];
                   int right_px = (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)];
                   val = (w_h * (int)left[tiy] + (256 - w_h) * right_px + 128) >> 8;
                }
@@ -8824,11 +8832,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       unsigned int skip_ctx_above = (mi_row > 0u) ? ctx->above_skip[mi_col] : 0u;
       unsigned int skip_ctx_left  = (mi_col > 0u) ? ctx->left_skip[mi_row]  : 0u;
       unsigned int skip_ctx = skip_ctx_above + skip_ctx_left;
-      if (py < 64u) fprintf(stderr, "  BLK_PRE_SKIP bx=%u by=%u skip_ctx=%u rng=%u dif=%llu cdf0=%u\n",
-         px, py, skip_ctx, ctx->rd.rng, (unsigned long long)ctx->rd.dif, ctx->skip_cdf[skip_ctx][0]);
       skip = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->skip_cdf[skip_ctx], 2);
-      if (py < 64u) fprintf(stderr, "  BLK_SKIP bx=%u by=%u skip=%d rng=%u dif=%llu\n",
-         px, py, skip, ctx->rd.rng, (unsigned long long)ctx->rd.dif);
    }
 
    /* CDEF index: read for first non-skip block in each 64x64 CDEF unit.
@@ -9219,14 +9223,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       max_tx_log2h = mxh;
       tx_size = mxw < mxh ? mxw : mxh;
 
-      if (py < 32u) fprintf(stderr, "  TX_ENTRY: log2w=%u log2h=%u txms=%d skip=%d bs=%d\n",
-         mxw, mxh, ctx->tx_mode_select, skip, block_size);
-
       if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4
           && max_dim > 0u) {
          /* Read depth from tx_size_cdf[max_dim-1][tctx], nsyms=min(max_dim,2) */
          /* tctx: (left_tx_intra[mi_row] >= mxh) + (above_tx_intra[mi_col] >= mxw) */
-         int s_a = (int)ctx->above_tx_intra[mi_col];
+         unsigned int mi_col_ctx = mi_col;
+         if (ctx->mi_cols > 0u && mi_col_ctx >= ctx->mi_cols)
+            mi_col_ctx = ctx->mi_cols - 1u;
+         int s_a = (int)ctx->above_tx_intra[mi_col_ctx];
          int s_l = (int)ctx->left_tx_intra[mi_row];
          int tctx = (s_a >= (int)mxw ? 1 : 0) + (s_l >= (int)mxh ? 1 : 0);
          int nsyms = (max_dim < 2u) ? 1 : 2;
@@ -9807,7 +9811,7 @@ static int stbi_avif__av1_decode_tile(stbi_avif__av1_decode_ctx *ctx,
    for (sb_row = sb_row_start; sb_row < sb_row_end; ++sb_row) {
       /* Reset left context at start of each SB row */
       memset(ctx->left_partition_ctx, 0, sizeof(ctx->left_partition_ctx));
-      memset(ctx->left_tx_intra, -1, sizeof(ctx->left_tx_intra));
+      memset(ctx->left_tx_intra, -1, ctx->mi_rows * sizeof(*ctx->left_tx_intra));
       memset(ctx->left_entropy, 0, sizeof(ctx->left_entropy));
       memset(ctx->left_modes, 0, ctx->mi_rows);
       for (sb_col = sb_col_start; sb_col < sb_col_end; ++sb_col)
@@ -9859,10 +9863,6 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
    unsigned int h  = p->height;
    unsigned char *out;
    unsigned int iy, ix;
-   fprintf(stderr, "CONVERT: mc=%d color_range=%d bit_depth=%d Y[0,0]=%d U[0,0]=%d V[0,0]=%d\n",
-      matrix_coefficients, color_range, (int)p->bit_depth,
-      (int)p->y[0], (int)p->u[0], (int)p->v[0]);
-
    out = (unsigned char *)STBI_AVIF_MALLOC((size_t)w * (size_t)h * 4u);
    if (!out)
    {
@@ -10030,17 +10030,22 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
    ctx.above_partition_ctx = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.above_skip  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_skip   = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
    ctx.above_tx_intra = (signed char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_tx_intra  = (signed char *)STBI_AVIF_MALLOC(ctx.mi_rows);
    ctx.above_entropy[0] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.above_entropy[1] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.above_entropy[2] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    if (!ctx.above_modes || !ctx.left_modes || !ctx.above_partition_ctx ||
-       !ctx.above_skip || !ctx.above_tx_intra || !ctx.above_entropy[0] || !ctx.above_entropy[1] || !ctx.above_entropy[2]) {
+       !ctx.above_skip || !ctx.left_skip || !ctx.above_tx_intra || !ctx.left_tx_intra ||
+       !ctx.above_entropy[0] || !ctx.above_entropy[1] || !ctx.above_entropy[2]) {
       STBI_AVIF_FREE(ctx.above_modes);
       STBI_AVIF_FREE(ctx.left_modes);
       STBI_AVIF_FREE(ctx.above_partition_ctx);
       STBI_AVIF_FREE(ctx.above_skip);
+      STBI_AVIF_FREE(ctx.left_skip);
       STBI_AVIF_FREE(ctx.above_tx_intra);
+      STBI_AVIF_FREE(ctx.left_tx_intra);
       STBI_AVIF_FREE(ctx.above_entropy[0]);
       STBI_AVIF_FREE(ctx.above_entropy[1]);
       STBI_AVIF_FREE(ctx.above_entropy[2]);
@@ -10051,14 +10056,14 @@ static unsigned char *stbi_avif__av1_decode(
    memset(ctx.left_modes, 0, ctx.mi_rows);
    memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
    memset(ctx.above_skip, 0, ctx.mi_cols);
+   memset(ctx.left_skip, 0, ctx.mi_rows * sizeof(*ctx.left_skip));
    memset(ctx.above_tx_intra, -1, ctx.mi_cols);
-   memset(ctx.left_tx_intra, -1, sizeof(ctx.left_tx_intra));
+   memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
    memset(ctx.above_entropy[0], 0, ctx.mi_cols);
    memset(ctx.above_entropy[1], 0, ctx.mi_cols);
    memset(ctx.above_entropy[2], 0, ctx.mi_cols);
    memset(ctx.left_entropy, 0, sizeof(ctx.left_entropy));
    memset(ctx.left_partition_ctx, 0, sizeof(ctx.left_partition_ctx));
-   memset(ctx.left_skip, 0, sizeof(ctx.left_skip));
 
    tile_cursor = tghdr->tile_data_byte_offset;
    tile_count_in_group = tghdr->tile_end - tghdr->tile_start + 1u;
@@ -10074,7 +10079,7 @@ static unsigned char *stbi_avif__av1_decode(
                                            tile_cursor, fhdr->tile_size_bytes,
                                            &tile_size_value)) {
             STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
-            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
             stbi_avif__av1_free_planes(&planes); return NULL;
          }
          tile_cursor += fhdr->tile_size_bytes;
@@ -10086,7 +10091,7 @@ static unsigned char *stbi_avif__av1_decode(
       } else {
          if (tile_cursor > tile_group_size) {
             STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
-            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
             stbi_avif__av1_free_planes(&planes);
             return (unsigned char *)stbi_avif__fail_ptr("invalid AV1 tile payload offset");
          }
@@ -10114,39 +10119,27 @@ static unsigned char *stbi_avif__av1_decode(
       if (!stbi_avif__av1_range_decoder_init(&ctx.rd, tile_payload,
                                              (size_t)tile_payload_size, 0u)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
-         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
 
       memset(ctx.above_modes, 0, ctx.mi_cols);
       memset(ctx.left_modes, 0, ctx.mi_rows);
       memset(ctx.above_tx_intra, -1, ctx.mi_cols);
-      memset(ctx.left_tx_intra, -1, sizeof(ctx.left_tx_intra));
+      memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
 
       if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
                                       sb_col_start, sb_col_end)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
-         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
    }
 
    STBI_AVIF_FREE(ctx.above_modes);
    STBI_AVIF_FREE(ctx.left_modes);
-   STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+   STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
 
-   {
-      fprintf(stderr, "Y(0,0)=%u Y(200,0)=%u Y(512,0)=%u Y(0,100)=%u Y(200,386)=%u Y(512,386)=%u Y(0,700)=%u\n",
-         planes.y[0*planes.width+0], planes.y[0*planes.width+200],
-         planes.y[0*planes.width+512], planes.y[100*planes.width+0],
-         planes.y[386*planes.width+200], planes.y[386*planes.width+512],
-         planes.y[700*planes.width+0]);
-      /* Dump Y plane for comparison */
-      {
-         FILE *yf = fopen("/tmp/our_y_raw.bin","wb");
-         if (yf) { fwrite(planes.y, 2, planes.width*planes.height, yf); fclose(yf); }
-      }
-   }
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
                                          seq->color_range);
