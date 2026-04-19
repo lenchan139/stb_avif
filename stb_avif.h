@@ -6611,6 +6611,34 @@ static int stbi_avif__av1_get_lower_levels_ctx_2d(const unsigned char *levels,
    return ctx + offset;
 }
 
+/* get_lower_levels_ctx_1d: for TX_CLASS_H/V non-2D transforms */
+static int stbi_avif__av1_get_lower_levels_ctx_1d(const unsigned char *levels,
+   int coeff_idx, int bhl)
+{
+   int txh = 1 << bhl;
+   int stride = txh + STBI_AVIF_TX_PAD_HOR;
+   int col = coeff_idx >> bhl;
+   int row = coeff_idx - (col << bhl);
+   int padded_pos = col * stride + row;
+   int y = row < 2 ? row : 2;
+   int offset = 26 + y * 5;
+   int a = (int)levels[padded_pos + 1];
+   int bn = (int)levels[padded_pos + stride];
+   int c = (int)levels[padded_pos + 2];
+   int d = (int)levels[padded_pos + 3];
+   int e = (int)levels[padded_pos + 4];
+   int mag, ctx;
+   if (a > 3) a = 3;
+   if (bn > 3) bn = 3;
+   if (c > 3) c = 3;
+   if (d > 3) d = 3;
+   if (e > 3) e = 3;
+   mag = a + bn + c + d + e;
+   ctx = (mag + 1) >> 1;
+   if (ctx > 4) ctx = 4;
+   return ctx + offset;
+}
+
 /* get_br_ctx_2d: base-range context for coefficients at positions > 0 */
 static int stbi_avif__av1_get_br_ctx_2d(const unsigned char *levels,
    int coeff_idx, int bhl)
@@ -6658,12 +6686,14 @@ static unsigned short stbi_avif__av1_skip_cdf[3][3] = {
 };
 
 /* TX partition/split CDF [5 ctx][3] */
-static unsigned short stbi_avif__av1_txfm_partition_cdf[5][3] = {
-   {22528u, 32768u, 0u},
-   {20480u, 32768u, 0u},
-   {18432u, 32768u, 0u},
-   {16384u, 32768u, 0u},
-   {14336u, 32768u, 0u}
+static unsigned short stbi_avif__av1_txfm_partition_cdf[7][3][3] = {
+   /* cat 0 */ { {28581u,32768u,0u}, {23846u,32768u,0u}, {20847u,32768u,0u} },
+   /* cat 1 */ { {24315u,32768u,0u}, {18196u,32768u,0u}, {12133u,32768u,0u} },
+   /* cat 2 */ { {18791u,32768u,0u}, {10887u,32768u,0u}, {11005u,32768u,0u} },
+   /* cat 3 */ { {27179u,32768u,0u}, {20004u,32768u,0u}, {11281u,32768u,0u} },
+   /* cat 4 */ { {26549u,32768u,0u}, {19308u,32768u,0u}, {14224u,32768u,0u} },
+   /* cat 5 */ { {28015u,32768u,0u}, {21546u,32768u,0u}, {14400u,32768u,0u} },
+   /* cat 6 */ { {28165u,32768u,0u}, {22401u,32768u,0u}, {16088u,32768u,0u} }
 };
 
 /* Palette Y mode CDF [7 bsize_ctx][3 mode_ctx][CDF_SIZE(2)] */
@@ -7002,7 +7032,7 @@ typedef struct
    unsigned short  intra_tx_cdf_set1[4][13][8];
    unsigned short  intra_tx_cdf_set2[4][13][6];
    unsigned short  skip_cdf[3][3];
-   unsigned short  txfm_partition_cdf[5][3];
+   unsigned short  txfm_partition_cdf[7][3][3];
    unsigned short  cfl_sign_cdf[9];
    unsigned short  cfl_alpha_cdf[6][17];
    unsigned short  tx_size_cdf[4][3][4];
@@ -7216,6 +7246,37 @@ static void stbi_avif__av1_filter_intra_predict(unsigned short *plane, unsigned 
    }
 }
 
+/* AV1 smooth intra prediction weights (from AV1 spec / dav1d_sm_weights).
+ * Indexed by [bs] where bs = block size in pixels (2,4,8,16,32,64).
+ * We store starting from index 2 (bs=2). Offset = bs (i.e., sm_weights[bs+x]). */
+static const unsigned char stbi_avif__sm_weights[128] = {
+    /* bs=2: indices 0..1 (unused offset, but +2 for bs=2) */
+    0, 0,
+    /* bs=2 */
+    255, 128,
+    /* bs=4 */
+    255, 149,  85,  64,
+    /* bs=8 */
+    255, 197, 146, 105,  73,  50,  37,  32,
+    /* bs=16 */
+    255, 225, 196, 170, 145, 123, 102,  84,
+     68,  54,  43,  33,  26,  20,  17,  16,
+    /* bs=32 */
+    255, 240, 225, 210, 196, 182, 169, 157,
+    145, 133, 122, 111, 101,  92,  83,  74,
+     66,  59,  52,  45,  39,  34,  29,  25,
+     21,  17,  14,  12,  10,   9,   8,   8,
+    /* bs=64 */
+    255, 248, 240, 233, 225, 218, 210, 203,
+    196, 189, 182, 176, 169, 163, 156, 150,
+    144, 138, 133, 127, 121, 116, 111, 106,
+    101,  96,  91,  86,  82,  77,  73,  69,
+     65,  61,  57,  54,  50,  47,  44,  41,
+     38,  35,  32,  29,  27,  25,  22,  20,
+     18,  16,  15,  13,  12,  10,   9,   8,
+      7,   6,   6,   5,   5,   4,   4,   4
+};
+
 static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int stride,
                                           unsigned int plane_w,
@@ -7237,27 +7298,59 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    int base;
    int amp;
    int dc;
+   int have_top = (by > 0u) ? 1 : 0;
+   int have_left = (bx > 0u) ? 1 : 0;
 
    base = (int)(1u << (bit_depth - 1u));
    amp = (bit_depth > 8u) ? (8 << (bit_depth - 8u)) : 8;
-   top_left = (unsigned short)base;
-   if (bx > 0u && by > 0u)
-      top_left = p[(by - 1u) * stride + (bx - 1u)];
 
    ref_count = bw + bh + 2u;
    if (ref_count > 256u)
       ref_count = 256u;
 
-   for (i = 0u; i < ref_count; ++i)
-   {
-      unsigned int tx = bx + i;
+   /* Fill left[] reference array: if no left col, fill with top[0] or base+1 */
+   for (i = 0u; i < ref_count; ++i) {
       unsigned int ly = by + i;
-      if (tx >= plane_w)
-         tx = plane_w - 1u;
-      if (ly >= plane_h)
-         ly = plane_h - 1u;
-      top[i] = by > 0u ? p[(by - 1u) * stride + tx] : (unsigned short)base;
-      left[i] = bx > 0u ? p[ly * stride + (bx - 1u)] : (unsigned short)base;
+      if (ly >= plane_h) ly = plane_h - 1u;
+      if (have_left)
+         left[i] = p[ly * stride + (bx - 1u)];
+      else if (have_top)
+         left[i] = p[(by - 1u) * stride + bx]; /* fill with top[0] */
+      else
+         left[i] = (unsigned short)(base + 1); /* DC_128+1 = (1<<bd)/2 + 1 */
+   }
+
+   /* Fill top[] reference array: if no top row, fill with left[0] or base-1 */
+   for (i = 0u; i < ref_count; ++i) {
+      unsigned int tx = bx + i;
+      if (tx >= plane_w) tx = plane_w - 1u;
+      if (have_top)
+         top[i] = p[(by - 1u) * stride + tx];
+      else if (have_left)
+         top[i] = p[by * stride + (bx - 1u)]; /* fill with left[0] at current row */
+      else
+         top[i] = (unsigned short)(base - 1); /* (1<<bd)/2 - 1 */
+   }
+
+   /* Top-left pixel per dav1d: if have_left → left[0], if have_top → top[0], else base */
+   if (have_left && have_top)
+      top_left = p[(by - 1u) * stride + (bx - 1u)];
+   else if (have_left)
+      top_left = p[by * stride + (bx - 1u)];  /* left[0] */
+   else if (have_top)
+      top_left = p[(by - 1u) * stride + bx];  /* top[0] */
+   else
+      top_left = (unsigned short)base;
+
+   /* Mode conversion for DC and PAETH when references unavailable (per AV1 spec) */
+   if (mode == 0u) { /* DC_PRED */
+      if (!have_left && !have_top) mode = 13u; /* DC_128 (use base) */
+      else if (!have_left)         mode = 14u; /* TOP_DC_PRED (use only top) */
+      else if (!have_top)          mode = 15u; /* LEFT_DC_PRED (use only left) */
+   } else if (mode == 12u) { /* PAETH */
+      if (!have_left && !have_top) mode = 13u; /* DC_128 */
+      else if (!have_left)         mode = 1u;  /* VERT_PRED */
+      else if (!have_top)          mode = 2u;  /* HOR_PRED */
    }
 
    dc = base;
@@ -7265,14 +7358,14 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    {
       unsigned int count = 0u;
       int sum = 0;
-      if (by > 0u) {
+      if (have_top) {
          for (i = 0u; i < bw && i < ref_count; ++i)
          {
             sum += (int)top[i];
             ++count;
          }
       }
-      if (bx > 0u) {
+      if (have_left) {
          for (i = 0u; i < bh && i < ref_count; ++i)
          {
             sum += (int)left[i];
@@ -7297,6 +7390,15 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          {
             case 0u: /* DC */
                val = dc;
+               break;
+            case 13u: /* DC_128: base value, no neighbors */
+               val = base;
+               break;
+            case 14u: /* TOP_DC_PRED: top only */
+               val = dc;  /* dc was computed using top[] only */
+               break;
+            case 15u: /* LEFT_DC_PRED: left only */
+               val = dc;  /* dc was computed using left[] only */
                break;
             case 1u: /* V */
                val = (int)top[tix] + ((int)(2u * x + 1u) * amp) / (int)(2u * (bw ? bw : 1u)) - amp / 2;
@@ -7323,17 +7425,32 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
                val = (3 * (int)top[tix] + (int)left[tiy]) / 4 + (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
                break;
             case 9u: /* SMOOTH */
-               val = (((int)(bw - x) * (int)left[tiy]) + ((int)(x + 1u) * (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)]) +
-                      ((int)(bh - y) * (int)top[tix]) + ((int)(y + 1u) * (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)])) /
-                     (int)(bw + bh + 2u);
+               {
+                  /* AV1 spec: pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom
+                   *                 + w_hor[x]*left[y] + (256-w_hor[x])*right + 256) >> 9 */
+                  int w_h = (int)stbi_avif__sm_weights[bw + x];
+                  int w_v = (int)stbi_avif__sm_weights[bh + y];
+                  int right_px = (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)];
+                  int bottom_px = (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)];
+                  val = (w_v * (int)top[tix] + (256 - w_v) * bottom_px +
+                         w_h * (int)left[tiy] + (256 - w_h) * right_px + 256) >> 9;
+               }
                break;
             case 10u: /* SMOOTH_V */
-               val = (((int)(bh - y) * (int)top[tix]) + ((int)(y + 1u) * (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)])) /
-                     (int)(bh + 1u);
+               {
+                  /* pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom + 128) >> 8 */
+                  int w_v = (int)stbi_avif__sm_weights[bh + y];
+                  int bottom_px = (int)left[(bh - 1u) < ref_count ? (bh - 1u) : (ref_count - 1u)];
+                  val = (w_v * (int)top[tix] + (256 - w_v) * bottom_px + 128) >> 8;
+               }
                break;
             case 11u: /* SMOOTH_H */
-               val = (((int)(bw - x) * (int)left[tiy]) + ((int)(x + 1u) * (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)])) /
-                     (int)(bw + 1u);
+               {
+                  /* pred = (w_hor[x]*left[y] + (256-w_hor[x])*right + 128) >> 8 */
+                  int w_h = (int)stbi_avif__sm_weights[bw + x];
+                  int right_px = (int)top[(bw - 1u) < ref_count ? (bw - 1u) : (ref_count - 1u)];
+                  val = (w_h * (int)left[tiy] + (256 - w_h) * right_px + 128) >> 8;
+               }
                break;
             case 12u: /* PAETH */
                val = stbi_avif__av1_paeth_predictor((int)top[tix], (int)left[tiy], (int)top_left);
@@ -8099,7 +8216,11 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
             for (j = 0; j < txw; ++j) buf[j] = coeffs[i * txw + j];
          }
          row_fn(buf, out);
-         for (j = 0; j < txw; ++j) temp[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[j], row_shift);
+         if (row_shift > 0) {
+            for (j = 0; j < txw; ++j) temp[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[j], row_shift);
+         } else {
+            for (j = 0; j < txw; ++j) temp[i * txw + j] = out[j];
+         }
       }
    }
 
@@ -8155,6 +8276,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    int *out_cul_level) /* output: cul_level for entropy context update */
 {
    int bhl, area;
+   int tx_class = 0;
    int plane_type;
    int eob_pt, eob, k;
    int c;
@@ -8170,6 +8292,14 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    this_blk = (plane == 0) ? s_coeff_blk_cnt : -1;
    (void)tx_type;
 
+   /* Compute tx_class: 0=2D, 1=H, 2=V */
+   {
+      static const signed char tclut[16] = {
+         0,0,0,0,0,0,0,0,0,0,2,1,2,1,2,1
+      };
+      tx_class = (tx_type >= 0 && tx_type < 16) ? (int)tclut[tx_type] : 0;
+   }
+
    /* For rectangular TX, width may differ from height. We operate on txw×txh. */
    bhl = 0; { int t = txh; while (t > 1) { ++bhl; t >>= 1; } } /* log2(txh) */
    area = txw * txh;
@@ -8179,7 +8309,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    memset(coeffs_out, 0, (size_t)area * sizeof(int));
 
    /* Pick scan order: use static tables for square TX; generate diagonal scan for rect */
-   if (txw == txh) {
+   if (tx_class == 0 && txw == txh) {
       switch (txw) {
          case  4: scan = stbi_avif__av1_scan_4x4;   break;
          case  8: scan = stbi_avif__av1_scan_8x8;   break;
@@ -8187,11 +8317,18 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          default: scan = stbi_avif__av1_scan_32x32; break;
       }
    } else {
-      /* Allocate dynamic diagonal scan on stack (max 32×32 = 1024) */
       scan_buf = (unsigned short *)STBI_AVIF_MALLOC((size_t)area * sizeof(unsigned short));
       if (!scan_buf) return 0;
-      /* Generate diagonal scan: positions are col*txh+row (column-major, AOM convention) */
-      {
+      if (tx_class == 1) {
+         int i, r, cl;
+         for (i = 0; i < area; ++i) {
+            r = i / txw; cl = i % txw;
+            scan_buf[i] = (unsigned short)(cl * txh + r);
+         }
+      } else if (tx_class == 2) {
+         int i;
+         for (i = 0; i < area; ++i) scan_buf[i] = (unsigned short)i;
+      } else {
          int n = 0, d, row, rowmax, rowmin;
          for (d = 0; d < txw + txh - 1; ++d) {
             rowmax = d < txh ? d : txh - 1;
@@ -8207,7 +8344,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    /* tx2dszctx: 0=4x4,1={4x8,8x4},2={8x8,...},3={...16x32},4={16x16},5={32x16},6={32x32+} */
    /* eob_multi CDF nsyms = 5+tx2dszctx (our format: dav1d n_symbols+1 for sentinel) */
    {
-      int eob_multi_ctx = 0; /* TX_CLASS_2D → ctx 0 */
+      int eob_multi_ctx = (tx_class != 0) ? 1 : 0;
       unsigned int eob_pt_sym;
       if (plane == 0) { static int ec=0; if(ec<15){fprintf(stderr,"  PRE_EOB: tx2dsz=%d rng=%u dif=%llu\n",tx2dszctx,ctx->rd.rng,ctx->rd.dif);ec++;} }
 
@@ -8301,7 +8438,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          int col = pos >> bhl, row = pos - (col << bhl);
          int br_ctx;
          if (pos == 0) br_ctx = 0;
-         else if ((row | col) < 2) br_ctx = 7;
+         else if (tx_class != 0 ? (row != 0) : ((row | col) < 2)) br_ctx = 7;
          else br_ctx = 14;
          if (plane == 0 && this_blk < 3) {
                fprintf(stderr, "  EOB_BR: pos=%d row=%d col=%d br_ctx=%d\n", pos, row, col, br_ctx);
@@ -8342,7 +8479,9 @@ static int stbi_avif__av1_read_coeffs_after_skip(
       int ts2 = tx_ctx < 4 ? tx_ctx : 3;
       for (c = eob - 2; c >= 1; --c) {
          int pos = (int)scan[c];
-         int coeff_ctx = stbi_avif__av1_get_lower_levels_ctx_2d(levels, pos, bhl, txw);
+         int coeff_ctx = (tx_class != 0)
+            ? stbi_avif__av1_get_lower_levels_ctx_1d(levels, pos, bhl)
+            : stbi_avif__av1_get_lower_levels_ctx_2d(levels, pos, bhl, txw);
          int level;
          if (coeff_ctx >= 42) coeff_ctx = 41;
          if (plane == 0 && this_blk < 3) {
@@ -8382,8 +8521,10 @@ static int stbi_avif__av1_read_coeffs_after_skip(
       /* 4c. Read DC coefficient (scan index 0) */
       {
          int pos = (int)scan[0];
-         /* For TX_CLASS_2D, DC context is always 0 (AV1 spec / dav1d) */
-         int coeff_ctx = 0;
+         /* DC: TX_CLASS_2D=0, else use 1d ctx */
+         int coeff_ctx = (tx_class != 0)
+            ? stbi_avif__av1_get_lower_levels_ctx_1d(levels, pos, bhl)
+            : 0;
          int level;
          if (coeff_ctx >= 42) coeff_ctx = 41;
          if (plane == 0 && this_blk < 3) {
@@ -8640,6 +8781,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    unsigned int y_mode, uv_mode;
    int skip;
    unsigned int tx_size;      /* square tx index 0..3 (for CDF table index) */
+   unsigned int tx_split[2];  /* tx split bitmask depth0/depth1 */
+   unsigned int max_tx_log2w = 0, max_tx_log2h = 0; /* max TX dims for block */
    unsigned int tx_log2w;     /* actual tx width  in log2 pixels: 0=4,1=8,2=16,3=32 */
    unsigned int tx_log2h;     /* actual tx height in log2 pixels: 0=4,1=8,2=16,3=32 */
    int coeffs[32 * 32];
@@ -9060,72 +9203,79 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    }
    if (py < 64u) fprintf(stderr, "  post-filterintra: rng=%u bx=%u by=%u pw=%u ph=%u fi=%u fm=%u\n", ctx->rd.rng, px, py, pw, ph, fi_flag, fi_mode);
 
-   /* TX size */
+   /* TX size: read depth symbol from tx_size_cdf, matching dav1d decode.c.
+    * For intra tx_mode_select, read 1 symbol per block. depth=0,1,2 reductions.
+    */
+   tx_split[0] = 0u; tx_split[1] = 0u;
    {
-      unsigned int bs = block_size < 22u ? block_size : 0u;
-      unsigned int mxw = stbi_avif__bsize_max_txw[bs]; /* log2 of max tx width  (0..3) */
-      unsigned int mxh = stbi_avif__bsize_max_txh[bs]; /* log2 of max tx height (0..3) */
-      /* For the square "tx_size" index (used for CDF tables), use min of width/height */
-      unsigned int max_sq = mxw < mxh ? mxw : mxh;
+      unsigned int bsi = block_size < 22u ? block_size : 0u;
+      unsigned int mxw = stbi_avif__bsize_max_txw[bsi];
+      unsigned int mxh = stbi_avif__bsize_max_txh[bsi];
+      unsigned int max_dim = mxw > mxh ? mxw : mxh;  /* max(lw,lh) = t_dim->max */
 
-      /* AOM-matching tables for TX size decode (based on max-square tx, per AOM kMaxTxSizeLookup) */
-      static const unsigned char bsize_tx_cat[22] = {
-         0,0,0,0,1,1,1,2,2,2,3,3,3,3,3,3,1,1,2,2,3,3
-      };
-      static const unsigned char bsize_max_depth[22] = {
-         0,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-      };
-
-      tx_size = max_sq;    /* CDF index = min(max_txw, max_txh) */
       tx_log2w = mxw;
       tx_log2h = mxh;
+      max_tx_log2w = mxw;
+      max_tx_log2h = mxh;
+      tx_size = mxw < mxh ? mxw : mxh;
 
       if (py < 32u) fprintf(stderr, "  TX_ENTRY: log2w=%u log2h=%u txms=%d skip=%d bs=%d\n",
          mxw, mxh, ctx->tx_mode_select, skip, block_size);
 
-      /* Read TX size from bitstream when tx_mode_select && !skip && block > 4x4 */
-      if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4) {
-         int tx_cat, max_depths, num_syms, depth;
-         /* TX size context = (left_tx_intra >= max_tx_lh) + (above_tx_intra >= max_tx_lw) */
-         int tx_ctx_l = (mi_col > 0u) ? (int)ctx->left_tx_intra[mi_row] : -1;
-         int tx_ctx_a = (mi_row > 0u) ? (int)ctx->above_tx_intra[mi_col] : -1;
-         int tx_ctx = (tx_ctx_l >= (int)mxh ? 1 : 0) + (tx_ctx_a >= (int)mxw ? 1 : 0);
-
-         tx_cat = (int)bsize_tx_cat[bs];
-         max_depths = (int)bsize_max_depth[bs];
-         num_syms = max_depths + 1;
-
-         depth = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-            ctx->tx_size_cdf[tx_cat][tx_ctx], num_syms);
-
-         /* When depth > 0, subdivide: halve in the largest dimension */
-         if (depth > 0 && tx_log2w == tx_log2h) {
-            /* Square → split into 4 squares of half size */
-            if (tx_log2w > 0) { tx_log2w--; tx_log2h--; }
-         } else if (depth > 0 && tx_log2w > tx_log2h) {
-            /* Rectangle taller on width: split width */
-            if (tx_log2w > 0) tx_log2w--;
-         } else if (depth > 0 && tx_log2h > tx_log2w) {
-            if (tx_log2h > 0) tx_log2h--;
+      if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4
+          && max_dim > 0u) {
+         /* Read depth from tx_size_cdf[max_dim-1][tctx], nsyms=min(max_dim,2) */
+         /* tctx: (left_tx_intra[mi_row] >= mxh) + (above_tx_intra[mi_col] >= mxw) */
+         int s_a = (int)ctx->above_tx_intra[mi_col];
+         int s_l = (int)ctx->left_tx_intra[mi_row];
+         int tctx = (s_a >= (int)mxw ? 1 : 0) + (s_l >= (int)mxh ? 1 : 0);
+         int nsyms = (max_dim < 2u) ? 1 : 2;
+         int depth;
+         unsigned int cur_lw, cur_lh;
+         unsigned int mi_c, mi_r;
+         if (max_dim - 1u < 4u) {
+            depth = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+               ctx->tx_size_cdf[max_dim - 1u][tctx], nsyms + 1);
+         } else {
+            depth = 0;
          }
-         if (depth > 1) { /* second split: always halve the other dimension */
-            if (tx_log2w > 0) tx_log2w--;
-            if (tx_log2h > 0) tx_log2h--;
+         if (py < 32u) fprintf(stderr, "  TX_SPLIT0 y=%u x=%u cat=%u ctx=%d split=%d rng=%u\n",
+            0u, 0u, max_dim - 1u, tctx, depth, ctx->rd.rng);
+         /* Apply depth reductions: square TX halves both dims, rect TX halves the larger */
+         cur_lw = mxw; cur_lh = mxh;
+         while (depth-- > 0) {
+            if (cur_lw == cur_lh) {
+               /* square: halve both to get smaller square */
+               if (cur_lw > 0u) { cur_lw--; cur_lh--; }
+            } else if (cur_lw > cur_lh) {
+               /* rect wider: halve width to make square */
+               cur_lw--;
+            } else {
+               /* rect taller: halve height to make square */
+               cur_lh--;
+            }
          }
+         tx_log2w = cur_lw;
+         tx_log2h = cur_lh;
          tx_size = tx_log2w < tx_log2h ? tx_log2w : tx_log2h;
-
-         if (py < 32u) fprintf(stderr, "  TX_SIZE: max_sq=%u depth=%d final_txw=%u final_txh=%u cat=%d num_syms=%d rng=%u\n",
-            max_sq, depth, tx_log2w, tx_log2h, tx_cat, num_syms, ctx->rd.rng);
+         /* Update above/left tx_intra context for the block */
+         for (mi_c = mi_col; mi_c < mi_col + bw4 && mi_c < ctx->mi_cols; ++mi_c)
+            ctx->above_tx_intra[mi_c] = (signed char)tx_log2w;
+         for (mi_r = mi_row; mi_r < mi_row + bh4 && mi_r < ctx->mi_rows; ++mi_r)
+            ctx->left_tx_intra[mi_r] = (signed char)tx_log2h;
+         if (py < 32u) fprintf(stderr, "  TX_SIZE_FINAL: log2w=%u log2h=%u split0=%u split1=%u rng=%u\n",
+            tx_log2w, tx_log2h, tx_split[0], tx_split[1], ctx->rd.rng);
       }
    }
 
-   /* Update above/left tx_intra context (used for TX size context in neighbor blocks) */
-   {
+   /* above/left tx_intra updated inside TX size tree read above.
+    * For non-switchable or skip blocks, update entire block now. */
+   if (!ctx->tx_mode_select || skip || block_size <= STBI_AVIF_BLOCK_4X4) {
       unsigned int mi_c, mi_r;
       for (mi_c = mi_col; mi_c < mi_col + bw4 && mi_c < ctx->mi_cols; ++mi_c)
-         ctx->above_tx_intra[mi_c] = (signed char)tx_log2w;
+         ctx->above_tx_intra[mi_c] = (signed char)max_tx_log2w;
       for (mi_r = mi_row; mi_r < mi_row + bh4 && mi_r < ctx->mi_rows; ++mi_r)
-         ctx->left_tx_intra[mi_r] = (signed char)tx_log2h;
+         ctx->left_tx_intra[mi_r] = (signed char)max_tx_log2h;
    }
 
    /* UV TX size: for YUV444 matches Y TX dims; for subsampled, use chroma dims.
@@ -9655,7 +9805,11 @@ static int stbi_avif__av1_decode_tile(stbi_avif__av1_decode_ctx *ctx,
    root_bsize = ctx->use_128 ? STBI_AVIF_BLOCK_128X128 : STBI_AVIF_BLOCK_64X64;
 
    for (sb_row = sb_row_start; sb_row < sb_row_end; ++sb_row) {
+      /* Reset left context at start of each SB row */
       memset(ctx->left_partition_ctx, 0, sizeof(ctx->left_partition_ctx));
+      memset(ctx->left_tx_intra, -1, sizeof(ctx->left_tx_intra));
+      memset(ctx->left_entropy, 0, sizeof(ctx->left_entropy));
+      memset(ctx->left_modes, 0, ctx->mi_rows);
       for (sb_col = sb_col_start; sb_col < sb_col_end; ++sb_col)
       {
          if (!stbi_avif__av1_decode_partition(ctx,
