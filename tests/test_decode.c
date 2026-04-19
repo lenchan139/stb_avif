@@ -397,6 +397,29 @@ int main(int argc, char **argv)
 
    if (output_path != NULL)
    {
+      /* Basic sanity: verify image dimensions and pixel values are sane */
+      {
+         int px;
+         int all_gray = 1;
+         if (width <= 0 || height <= 0 || channels < 3)
+         {
+            printf("sanity fail: bad dimensions w=%d h=%d ch=%d\n", width, height, channels);
+            stbi_avif_image_free(pixels);
+            return 4;
+         }
+         /* Check that at least some pixels differ (not all-gray placeholder) */
+         for (px = 0; px < width * height * channels && px < 1024 * channels; px += channels)
+         {
+            if (pixels[px] != pixels[0] || pixels[px+1] != pixels[1] || pixels[px+2] != pixels[2])
+            {
+               all_gray = 0;
+               break;
+            }
+         }
+         if (all_gray && width * height > 64)
+            printf("warning: first 1024 pixels are all the same color - possible decode error\n");
+      }
+      printf("decode info: %d x %d, channels=%d\n", width, height, channels);
       if (!write_image(output_path, pixels, width, height, channels))
       {
          stbi_avif_image_free(pixels);
