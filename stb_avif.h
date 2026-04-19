@@ -9507,8 +9507,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
 
-      /* U and V residual (skip if palette) */
-      if (cpw > 0u && cph > 0u && palette_uv_size == 0) {
+      /* U and V residual (skip if palette or if chroma block too small for a TX).
+       * In 4:2:0, a 4x4 luma block maps to a 2x2 chroma block which is below
+       * the minimum 4x4 TX size; those blocks are never chroma references. */
+      if (cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_szw / 4u;
          unsigned int uv_h_mi = uv_tx_szh / 4u;
