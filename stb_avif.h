@@ -1481,7 +1481,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                lr_uv_shift = shift_bit;
             }
          }
-         (void)lr_type; (void)lr_unit_shift; (void)lr_uv_shift;
+         (void)lr_type; (void)lr_unit_shift; (void)lr_uv_shift; /* parsed per spec; not applied for still-image AVIF */
       }
 
       if (stbi_avif__bit_reader_has_trailing_bits_only(&bits))

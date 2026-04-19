@@ -407,7 +407,8 @@ int main(int argc, char **argv)
             stbi_avif_image_free(pixels);
             return 4;
          }
-         /* Check that at least some pixels differ (not all-gray placeholder) */
+         /* Check that at least some pixels differ (not all-gray placeholder);
+          * px increments by channels so px/channels is the pixel index (0..1023) */
          for (px = 0; px < width * height * channels && px < 1024 * channels; px += channels)
          {
             if (pixels[px] != pixels[0] || pixels[px+1] != pixels[1] || pixels[px+2] != pixels[2])
