@@ -396,6 +396,33 @@ static int stbi_avif__bit_reader_bits_left(const stbi_avif__bit_reader *reader, 
    return bit_count <= total_bits - reader->bit_offset;
 }
 
+static int stbi_avif__bit_reader_has_trailing_bits_only(const stbi_avif__bit_reader *reader)
+{
+   size_t total_bits;
+   size_t i;
+   unsigned int bit;
+
+   total_bits = reader->size * 8u;
+   if (reader->bit_offset >= total_bits)
+      return 1;
+
+   i = reader->bit_offset;
+   bit = (((unsigned int)reader->data[i >> 3]) >> (7u - (unsigned int)(i & 7u))) & 1u;
+   if (bit == 0u)
+      return 0;
+   ++i;
+
+   while (i < total_bits)
+   {
+      bit = (((unsigned int)reader->data[i >> 3]) >> (7u - (unsigned int)(i & 7u))) & 1u;
+      if (bit != 0u)
+         return 0;
+      ++i;
+   }
+
+   return 1;
+}
+
 static int stbi_avif__bit_read(stbi_avif__bit_reader *reader, unsigned int *bit)
 {
    size_t byte_index;
@@ -1360,6 +1387,19 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                         delta_q_v_ac == 0 &&
                         !using_qmatrix);
 
+      if (!allow_intrabc && !coded_lossless &&
+          !stbi_avif__bit_reader_bits_left(&bits, seq->monochrome ? 16u : 28u))
+      {
+         frame->header_bits_consumed = bits.bit_offset;
+         return 1;
+      }
+
+      if (stbi_avif__bit_reader_has_trailing_bits_only(&bits))
+      {
+         frame->header_bits_consumed = bits.bit_offset;
+         return 1;
+      }
+
       /* loop_filter_params() are omitted when allow_intrabc == 1. */
       if (!allow_intrabc && !coded_lossless)
       {
@@ -1395,6 +1435,12 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          }
       }
 
+      if (stbi_avif__bit_reader_has_trailing_bits_only(&bits))
+      {
+         frame->header_bits_consumed = bits.bit_offset;
+         return 1;
+      }
+
       if (seq->enable_cdef && !allow_intrabc && !coded_lossless)
       {
          /* cdef_params() */
@@ -1415,6 +1461,12 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       }
       if (seq->enable_restoration && !allow_intrabc)
          return stbi_avif__fail("AV1 restoration parsing is not implemented yet");
+
+      if (stbi_avif__bit_reader_has_trailing_bits_only(&bits))
+      {
+         frame->header_bits_consumed = bits.bit_offset;
+         return 1;
+      }
 
       if (!coded_lossless)
       {
