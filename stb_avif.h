@@ -7400,11 +7400,11 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 15u: /* LEFT_DC_PRED: left only */
                val = dc;  /* dc was computed using left[] only */
                break;
-            case 1u: /* V */
-               val = (int)top[tix] + ((int)(2u * x + 1u) * amp) / (int)(2u * (bw ? bw : 1u)) - amp / 2;
+            case 1u: /* V: copy top row down */
+               val = (int)top[tix];
                break;
-            case 2u: /* H */
-               val = (int)left[tiy] + ((int)(2u * y + 1u) * amp) / (int)(2u * (bh ? bh : 1u)) - amp / 2;
+            case 2u: /* H: copy left column across */
+               val = (int)left[tiy];
                break;
             case 3u: /* D45 */
                val = (int)top[dix] + ((int)di * amp) / (int)((bw + bh) ? (bw + bh) : 1u) - amp / 2;
