@@ -7480,6 +7480,72 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
  * Until full UV residual decoding is implemented, apply a small luma-coupled
  * correction so predicted U/V blocks carry visible colour variation.
  */
+static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
+                                            unsigned short *plane, unsigned int plane_stride,
+                                            unsigned int cpx, unsigned int cpy,
+                                            unsigned int cpw, unsigned int cph,
+                                            unsigned int px, unsigned int py,
+                                            unsigned int pw, unsigned int ph,
+                                            int alpha)
+{
+   unsigned int x, y;
+   unsigned int sx_max = 1u << (unsigned int)planes->subx;
+   unsigned int sy_max = 1u << (unsigned int)planes->suby;
+   unsigned long long y_sum = 0u;
+   unsigned int y_count = 0u;
+   int y_avg;
+
+   if (alpha == 0 || cpw == 0u || cph == 0u || pw == 0u || ph == 0u)
+      return;
+
+   for (y = 0u; y < ph && py + y < planes->height; ++y)
+   {
+      const unsigned short *row = planes->y + (py + y) * planes->width + px;
+      for (x = 0u; x < pw && px + x < planes->width; ++x)
+      {
+         y_sum += row[x];
+         ++y_count;
+      }
+   }
+   if (y_count == 0u)
+      return;
+   y_avg = (int)(y_sum / (unsigned long long)y_count);
+
+   for (y = 0u; y < cph && cpy + y < planes->ch; ++y)
+   {
+      unsigned short *crow = plane + (cpy + y) * plane_stride + cpx;
+      for (x = 0u; x < cpw && cpx + x < planes->cw; ++x)
+      {
+         unsigned int sx, sy;
+         unsigned int lx0 = px + (x << (unsigned int)planes->subx);
+         unsigned int ly0 = py + (y << (unsigned int)planes->suby);
+         unsigned long l_sum = 0u;
+         unsigned int l_count = 0u;
+         int l_avg;
+         int ac;
+         int delta;
+         int pred;
+
+         for (sy = 0u; sy < sy_max && ly0 + sy < planes->height; ++sy)
+         {
+            const unsigned short *yrow = planes->y + (ly0 + sy) * planes->width + lx0;
+            for (sx = 0u; sx < sx_max && lx0 + sx < planes->width; ++sx)
+            {
+               l_sum += yrow[sx];
+               ++l_count;
+            }
+         }
+         if (l_count == 0u)
+            continue;
+
+         l_avg = (int)(l_sum / l_count);
+         ac = l_avg - y_avg;
+         delta = (alpha * ac + (alpha >= 0 ? 4 : -4)) >> 3;
+         pred = (int)crow[x] + delta;
+         crow[x] = stbi_avif__av1_clip_sample(pred, planes->bit_depth);
+      }
+   }
+}
 
 
 /*
@@ -8795,6 +8861,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    unsigned int tx_log2h;     /* actual tx height in log2 pixels: 0=4,1=8,2=16,3=32 */
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_tx_szw, uv_tx_szh, uv_mode_raw;
+   int cfl_alpha_u, cfl_alpha_v;
    int palette_y_size, palette_uv_size;
    unsigned short palette_y_colors[8];
    unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
@@ -8806,6 +8873,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    if (py < 64u && px < 128u) fprintf(stderr, "DCU(%u,%u) bs=%d rng=%u\n", px, py, block_size, ctx->rd.rng);
    palette_y_size = 0;
    palette_uv_size = 0;
+   cfl_alpha_u = 0;
+   cfl_alpha_v = 0;
    if (px + pw > ctx->planes->width)  pw = ctx->planes->width  - px;
    if (py + ph > ctx->planes->height) ph = ctx->planes->height - py;
 
@@ -8918,22 +8987,29 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    /* CFL_PRED */
    uv_mode_raw = uv_mode;
    if (uv_mode == 13u) {
+      unsigned int cfl_sign_sym;
+      unsigned int sign_u;
+      unsigned int sign_v;
       if (py < 32u) fprintf(stderr, "  pre-CFL-sign: rng=%u dif=%llu cdf={%u,%u,%u,%u,%u,%u,%u}\n",
          ctx->rd.rng, (unsigned long long)ctx->rd.dif,
          ctx->cfl_sign_cdf[0], ctx->cfl_sign_cdf[1], ctx->cfl_sign_cdf[2],
          ctx->cfl_sign_cdf[3], ctx->cfl_sign_cdf[4], ctx->cfl_sign_cdf[5], ctx->cfl_sign_cdf[6]);
-      unsigned int cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
-      unsigned int sign_u = cfl_sign_sym / 3u;
-      unsigned int sign_v = cfl_sign_sym - sign_u * 3u;
+      cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
+      sign_u = cfl_sign_sym / 3u;
+      sign_v = cfl_sign_sym - sign_u * 3u;
       if (py < 32u) fprintf(stderr, "  post-CFL-sign: sym=%u sign_u=%u sign_v=%u rng=%u dif=%llu\n", cfl_sign_sym-1u, sign_u, sign_v, ctx->rd.rng, (unsigned long long)ctx->rd.dif);
       if (sign_u > 0u) {
          unsigned int alpha_ctx_u = (sign_u == 2u) ? 3u + sign_v : sign_v;
-         stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16);
+         unsigned int cfl_alpha_u_mag =
+            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16) + 1u;
+         cfl_alpha_u = (sign_u == 1u) ? -(int)cfl_alpha_u_mag : (int)cfl_alpha_u_mag;
          if (py < 32u) fprintf(stderr, "  post-CFL-alpha-u: ctx=%u rng=%u dif=%llu\n", alpha_ctx_u, ctx->rd.rng, (unsigned long long)ctx->rd.dif);
       }
       if (sign_v > 0u) {
          unsigned int alpha_ctx_v = (sign_v == 2u) ? 3u + sign_u : sign_u;
-         stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16);
+         unsigned int cfl_alpha_v_mag =
+            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16) + 1u;
+         cfl_alpha_v = (sign_v == 1u) ? -(int)cfl_alpha_v_mag : (int)cfl_alpha_v_mag;
          if (py < 32u) fprintf(stderr, "  post-CFL-alpha-v: ctx=%u rng=%u dif=%llu\n", alpha_ctx_v, ctx->rd.rng, (unsigned long long)ctx->rd.dif);
       }
       uv_mode = 0u; /* CFL uses DC_PRED as base for prediction */
@@ -9354,6 +9430,12 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          stbi_avif__av1_predict_block(ctx->planes->v, ctx->planes->cw,
             ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
             ctx->planes->bit_depth, uv_mode);
+         if (uv_mode_raw == 13u) {
+            stbi_avif__av1_apply_cfl_plane(ctx->planes, ctx->planes->u, ctx->planes->cw,
+               cpx, cpy, cpw, cph, px, py, pw, ph, cfl_alpha_u);
+            stbi_avif__av1_apply_cfl_plane(ctx->planes, ctx->planes->v, ctx->planes->cw,
+               cpx, cpy, cpw, cph, px, py, pw, ph, cfl_alpha_v);
+         }
       }
    }
 
