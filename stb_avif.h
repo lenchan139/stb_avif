@@ -7737,14 +7737,12 @@ static const unsigned char stbi_avif__bsize_max_txh[22] = {
  */
 
 
-/* Loop restoration unit parameters (per-unit, per-plane) */
-#define STBI_AVIF_LR_NONE    0
-#define STBI_AVIF_LR_WIENER  1
-#define STBI_AVIF_LR_SGRPROJ 2
+/* Loop restoration unit parameters (per-unit, per-plane).
+ * type uses STBI_AVIF_RESTORE_NONE / WIENER / SGRPROJ defined above. */
 
 typedef struct
 {
-   int type;          /* STBI_AVIF_LR_NONE / WIENER / SGRPROJ */
+   int type;          /* STBI_AVIF_RESTORE_NONE / WIENER / SGRPROJ */
    int wiener_h[3];   /* horizontal Wiener taps (symmetric: {c0,c1,c2}) */
    int wiener_v[3];   /* vertical Wiener taps */
    int sgr_eps;       /* Sgrproj eps index (0..15) */
@@ -10605,27 +10603,27 @@ static void stbi_avif__av1_read_lr_unit(stbi_avif__av1_decode_ctx *ctx,
          unsigned int sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                                 ctx->lr_switchable_cdf, 3);
          if (sym == 0) {
-            unit->type = STBI_AVIF_LR_NONE;
+            unit->type = STBI_AVIF_RESTORE_NONE;
          } else if (sym == 1) {
-            unit->type = STBI_AVIF_LR_WIENER;
+            unit->type = STBI_AVIF_RESTORE_WIENER;
          } else {
-            unit->type = STBI_AVIF_LR_SGRPROJ;
+            unit->type = STBI_AVIF_RESTORE_SGRPROJ;
          }
       }
       else if (lr_type == STBI_AVIF_RESTORE_WIENER)
       {
          unsigned int sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                                 ctx->lr_wiener_cdf, 2);
-         unit->type = sym ? STBI_AVIF_LR_WIENER : STBI_AVIF_LR_NONE;
+         unit->type = sym ? STBI_AVIF_RESTORE_WIENER : STBI_AVIF_RESTORE_NONE;
       }
       else /* STBI_AVIF_RESTORE_SGRPROJ */
       {
          unsigned int sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                                 ctx->lr_sgrproj_cdf, 2);
-         unit->type = sym ? STBI_AVIF_LR_SGRPROJ : STBI_AVIF_LR_NONE;
+         unit->type = sym ? STBI_AVIF_RESTORE_SGRPROJ : STBI_AVIF_RESTORE_NONE;
       }
 
-      if (unit->type == STBI_AVIF_LR_WIENER)
+      if (unit->type == STBI_AVIF_RESTORE_WIENER)
       {
          int i;
          /* Read 3 vertical taps, then 3 horizontal taps (delta from reference) */
@@ -10643,7 +10641,7 @@ static void stbi_avif__av1_read_lr_unit(stbi_avif__av1_decode_ctx *ctx,
             ctx->lr_wiener_ref_h[p][i] = unit->wiener_h[i];
          }
       }
-      else if (unit->type == STBI_AVIF_LR_SGRPROJ)
+      else if (unit->type == STBI_AVIF_RESTORE_SGRPROJ)
       {
          int eps_idx;
          int r0, r1;
@@ -11914,7 +11912,7 @@ static void stbi_avif__av1_lr_filter(stbi_avif__av1_planes *planes,
                if (ry + rh > ph) rh = ph - ry;
                if (rw == 0 || rh == 0) continue;
 
-               if (unit->type == STBI_AVIF_LR_WIENER)
+               if (unit->type == STBI_AVIF_RESTORE_WIENER)
                {
                   /* Apply Wiener filter to this unit region using per-unit coefficients.
                    * We extract the region + border, filter, and copy back. */
@@ -12006,7 +12004,7 @@ static void stbi_avif__av1_lr_filter(stbi_avif__av1_planes *planes,
                   STBI_AVIF_FREE(region);
                   STBI_AVIF_FREE(tmp);
                }
-               else if (unit->type == STBI_AVIF_LR_SGRPROJ)
+               else if (unit->type == STBI_AVIF_RESTORE_SGRPROJ)
                {
                   /* Apply Sgrproj filter to this unit region using per-unit params. */
                   int eps_idx = unit->sgr_eps;
@@ -12053,7 +12051,7 @@ static void stbi_avif__av1_lr_filter(stbi_avif__av1_planes *planes,
                   STBI_AVIF_FREE(flt0);
                   STBI_AVIF_FREE(flt1);
                }
-               /* else: STBI_AVIF_LR_NONE — no filter for this unit */
+               /* else: STBI_AVIF_RESTORE_NONE — no filter for this unit */
             }
          }
       }
