@@ -18,12 +18,12 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - Monochrome (grayscale) image support
 - `desired_channels` parameter: request 1 (grayscale), 3 (RGB), or 4 (RGBA) channel output
 - YUV 4:2:2 chroma subsampling
+- Alpha plane support (via `iref`/`auxl` auxiliary items — decoded as separate monochrome AV1 frame)
 - Film grain parameter parsing — files with film grain params are accepted (grain synthesis not applied, parameters parsed and skipped)
 
 ### Not Yet Implemented
 
 - Loop restoration filter (Wiener / self-guided) — parameters parsed but not applied
-- Alpha plane support (auxiliary `auxl` items for transparency)
 - Film grain synthesis — parameters are parsed but grain noise is not synthesized
 - Animation / multi-frame sequences
 
@@ -32,7 +32,6 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - Static AVIF only (still pictures)
 - 8-bit and 10-bit content (output is always 8-bit per channel)
 - No animation
-- No embedded alpha support
 - Pure C89 (uses `long long` for range decoder only)
 - No external dependencies except libc
 
@@ -68,5 +67,4 @@ This converts all sample AVIF files in `example_avif/` to PNG in `output_png/`.
 ## Next Implementation Milestones
 
 1. Loop restoration filter (Wiener / self-guided) — quality improvement for high-quality encodes
-2. Alpha plane support — web-essential feature for transparent images
-3. Film grain synthesis — apply grain noise for encoder-emitted grain parameters
+2. Film grain synthesis — apply grain noise for encoder-emitted grain parameters

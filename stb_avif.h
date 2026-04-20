@@ -10,7 +10,7 @@
    - Full AV1 intra frame parsing and coefficient decode
    - Handles BT.601, BT.709, BT.2020, and identity matrix coefficients
    - Full/limited color range support
-   - No animation (avis), no alpha plane
+   - No animation (avis), no film grain synthesis, no loop restoration
    - Tested against example_avif/ corpus (various .avif files)
 
    Usage:
@@ -141,6 +141,14 @@ typedef struct
    stbi_avif__item_location *locations;
    int location_count;
    int location_capacity;
+   /* Alpha plane support (auxl reference from iref box) */
+   unsigned int alpha_item_id;   /* item_id of the auxiliary alpha item (0 = none) */
+   int has_alpha;                /* 1 if alpha item was found and resolved */
+   size_t alpha_av1c_offset;
+   size_t alpha_av1c_size;
+   size_t alpha_payload_offset;
+   size_t alpha_payload_size;
+   int has_alpha_av1_config;
 } stbi_avif__parser;
 
 typedef struct
@@ -10384,7 +10392,9 @@ static unsigned char stbi_avif__clamp_u8(int v)
 
 static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes *p,
                                                       int matrix_coefficients,
-                                                      int color_range)
+                                                      int color_range,
+                                                      const unsigned short *alpha_plane,
+                                                      unsigned int alpha_bit_depth)
 {
    unsigned int w  = p->width;
    unsigned int h  = p->height;
@@ -10397,7 +10407,7 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
       return NULL;
    }
 
-   /* Monochrome: R=G=B=Y, A=255 */
+   /* Monochrome: R=G=B=Y, A=alpha or 255 */
    if (p->monochrome)
    {
       for (iy = 0; iy < h; ++iy)
@@ -10414,7 +10424,13 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
             drow[ix * 4u + 0u] = stbi_avif__clamp_u8(Y);
             drow[ix * 4u + 1u] = stbi_avif__clamp_u8(Y);
             drow[ix * 4u + 2u] = stbi_avif__clamp_u8(Y);
-            drow[ix * 4u + 3u] = 255u;
+            if (alpha_plane != NULL) {
+               int A = (int)alpha_plane[iy * w + ix];
+               if (alpha_bit_depth > 8u) A >>= 2;
+               drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
+            } else {
+               drow[ix * 4u + 3u] = 255u;
+            }
          }
       }
       return out;
@@ -10521,7 +10537,13 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          drow[ix * 4u + 0u] = stbi_avif__clamp_u8(R);
          drow[ix * 4u + 1u] = stbi_avif__clamp_u8(G);
          drow[ix * 4u + 2u] = stbi_avif__clamp_u8(B);
-         drow[ix * 4u + 3u] = 255u;
+         if (alpha_plane != NULL) {
+            int A = (int)alpha_plane[iy * w + ix];
+            if (alpha_bit_depth > 8u) A >>= 2;
+            drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
+         } else {
+            drow[ix * 4u + 3u] = 255u;
+         }
       }
    }
    return out;
@@ -10827,7 +10849,9 @@ static unsigned char *stbi_avif__av1_decode(
    const unsigned char *tile_group_data, size_t tile_group_size,
    const stbi_avif__av1_sequence_header *seq,
    const stbi_avif__av1_frame_header    *fhdr,
-   const stbi_avif__av1_tile_group_header *tghdr)
+   const stbi_avif__av1_tile_group_header *tghdr,
+   const unsigned short *alpha_plane,
+   unsigned int alpha_bit_depth)
 {
    stbi_avif__av1_planes planes;
    stbi_avif__av1_decode_ctx ctx;
@@ -11040,9 +11064,240 @@ static unsigned char *stbi_avif__av1_decode(
 
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
-                                         seq->color_range);
+                                         seq->color_range,
+                                         alpha_plane,
+                                         alpha_bit_depth);
    stbi_avif__av1_free_planes(&planes);
    return rgba;
+}
+
+/* Decode an AV1 item and return a copy of the Y plane (for alpha).
+ * The caller must free the returned buffer with STBI_AVIF_FREE.
+ * On success, *out_width, *out_height, *out_bit_depth are set. */
+static unsigned short *stbi_avif__av1_decode_alpha_plane(
+   const unsigned char *tile_group_data, size_t tile_group_size,
+   const stbi_avif__av1_sequence_header *seq,
+   const stbi_avif__av1_frame_header    *fhdr,
+   const stbi_avif__av1_tile_group_header *tghdr,
+   unsigned int *out_width, unsigned int *out_height,
+   unsigned int *out_bit_depth)
+{
+   stbi_avif__av1_planes planes;
+   stbi_avif__av1_decode_ctx ctx;
+   size_t tile_cursor;
+   unsigned int tile_idx, tile_count_in_group;
+   unsigned int sb_row_start, sb_row_end, sb_col_start, sb_col_end;
+   unsigned int tile_row, tile_col;
+   int q_ctx;
+   unsigned int qidx_y_dc, qidx_y_ac, qidx_u_dc, qidx_u_ac, qidx_v_dc, qidx_v_ac;
+   unsigned short *alpha_out;
+   size_t plane_size;
+
+   memset(&ctx, 0, sizeof(ctx));
+   q_ctx = stbi_avif__av1_get_q_ctx(fhdr->base_q_idx);
+   ctx.base_q_idx = fhdr->base_q_idx;
+   ctx.q_ctx = q_ctx;
+
+   qidx_y_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, 0);
+   qidx_y_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_y_dc);
+   qidx_u_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_dc);
+   qidx_u_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_ac);
+   qidx_v_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_dc);
+   qidx_v_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_ac);
+
+   ctx.dc_qstep_y = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_y_dc);
+   ctx.ac_qstep_y = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_y_ac);
+   ctx.dc_qstep_u = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_u_dc);
+   ctx.ac_qstep_u = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_u_ac);
+   ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
+   ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
+
+   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
+   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
+   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
+   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
+   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
+   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
+   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
+   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
+   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
+   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
+   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
+   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
+   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
+   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
+   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
+   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
+   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
+   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
+   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
+   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
+   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
+
+   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
+   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
+   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
+   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
+   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
+   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
+   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
+   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
+   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
+   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
+   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
+   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
+   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+
+   if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
+      return NULL;
+
+   ctx.planes   = &planes;
+   ctx.seq      = seq;
+   ctx.mi_cols  = (fhdr->frame_width  + 3u) / 4u;
+   ctx.mi_rows  = (fhdr->frame_height + 3u) / 4u;
+   ctx.use_128  = seq->use_128x128_superblock;
+   ctx.reduced_tx_set = fhdr->reduced_tx_set;
+   ctx.tx_mode_select = fhdr->tx_mode_select;
+   ctx.allow_screen_content_tools = fhdr->allow_screen_content_tools;
+   ctx.cdef_bits = fhdr->cdef_bits;
+   ctx.sb_size_mi = seq->use_128x128_superblock ? 32u : 16u;
+   ctx.monochrome = seq->monochrome;
+   ctx.fhdr = fhdr;
+   ctx.cdef_grid_cols = (fhdr->frame_width + 63u) / 64u;
+   ctx.cdef_grid_rows = (fhdr->frame_height + 63u) / 64u;
+   if (fhdr->cdef_bits > 0) {
+      size_t grid_size = (size_t)ctx.cdef_grid_cols * ctx.cdef_grid_rows;
+      ctx.cdef_idx = (unsigned char *)STBI_AVIF_MALLOC(grid_size);
+      if (!ctx.cdef_idx) { stbi_avif__av1_free_planes(&planes); return NULL; }
+      memset(ctx.cdef_idx, 0, grid_size);
+   } else {
+      ctx.cdef_idx = NULL;
+   }
+
+   ctx.above_modes = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_partition_ctx = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_skip  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_skip   = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_tx_intra = (signed char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_tx_intra  = (signed char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_entropy[0] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_entropy[1] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_entropy[2] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   if (!ctx.above_modes || !ctx.left_modes || !ctx.above_partition_ctx ||
+       !ctx.above_skip || !ctx.left_skip || !ctx.above_tx_intra || !ctx.left_tx_intra ||
+       !ctx.above_entropy[0] || !ctx.above_entropy[1] || !ctx.above_entropy[2]) {
+      STBI_AVIF_FREE(ctx.above_modes);
+      STBI_AVIF_FREE(ctx.left_modes);
+      STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+      STBI_AVIF_FREE(ctx.cdef_idx);
+      stbi_avif__av1_free_planes(&planes);
+      return (unsigned short *)stbi_avif__fail_ptr("out of memory (mode maps)");
+   }
+   memset(ctx.above_modes, 0, ctx.mi_cols);
+   memset(ctx.left_modes, 0, ctx.mi_rows);
+   memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+   memset(ctx.above_skip, 0, ctx.mi_cols);
+   memset(ctx.left_skip, 0, ctx.mi_rows * sizeof(*ctx.left_skip));
+   memset(ctx.above_tx_intra, -1, ctx.mi_cols);
+   memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+   memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+   memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+   memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+   memset(ctx.left_entropy, 0, sizeof(ctx.left_entropy));
+   memset(ctx.left_partition_ctx, 0, sizeof(ctx.left_partition_ctx));
+
+   tile_cursor = tghdr->tile_data_byte_offset;
+   tile_count_in_group = tghdr->tile_end - tghdr->tile_start + 1u;
+
+   for (tile_idx = 0u; tile_idx < tile_count_in_group; ++tile_idx)
+   {
+      unsigned int tile_size_value, tile_payload_size;
+      const unsigned char *tile_payload;
+      unsigned int full_tile_index;
+
+      if (tile_idx + 1u < tile_count_in_group) {
+         if (!stbi_avif__av1_read_le_bytes(tile_group_data, tile_group_size,
+                                           tile_cursor, fhdr->tile_size_bytes,
+                                           &tile_size_value)) {
+            STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            stbi_avif__av1_free_planes(&planes); return NULL;
+         }
+         tile_cursor += fhdr->tile_size_bytes;
+         tile_payload_size = tile_size_value + 1u;
+         if (tile_cursor + (size_t)tile_payload_size > tile_group_size) {
+            tile_payload_size = (unsigned int)(tile_group_size - tile_cursor);
+            tile_count_in_group = tile_idx + 1u;
+         }
+      } else {
+         if (tile_cursor > tile_group_size) {
+            STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            stbi_avif__av1_free_planes(&planes);
+            return (unsigned short *)stbi_avif__fail_ptr("invalid AV1 tile payload offset");
+         }
+         tile_payload_size = (unsigned int)(tile_group_size - tile_cursor);
+      }
+
+      tile_payload = tile_group_data + tile_cursor;
+      tile_cursor += tile_payload_size;
+      full_tile_index = tghdr->tile_start + tile_idx;
+      tile_row = full_tile_index / fhdr->tile_cols;
+      tile_col = full_tile_index % fhdr->tile_cols;
+      sb_row_start = fhdr->tile_row_start_sb[tile_row];
+      sb_row_end   = fhdr->tile_row_start_sb[tile_row + 1u];
+      sb_col_start = fhdr->tile_col_start_sb[tile_col];
+      sb_col_end   = fhdr->tile_col_start_sb[tile_col + 1u];
+
+      if (tile_payload_size < 2u) continue;
+
+      if (!stbi_avif__av1_range_decoder_init(&ctx.rd, tile_payload,
+                                             (size_t)tile_payload_size, 0u)) {
+         STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
+         stbi_avif__av1_free_planes(&planes); return NULL;
+      }
+
+      memset(ctx.above_modes, 0, ctx.mi_cols);
+      memset(ctx.left_modes, 0, ctx.mi_rows);
+      memset(ctx.above_tx_intra, -1, ctx.mi_cols);
+      memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+
+      if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
+                                      sb_col_start, sb_col_end)) {
+         STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
+         stbi_avif__av1_free_planes(&planes); return NULL;
+      }
+   }
+
+   STBI_AVIF_FREE(ctx.above_modes);
+   STBI_AVIF_FREE(ctx.left_modes);
+   STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+
+   /* Apply CDEF filter */
+   stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
+                               ctx.cdef_grid_cols, ctx.cdef_grid_rows);
+   STBI_AVIF_FREE(ctx.cdef_idx);
+
+   /* Copy Y plane out as the alpha channel data */
+   plane_size = (size_t)planes.width * (size_t)planes.height;
+   alpha_out = (unsigned short *)STBI_AVIF_MALLOC(plane_size * sizeof(unsigned short));
+   if (!alpha_out) {
+      stbi_avif__av1_free_planes(&planes);
+      stbi_avif__fail("out of memory (alpha plane copy)");
+      return NULL;
+   }
+   memcpy(alpha_out, planes.y, plane_size * sizeof(unsigned short));
+   *out_width = planes.width;
+   *out_height = planes.height;
+   *out_bit_depth = planes.bit_depth;
+
+   stbi_avif__av1_free_planes(&planes);
+   return alpha_out;
 }
 
 
@@ -11560,6 +11815,93 @@ static int stbi_avif__parse_ipma(const stbi_avif__buffer *buffer, const stbi_avi
    return 1;
 }
 
+/* Parse iref box — specifically looking for auxl references that link an
+ * auxiliary alpha item to the primary item.  ISOBMFF iref is a container
+ * of typed reference boxes, each listing (from_item_id, reference_count,
+ * to_item_id[]).  We only care about type == 'auxl'. */
+static int stbi_avif__parse_iref(const stbi_avif__buffer *buffer, const stbi_avif__box *box, stbi_avif__parser *parser)
+{
+   size_t payload;
+   size_t limit;
+   unsigned int version;
+   int large_ids;
+
+   payload = box->offset + box->header_size;
+   limit = box->offset + box->size;
+   if (!stbi_avif__range_check(buffer, payload, 4))
+      return stbi_avif__fail("truncated iref full box header");
+
+   version = (unsigned int)buffer->data[payload];
+   large_ids = (version >= 1) ? 1 : 0;
+   payload += 4;
+
+   while (payload < limit)
+   {
+      stbi_avif__box child;
+      size_t cp;
+      unsigned int from_item_id;
+      unsigned int ref_count;
+      unsigned int ri;
+
+      if (!stbi_avif__parse_box_header(buffer, payload, limit, &child))
+         return 0;
+
+      cp = child.offset + child.header_size;
+      if (child.type == STBI_AVIF_FOURCC('a','u','x','l'))
+      {
+         if (large_ids)
+         {
+            if (!stbi_avif__range_check(buffer, cp, 6))
+            {
+               payload += child.size;
+               continue;
+            }
+            from_item_id = (unsigned int)stbi_avif__read_be32(buffer->data + cp);
+            cp += 4;
+            ref_count = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+         }
+         else
+         {
+            if (!stbi_avif__range_check(buffer, cp, 4))
+            {
+               payload += child.size;
+               continue;
+            }
+            from_item_id = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+            ref_count = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+         }
+
+         for (ri = 0; ri < ref_count; ++ri)
+         {
+            unsigned int to_item_id;
+            if (large_ids)
+            {
+               if (!stbi_avif__range_check(buffer, cp, 4))
+                  break;
+               to_item_id = (unsigned int)stbi_avif__read_be32(buffer->data + cp);
+               cp += 4;
+            }
+            else
+            {
+               if (!stbi_avif__range_check(buffer, cp, 2))
+                  break;
+               to_item_id = stbi_avif__read_be16(buffer->data + cp);
+               cp += 2;
+            }
+            /* If the auxl reference points TO our primary item, the
+             * from_item_id is the auxiliary (alpha) item. */
+            if (to_item_id == parser->primary_item_id && parser->alpha_item_id == 0u)
+               parser->alpha_item_id = from_item_id;
+         }
+      }
+      payload += child.size;
+   }
+   return 1;
+}
+
 static int stbi_avif__parse_iprp(const stbi_avif__buffer *buffer, const stbi_avif__box *box, stbi_avif__parser *parser)
 {
    size_t payload;
@@ -11621,6 +11963,11 @@ static int stbi_avif__parse_meta(const stbi_avif__buffer *buffer, const stbi_avi
       else if (child.type == STBI_AVIF_FOURCC('i','p','r','p'))
       {
          if (!stbi_avif__parse_iprp(buffer, &child, parser))
+            return 0;
+      }
+      else if (child.type == STBI_AVIF_FOURCC('i','r','e','f'))
+      {
+         if (!stbi_avif__parse_iref(buffer, &child, parser))
             return 0;
       }
       payload += child.size;
@@ -11688,6 +12035,47 @@ static int stbi_avif__resolve_primary(const stbi_avif__buffer *buffer, stbi_avif
    parser->payload_size = location->extent_length;
    if (!stbi_avif__range_check(buffer, parser->payload_offset, parser->payload_size))
       return stbi_avif__fail("primary item payload is out of bounds");
+
+   /* Try to resolve the alpha (auxiliary) item, if one was found via iref/auxl */
+   if (parser->alpha_item_id != 0u)
+   {
+      stbi_avif__item_assoc *alpha_assoc;
+      stbi_avif__item_location *alpha_loc;
+
+      alpha_assoc = stbi_avif__find_assoc(parser, parser->alpha_item_id);
+      if (alpha_assoc != NULL)
+      {
+         int ai;
+         for (ai = 0; ai < alpha_assoc->count; ++ai)
+         {
+            unsigned int pidx = alpha_assoc->entries[ai].property_index;
+            stbi_avif__property *prop;
+            if (pidx == 0 || pidx > (unsigned int)parser->property_count)
+               continue;
+            prop = &parser->properties[pidx - 1];
+            if (prop->type == STBI_AVIF_FOURCC('a','v','1','C'))
+            {
+               parser->has_alpha_av1_config = 1;
+               parser->alpha_av1c_offset = prop->data_offset;
+               parser->alpha_av1c_size = prop->data_size;
+            }
+         }
+      }
+
+      alpha_loc = stbi_avif__find_location(parser, parser->alpha_item_id);
+      if (alpha_loc != NULL && alpha_loc->construction_method == 0 &&
+          alpha_loc->extent_count == 1 && parser->has_alpha_av1_config)
+      {
+         size_t aoff = alpha_loc->base_offset + alpha_loc->extent_offset;
+         size_t alen = alpha_loc->extent_length;
+         if (stbi_avif__range_check(buffer, aoff, alen))
+         {
+            parser->alpha_payload_offset = aoff;
+            parser->alpha_payload_size = alen;
+            parser->has_alpha = 1;
+         }
+      }
+   }
 
    return 1;
 }
@@ -11772,7 +12160,7 @@ int stbi_avif_info_from_memory(const unsigned char *buffer, int len, int *x, int
    if (y != NULL)
       *y = (int)parser.height;
    if (channels_in_file != NULL)
-      *channels_in_file = STBI_AVIF_CHANNELS;
+      *channels_in_file = parser.has_alpha ? 4 : 3;
 
    stbi_avif__parser_free(&parser);
    return 1;
@@ -11802,8 +12190,7 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       *x = (int)parser.width;
    if (y != NULL)
       *y = (int)parser.height;
-   if (channels_in_file != NULL)
-      *channels_in_file = STBI_AVIF_CHANNELS;
+   /* channels_in_file is set later after we know if alpha exists */
 
     ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &parser, &headers);
     if (!ok)
@@ -11845,15 +12232,87 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       const unsigned char *tile_data = buffer + parser.payload_offset + frame_index.tile_group_offset;
       size_t               tile_size = frame_index.tile_group_size;
       unsigned char *rgba;
+      unsigned short *alpha_plane = NULL;
+      unsigned int alpha_w = 0, alpha_h = 0, alpha_bd = 0;
+      int file_has_alpha = parser.has_alpha;
+
+      /* Decode alpha item if present */
+      if (parser.has_alpha)
+      {
+         stbi_avif__av1_headers alpha_headers;
+         stbi_avif__av1_frame_index alpha_findex;
+         stbi_avif__av1_frame_header alpha_fhdr;
+         stbi_avif__av1_tile_group_header alpha_tg;
+         /* Build a temporary parser struct for the alpha item to reuse
+          * the existing header-parsing infrastructure. */
+         stbi_avif__parser alpha_parser;
+         memset(&alpha_parser, 0, sizeof(alpha_parser));
+         alpha_parser.has_av1_config = 1;
+         alpha_parser.av1c_offset = parser.alpha_av1c_offset;
+         alpha_parser.av1c_size = parser.alpha_av1c_size;
+         alpha_parser.payload_offset = parser.alpha_payload_offset;
+         alpha_parser.payload_size = parser.alpha_payload_size;
+         alpha_parser.width = parser.width;
+         alpha_parser.height = parser.height;
+
+         ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &alpha_parser, &alpha_headers);
+         if (ok)
+         {
+            ok = stbi_avif__index_av1_frame_obus(buffer + alpha_parser.payload_offset, alpha_parser.payload_size, &alpha_findex);
+            if (ok)
+            {
+               ok = stbi_avif__parse_av1_frame_header(buffer + alpha_parser.payload_offset + alpha_findex.frame_header_offset,
+                                                      alpha_findex.frame_header_size,
+                                                      &alpha_headers.sequence_header,
+                                                      &alpha_fhdr);
+               if (ok)
+               {
+                  ok = stbi_avif__parse_av1_tile_group_header(buffer + alpha_parser.payload_offset + alpha_findex.tile_group_offset,
+                                                              alpha_findex.tile_group_size,
+                                                              alpha_findex.frame_is_combined_obu ? alpha_fhdr.header_bits_consumed : 0u,
+                                                              &alpha_fhdr,
+                                                              &alpha_tg);
+                  if (ok)
+                  {
+                     alpha_plane = stbi_avif__av1_decode_alpha_plane(
+                        buffer + alpha_parser.payload_offset + alpha_findex.tile_group_offset,
+                        alpha_findex.tile_group_size,
+                        &alpha_headers.sequence_header,
+                        &alpha_fhdr,
+                        &alpha_tg,
+                        &alpha_w, &alpha_h, &alpha_bd);
+                     /* Validate alpha dimensions match primary */
+                     if (alpha_plane != NULL &&
+                         (alpha_w != frame_header.frame_width || alpha_h != frame_header.frame_height))
+                     {
+                        STBI_AVIF_FREE(alpha_plane);
+                        alpha_plane = NULL;
+                     }
+                  }
+               }
+            }
+         }
+         /* Alpha decode failure is not fatal — we fall back to opaque */
+         if (alpha_plane == NULL)
+            file_has_alpha = 0;
+      }
+
       stbi_avif__parser_free(&parser);
       rgba = stbi_avif__av1_decode(
                 tile_data,
                 tile_size,
                 &headers.sequence_header,
                 &frame_header,
-                &tile_group);
+                &tile_group,
+                alpha_plane,
+                alpha_bd);
+      STBI_AVIF_FREE(alpha_plane);
       if (rgba == NULL)
          return NULL;
+
+      /* Report actual channel count: 4 if alpha present, 3 if not */
+      if (channels_in_file != NULL)
+         *channels_in_file = file_has_alpha ? 4 : 3;
 
       /* Post-process: convert RGBA to desired channel count */
       if (desired_channels == 3)
