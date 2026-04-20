@@ -8057,6 +8057,28 @@ static const unsigned char stbi_avif__sm_weights[128] = {
       7,   6,   6,   5,   5,   4,   4,   4
 };
 
+/* AV1 directional intra prediction derivative table.
+ * dr_intra_derivative[a] = round(256 / tan(a * PI / 180)) for a = 1..89.
+ * Used to compute sub-pixel shifts in Z1/Z2/Z3 directional prediction.
+ * Index 0 is unused (angle=0 is undefined). */
+static const int stbi_avif__dr_intra_derivative[90] = {
+   0,
+   14666, 7331, 4885, 3661, 2926, 2436, 2085, 1822, 1616, 1452,
+    1317, 1204, 1109, 1027,  955,  893,  837,  788,  743,  703,
+     667,  634,  603,  575,  549,  525,  502,  481,  462,  443,
+     426,  410,  394,  380,  366,  352,  340,  328,  316,  305,
+     294,  284,  275,  265,  256,  247,  239,  231,  223,  215,
+     207,  200,  193,  186,  179,  173,  166,  160,  154,  148,
+     142,  136,  130,  125,  119,  114,  109,  103,   98,   93,
+      88,   83,   78,   73,   69,   64,   59,   54,   50,   45,
+      41,   36,   31,   27,   22,   18,   13,    9,    4
+};
+
+/* AV1 nominal angle for each intra mode (1-8). Index 0 unused. */
+static const int stbi_avif__mode_to_angle[9] = {
+   0, 90, 180, 45, 135, 113, 157, 203, 67
+};
+
 static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int stride,
                                           unsigned int plane_w,
@@ -8066,10 +8088,11 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int bw,
                                           unsigned int bh,
                                           unsigned int bit_depth,
-                                          unsigned int mode)
+                                          unsigned int mode,
+                                          int angle_delta)
 {
-   unsigned short top[256];
-   unsigned short left[256];
+   unsigned short top[512];
+   unsigned short left[512];
    unsigned short top_left;
    unsigned int ref_count;
    unsigned int i;
@@ -8078,15 +8101,16 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    int base;
    int amp;
    int dc;
+   int angle, dx, dy;
    int have_top = (by > 0u) ? 1 : 0;
    int have_left = (bx > 0u) ? 1 : 0;
 
    base = (int)(1u << (bit_depth - 1u));
    amp = (bit_depth > 8u) ? (8 << (bit_depth - 8u)) : 8;
 
-   ref_count = bw + bh + 2u;
-   if (ref_count > 256u)
-      ref_count = 256u;
+   ref_count = 2u * (bw + bh) + 1u;
+   if (ref_count > 512u)
+      ref_count = 512u;
 
    /* Fill left[] reference array: if no left col, fill with top[0] or base+1 */
    for (i = 0u; i < ref_count; ++i) {
@@ -8122,6 +8146,42 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    else
       top_left = (unsigned short)base;
 
+   /* AV1 intra edge filtering: apply 3-tap [1,2,1]/4 smoothing filter
+    * on reference samples for directional modes when both edges available. */
+   if (have_top && have_left && mode >= 1u && mode <= 8u) {
+      unsigned short ftop[512], fleft[512];
+      unsigned short ftl;
+      ftl = (unsigned short)(((int)left[0] + 2 * (int)top_left + (int)top[0] + 2) >> 2);
+      ftop[0] = (unsigned short)(((int)top_left + 2 * (int)top[0] + (int)top[1] + 2) >> 2);
+      for (i = 1u; i + 1u < ref_count; ++i)
+         ftop[i] = (unsigned short)(((int)top[i-1] + 2 * (int)top[i] + (int)top[i+1] + 2) >> 2);
+      if (ref_count > 0u)
+         ftop[ref_count - 1u] = top[ref_count - 1u];
+      fleft[0] = (unsigned short)(((int)top_left + 2 * (int)left[0] + (int)left[1] + 2) >> 2);
+      for (i = 1u; i + 1u < ref_count; ++i)
+         fleft[i] = (unsigned short)(((int)left[i-1] + 2 * (int)left[i] + (int)left[i+1] + 2) >> 2);
+      if (ref_count > 0u)
+         fleft[ref_count - 1u] = left[ref_count - 1u];
+      for (i = 0u; i < ref_count; ++i) { top[i] = ftop[i]; left[i] = fleft[i]; }
+      top_left = ftl;
+   }
+
+   /* Compute actual angle for directional modes */
+   angle = 0;
+   dx = 0;
+   dy = 0;
+   if (mode >= 1u && mode <= 8u) {
+      angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
+      if (angle > 0 && angle < 90) {
+         dx = stbi_avif__dr_intra_derivative[angle];
+      } else if (angle > 90 && angle < 180) {
+         dx = stbi_avif__dr_intra_derivative[180 - angle];
+         dy = stbi_avif__dr_intra_derivative[angle - 90];
+      } else if (angle > 180 && angle < 270) {
+         dy = stbi_avif__dr_intra_derivative[270 - angle];
+      }
+   }
+
    /* Mode conversion for DC and PAETH when references unavailable (per AV1 spec) */
    if (mode == 0u) { /* DC_PRED */
       if (!have_left && !have_top) mode = 13u; /* DC_128 (use base) */
@@ -8153,7 +8213,7 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          }
       }
       if (count > 0u)
-         dc = sum / (int)count;
+         dc = (sum + (int)(count >> 1u)) / (int)count;
    }
 
    for (y = 0u; y < bh; ++y)
@@ -8180,30 +8240,83 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 15u: /* LEFT_DC_PRED: left only */
                val = dc;  /* dc was computed using left[] only */
                break;
-            case 1u: /* V */
-               val = (int)top[tix] + ((int)(2u * x + 1u) * amp) / (int)(2u * (bw ? bw : 1u)) - amp / 2;
+            case 1u: case 2u: case 3u: case 4u:
+            case 5u: case 6u: case 7u: case 8u:
+            {
+               int pp, b, frac, r0, r1, base_x, base_y;
+               int py2;
+               (void)base_y; (void)py2;
+               pp = 0; b = 0; frac = 0; r0 = 0; r1 = 0; base_x = 0; base_y = 0; py2 = 0;
+               if (angle > 0 && angle < 90) {
+                  /* Zone 1: top reference only */
+                  pp = ((int)x << 8) - ((int)y + 1) * dx;
+                  b = pp >> 8;
+                  frac = pp & 0xFF;
+                  if (b < -1)
+                     val = (int)top_left;
+                  else if (b >= (int)ref_count - 1)
+                     val = (int)top[ref_count - 1u];
+                  else if (frac == 0)
+                     val = (b < 0) ? (int)top_left : (int)top[b];
+                  else {
+                     r0 = (b < 0) ? (int)top_left : (int)top[b];
+                     r1 = (b + 1 < 0) ? (int)top_left : ((b + 1 < (int)ref_count) ? (int)top[b + 1] : (int)top[ref_count - 1u]);
+                     val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                  }
+               } else if (angle > 180 && angle < 270) {
+                  /* Zone 3: left reference only */
+                  pp = ((int)y << 8) - ((int)x + 1) * dy;
+                  b = pp >> 8;
+                  frac = pp & 0xFF;
+                  if (b < -1)
+                     val = (int)top_left;
+                  else if (b >= (int)ref_count - 1)
+                     val = (int)left[ref_count - 1u];
+                  else if (frac == 0)
+                     val = (b < 0) ? (int)top_left : (int)left[b];
+                  else {
+                     r0 = (b < 0) ? (int)top_left : (int)left[b];
+                     r1 = (b + 1 < 0) ? (int)top_left : ((b + 1 < (int)ref_count) ? (int)left[b + 1] : (int)left[ref_count - 1u]);
+                     val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                  }
+               } else if (angle > 90 && angle < 180) {
+                  /* Zone 2: both top and left */
+                  pp = ((int)x << 8) - ((int)y + 1) * dx;
+                  base_x = pp >> 8;
+                  if (base_x >= -1) {
+                     frac = pp & 0xFF;
+                     if (frac == 0)
+                        val = (base_x < 0) ? (int)top_left : (int)top[base_x];
+                     else {
+                        r0 = (base_x < 0) ? (int)top_left : (int)top[base_x];
+                        r1 = (base_x + 1 < 0) ? (int)top_left : ((base_x + 1 < (int)ref_count) ? (int)top[base_x + 1] : (int)top[ref_count - 1u]);
+                        val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                     }
+                  } else {
+                     py2 = ((int)y << 8) - ((int)x + 1) * dy;
+                     base_y = py2 >> 8;
+                     frac = py2 & 0xFF;
+                     if (base_y < -1)
+                        val = (int)top_left;
+                     else if (base_y >= (int)ref_count - 1)
+                        val = (int)left[ref_count - 1u];
+                     else if (frac == 0)
+                        val = (base_y < 0) ? (int)top_left : (int)left[base_y];
+                     else {
+                        r0 = (base_y < 0) ? (int)top_left : (int)left[base_y];
+                        r1 = (base_y + 1 < 0) ? (int)top_left : ((base_y + 1 < (int)ref_count) ? (int)left[base_y + 1] : (int)left[ref_count - 1u]);
+                        val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                     }
+                  }
+               } else if (angle == 90) {
+                  val = (int)top[tix]; /* pure vertical */
+               } else if (angle == 180) {
+                  val = (int)left[tiy]; /* pure horizontal */
+               } else {
+                  val = dc; /* fallback */
+               }
                break;
-            case 2u: /* H */
-               val = (int)left[tiy] + ((int)(2u * y + 1u) * amp) / (int)(2u * (bh ? bh : 1u)) - amp / 2;
-               break;
-            case 3u: /* D45 */
-               val = (int)top[dix] + ((int)di * amp) / (int)((bw + bh) ? (bw + bh) : 1u) - amp / 2;
-               break;
-            case 4u: /* D135 */
-               val = ((int)top[tix] + (int)left[tiy] + (int)top_left) / 3 + (((int)y - (int)x) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 5u: /* D113 */
-               val = (2 * (int)top[tix] + (int)top[dix] + (int)left[tiy]) / 4;
-               break;
-            case 6u: /* D157 */
-               val = (2 * (int)left[tiy] + (int)left[dix] + (int)top[tix]) / 4;
-               break;
-            case 7u: /* D203 */
-               val = (3 * (int)left[tiy] + (int)top[tix]) / 4 - (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 8u: /* D67 */
-               val = (3 * (int)top[tix] + (int)left[tiy]) / 4 + (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
+            }
             case 9u: /* SMOOTH */
                {
                   /* AV1 spec: pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom
@@ -8323,7 +8436,7 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
          ac = luma_avg - y_avg;
          cfl_term = alpha * ac;
          /* Round signed alpha*ac to nearest while applying AV1 CFL /8 scale. */
-         delta = (cfl_term + (cfl_term >= 0 ? 4 : -4)) >> 3;
+         delta = (cfl_term + (cfl_term >= 0 ? 32 : -32)) >> 6;
          pred = (int)crow[x] + delta;
          crow[x] = stbi_avif__av1_clip_sample(pred, planes->bit_depth);
       }
@@ -8345,6 +8458,11 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
  */
 
 #define STBI_AVIF_ROUND_SHIFT(a, b) (((a) + (1 << ((b) - 1))) >> (b))
+
+/* AV1 spec inter-stage clipping: clamp to signed (bd+8)-bit range.
+ * For 8-bit: ±(1<<15)-1 = ±32767. For 10-bit: ±(1<<17)-1. For 12-bit: ±(1<<19)-1.
+ * Since we work with 8-bit internally, use 16-bit range. */
+#define STBI_AVIF_CLIP_INT16(x) ((x) > 32767 ? 32767 : ((x) < -32767 ? -32767 : (x)))
 
 /* AOM-compatible half butterfly: round((a*x + b*y) >> cos_bit) */
 #define STBI_AVIF_HALF_BTF(w0, in0, w1, in1, cos_bit) \
@@ -8381,6 +8499,10 @@ static void stbi_avif__av1_idct4(const int *input, int *output)
    bf0[1] = STBI_AVIF_HALF_BTF(c[32], bf1[0], -c[32], bf1[1], COS_BIT);
    bf0[2] = STBI_AVIF_HALF_BTF(c[48], bf1[2], -c[16], bf1[3], COS_BIT);
    bf0[3] = STBI_AVIF_HALF_BTF(c[16], bf1[2],  c[48], bf1[3], COS_BIT);
+   bf0[0] = STBI_AVIF_CLIP_INT16(bf0[0]);
+   bf0[1] = STBI_AVIF_CLIP_INT16(bf0[1]);
+   bf0[2] = STBI_AVIF_CLIP_INT16(bf0[2]);
+   bf0[3] = STBI_AVIF_CLIP_INT16(bf0[3]);
    /* stage 3 */
    output[0] = bf0[0] + bf0[3];
    output[1] = bf0[1] + bf0[2];
@@ -8410,6 +8532,10 @@ static void stbi_avif__av1_idct8(const int *input, int *output)
    bf0[5] = step[4] - step[5];
    bf0[6] = -step[6] + step[7];
    bf0[7] = step[6] + step[7];
+   bf0[0] = STBI_AVIF_CLIP_INT16(bf0[0]); bf0[1] = STBI_AVIF_CLIP_INT16(bf0[1]);
+   bf0[2] = STBI_AVIF_CLIP_INT16(bf0[2]); bf0[3] = STBI_AVIF_CLIP_INT16(bf0[3]);
+   bf0[4] = STBI_AVIF_CLIP_INT16(bf0[4]); bf0[5] = STBI_AVIF_CLIP_INT16(bf0[5]);
+   bf0[6] = STBI_AVIF_CLIP_INT16(bf0[6]); bf0[7] = STBI_AVIF_CLIP_INT16(bf0[7]);
    /* stage 4 */
    step[0] = bf0[0] + bf0[3];
    step[1] = bf0[1] + bf0[2];
@@ -8419,6 +8545,10 @@ static void stbi_avif__av1_idct8(const int *input, int *output)
    step[5] = STBI_AVIF_HALF_BTF(-c[32], bf0[5], c[32], bf0[6], COS_BIT);
    step[6] = STBI_AVIF_HALF_BTF( c[32], bf0[5], c[32], bf0[6], COS_BIT);
    step[7] = bf0[7];
+   step[0] = STBI_AVIF_CLIP_INT16(step[0]); step[1] = STBI_AVIF_CLIP_INT16(step[1]);
+   step[2] = STBI_AVIF_CLIP_INT16(step[2]); step[3] = STBI_AVIF_CLIP_INT16(step[3]);
+   step[4] = STBI_AVIF_CLIP_INT16(step[4]); step[5] = STBI_AVIF_CLIP_INT16(step[5]);
+   step[6] = STBI_AVIF_CLIP_INT16(step[6]); step[7] = STBI_AVIF_CLIP_INT16(step[7]);
    /* stage 5 */
    output[0] = step[0] + step[7];
    output[1] = step[1] + step[6];
@@ -8464,6 +8594,7 @@ static void stbi_avif__av1_idct16(const int *input, int *output)
    bf0[13] = step[12] - step[13];
    bf0[14] = -step[14] + step[15];
    bf0[15] = step[14] + step[15];
+   { int ci; for (ci=0;ci<16;++ci) bf0[ci]=STBI_AVIF_CLIP_INT16(bf0[ci]); }
    /* stage 4 */
    step[0] = STBI_AVIF_HALF_BTF(c[32], bf0[0],  c[32], bf0[1], COS_BIT);
    step[1] = STBI_AVIF_HALF_BTF(c[32], bf0[0], -c[32], bf0[1], COS_BIT);
@@ -8481,6 +8612,7 @@ static void stbi_avif__av1_idct16(const int *input, int *output)
    step[13] = STBI_AVIF_HALF_BTF(-c[16], bf0[10], c[48], bf0[13], COS_BIT);
    step[14] = STBI_AVIF_HALF_BTF( c[48], bf0[9],  c[16], bf0[14], COS_BIT);
    step[15] = bf0[15];
+   { int ci; for (ci=0;ci<16;++ci) step[ci]=STBI_AVIF_CLIP_INT16(step[ci]); }
    /* stage 5 */
    bf0[0] = step[0] + step[3];
    bf0[1] = step[1] + step[2];
@@ -8498,6 +8630,7 @@ static void stbi_avif__av1_idct16(const int *input, int *output)
    bf0[13] = -step[13] + step[14];
    bf0[14] = step[13] + step[14];
    bf0[15] = step[12] + step[15];
+   { int ci; for (ci=0;ci<16;++ci) bf0[ci]=STBI_AVIF_CLIP_INT16(bf0[ci]); }
    /* stage 6 */
    step[0] = bf0[0] + bf0[7];
    step[1] = bf0[1] + bf0[6];
@@ -8515,6 +8648,7 @@ static void stbi_avif__av1_idct16(const int *input, int *output)
    step[13] = STBI_AVIF_HALF_BTF( c[32], bf0[10], c[32], bf0[13], COS_BIT);
    step[14] = bf0[14];
    step[15] = bf0[15];
+   { int ci; for (ci=0;ci<16;++ci) step[ci]=STBI_AVIF_CLIP_INT16(step[ci]); }
    /* stage 7 */
    output[0]  = step[0] + step[15];
    output[1]  = step[1] + step[14];
@@ -8595,6 +8729,7 @@ static void stbi_avif__av1_idct32(const int *input, int *output)
    bf0[29] = step[28] - step[29];
    bf0[30] = -step[30] + step[31];
    bf0[31] = step[30] + step[31];
+   { int ci; for (ci=0;ci<32;++ci) bf0[ci]=STBI_AVIF_CLIP_INT16(bf0[ci]); }
    /* stage 4 */
    step[0]=bf0[0]; step[1]=bf0[1]; step[2]=bf0[2]; step[3]=bf0[3];
    step[4] = STBI_AVIF_HALF_BTF(c[56], bf0[4], -c[8],  bf0[7], COS_BIT);
@@ -8658,6 +8793,7 @@ static void stbi_avif__av1_idct32(const int *input, int *output)
    bf0[29] = -step[29] + step[30];
    bf0[30] = step[29] + step[30];
    bf0[31] = step[28] + step[31];
+   { int ci; for (ci=0;ci<32;++ci) bf0[ci]=STBI_AVIF_CLIP_INT16(bf0[ci]); }
    /* stage 6 */
    step[0] = bf0[0] + bf0[3];
    step[1] = bf0[1] + bf0[2];
@@ -8724,6 +8860,7 @@ static void stbi_avif__av1_idct32(const int *input, int *output)
    bf0[29] = step[26] + step[29];
    bf0[30] = step[25] + step[30];
    bf0[31] = step[24] + step[31];
+   { int ci; for (ci=0;ci<32;++ci) bf0[ci]=STBI_AVIF_CLIP_INT16(bf0[ci]); }
    /* stage 8 */
    step[0]  = bf0[0] + bf0[15];
    step[1]  = bf0[1] + bf0[14];
@@ -9485,6 +9622,7 @@ static void stbi_avif__av1_iadst8(const int *input, int *output)
    /* stage 3 */
    bf1[0]=step[0]+step[4]; bf1[1]=step[1]+step[5]; bf1[2]=step[2]+step[6]; bf1[3]=step[3]+step[7];
    bf1[4]=step[0]-step[4]; bf1[5]=step[1]-step[5]; bf1[6]=step[2]-step[6]; bf1[7]=step[3]-step[7];
+   { int ci; for (ci=0;ci<8;++ci) bf1[ci]=STBI_AVIF_CLIP_INT16(bf1[ci]); }
    /* stage 4 */
    step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
    step[4] = STBI_AVIF_HALF_BTF(c[16], bf1[4], c[48], bf1[5], COS_BIT);
@@ -9494,6 +9632,7 @@ static void stbi_avif__av1_iadst8(const int *input, int *output)
    /* stage 5 */
    bf1[0]=step[0]+step[2]; bf1[1]=step[1]+step[3]; bf1[2]=step[0]-step[2]; bf1[3]=step[1]-step[3];
    bf1[4]=step[4]+step[6]; bf1[5]=step[5]+step[7]; bf1[6]=step[4]-step[6]; bf1[7]=step[5]-step[7];
+   { int ci; for (ci=0;ci<8;++ci) bf1[ci]=STBI_AVIF_CLIP_INT16(bf1[ci]); }
    /* stage 6 */
    step[0]=bf1[0]; step[1]=bf1[1];
    step[2] = STBI_AVIF_HALF_BTF(c[32], bf1[2], c[32], bf1[3], COS_BIT);
@@ -9541,6 +9680,7 @@ static void stbi_avif__av1_iadst16(const int *input, int *output)
    bf1[10]=step[2]-step[10]; bf1[11]=step[3]-step[11];
    bf1[12]=step[4]-step[12]; bf1[13]=step[5]-step[13];
    bf1[14]=step[6]-step[14]; bf1[15]=step[7]-step[15];
+   { int ci; for (ci=0;ci<16;++ci) bf1[ci]=STBI_AVIF_CLIP_INT16(bf1[ci]); }
    /* stage 4 */
    step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
    step[4]=bf1[4]; step[5]=bf1[5]; step[6]=bf1[6]; step[7]=bf1[7];
@@ -9561,6 +9701,7 @@ static void stbi_avif__av1_iadst16(const int *input, int *output)
    bf1[10]=step[10]+step[14]; bf1[11]=step[11]+step[15];
    bf1[12]=step[8]-step[12]; bf1[13]=step[9]-step[13];
    bf1[14]=step[10]-step[14]; bf1[15]=step[11]-step[15];
+   { int ci; for (ci=0;ci<16;++ci) bf1[ci]=STBI_AVIF_CLIP_INT16(bf1[ci]); }
    /* stage 6 */
    step[0]=bf1[0]; step[1]=bf1[1]; step[2]=bf1[2]; step[3]=bf1[3];
    step[4] = STBI_AVIF_HALF_BTF(c[16], bf1[4], c[48], bf1[5], COS_BIT);
@@ -9581,6 +9722,7 @@ static void stbi_avif__av1_iadst16(const int *input, int *output)
    bf1[10]=step[8]-step[10]; bf1[11]=step[9]-step[11];
    bf1[12]=step[12]+step[14]; bf1[13]=step[13]+step[15];
    bf1[14]=step[12]-step[14]; bf1[15]=step[13]-step[15];
+   { int ci; for (ci=0;ci<16;++ci) bf1[ci]=STBI_AVIF_CLIP_INT16(bf1[ci]); }
    /* stage 8 */
    step[0]=bf1[0]; step[1]=bf1[1];
    step[2] = STBI_AVIF_HALF_BTF(c[32], bf1[2], c[32], bf1[3], COS_BIT);
@@ -10050,11 +10192,20 @@ static int stbi_avif__av1_read_coeffs_after_skip(
 
          /* Dequantize */
          qstep = (pos == 0) ? dc_qstep : ac_qstep;
-         dequant_val = lvl * qstep;
-         /* Apply TX scale: shift >>1 for 32x32 and larger */
+         /* TODO: Quantization matrix (QM) scaling not yet applied.
+          * When frame->using_qmatrix is set, coefficients should be
+          * scaled by the QM table entry. This is rare in still AVIFs. */
+         dequant_val = (lvl * qstep) & 0xffffff;
+         /* Clamp to valid coefficient range per AV1 spec */
+         {
+            int cf_max = (1 << 20) - 1;
+            if (dequant_val > cf_max) dequant_val = cf_max;
+         }
+         /* Apply TX scale per AV1 spec §7.12.3:
+          * tx2dszctx 6+ (32x32+) → >>2, tx2dszctx 5 (e.g. 32x16, 16x32) → >>1 */
          if (tx2dszctx >= 6)
             dequant_val >>= 2;
-         else if (tx2dszctx >= 5 || (txw >= 32 || txh >= 32))
+         else if (tx2dszctx >= 5)
             dequant_val >>= 1;
          if (sign) dequant_val = -dequant_val;
 
@@ -10209,6 +10360,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_tx_szw, uv_tx_szh, uv_mode_raw;
    int cfl_alpha_u, cfl_alpha_v;
+   int y_angle_delta, uv_angle_delta;
    int palette_y_size, palette_uv_size;
    unsigned short palette_y_colors[8];
    unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
@@ -10221,6 +10373,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    palette_uv_size = 0;
    cfl_alpha_u = 0;
    cfl_alpha_v = 0;
+   y_angle_delta = 0;
+   uv_angle_delta = 0;
    if (px + pw > ctx->planes->width)  pw = ctx->planes->width  - px;
    if (py + ph > ctx->planes->height) ph = ctx->planes->height - py;
 
