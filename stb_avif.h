@@ -6,11 +6,11 @@
 
    Current status:
    - Pure C89, single-header, libc only (no libavif, no dav1d, no libaom)
-   - Decodes 8-bit YUV420/444 still images to RGBA
+   - Decodes 8-bit YUV420/422/444 still images to RGBA
    - Full AV1 intra frame parsing and coefficient decode
    - Handles BT.601, BT.709, BT.2020, and identity matrix coefficients
    - Full/limited color range support
-   - No animation (avis), no alpha plane, no film grain, no loop restoration
+   - No animation (avis), no alpha plane
    - Tested against example_avif/ corpus (various .avif files)
 
    Usage:
