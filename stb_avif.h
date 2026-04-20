@@ -32,6 +32,16 @@ int stbi_avif_info(const char *filename, int *x, int *y, int *channels_in_file);
 void stbi_avif_image_free(void *retval_from_stbi_avif_load);
 const char *stbi_avif_failure_reason(void);
 
+#ifdef STB_AVIF_WRITE_PNG
+/* PNG writer: convert decoded pixel buffer to PNG.
+ * pixels: RGBA (channels=4), RGB (channels=3), or grayscale (channels=1).
+ * Returns 1 on success, 0 on failure. */
+int stbi_avif_write_png(const char *filename, const unsigned char *pixels, int width, int height, int channels);
+/* Write PNG to memory. Returns a malloc'd buffer (caller must free with stbi_avif_image_free).
+ * Sets *out_len to the size in bytes. Returns NULL on failure. */
+unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int width, int height, int channels, int *out_len);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
@@ -14775,5 +14785,210 @@ unsigned char *stbi_avif_load(const char *filename, int *x, int *y, int *channel
    STBI_AVIF_FREE(data);
    return result;
 }
+
+/* =========================================================================
+ *  PNG Writer (optional, enabled by STB_AVIF_WRITE_PNG)
+ * =========================================================================
+ * Supports grayscale (1 channel), RGB (3 channels), and RGBA (4 channels).
+ * Uses uncompressed deflate (store blocks) for simplicity. */
+
+#ifdef STB_AVIF_WRITE_PNG
+
+static void stbi_avif__png_write_be32(unsigned char *out, unsigned long v)
+{
+   out[0] = (unsigned char)((v >> 24) & 0xFFu);
+   out[1] = (unsigned char)((v >> 16) & 0xFFu);
+   out[2] = (unsigned char)((v >> 8) & 0xFFu);
+   out[3] = (unsigned char)(v & 0xFFu);
+}
+
+static unsigned long stbi_avif__png_crc32_update(unsigned long crc, const unsigned char *data, size_t len)
+{
+   size_t i;
+   int bit;
+   for (i = 0; i < len; ++i) {
+      crc ^= (unsigned long)data[i];
+      for (bit = 0; bit < 8; ++bit) {
+         if (crc & 1u)
+            crc = 0xEDB88320u ^ (crc >> 1);
+         else
+            crc >>= 1;
+      }
+   }
+   return crc;
+}
+
+static unsigned long stbi_avif__png_adler32(const unsigned char *data, size_t len)
+{
+   unsigned long s1 = 1u, s2 = 0u;
+   size_t i;
+   for (i = 0; i < len; ++i) {
+      s1 = (s1 + data[i]) % 65521u;
+      s2 = (s2 + s1) % 65521u;
+   }
+   return (s2 << 16) | s1;
+}
+
+/* Build a complete PNG file in memory from pixel data.
+ * channels: 1=grayscale (color_type=0), 3=RGB (color_type=2), 4=RGBA (color_type=6).
+ * Returns a malloc'd buffer; caller frees with stbi_avif_image_free(). */
+unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int width, int height, int channels, int *out_len)
+{
+   int color_type, pixel_bytes;
+   size_t row_bytes, raw_size, zlib_size;
+   unsigned char *raw;
+   unsigned char *zlib;
+   unsigned char *png_buf;
+   unsigned char *wp;
+   size_t raw_pos, zpos, remain, block_len;
+   unsigned long adler, crc;
+   size_t png_size;
+   int y, x;
+   unsigned char ihdr[13];
+
+   if (pixels == NULL || width <= 0 || height <= 0 || out_len == NULL)
+      return NULL;
+   if (channels != 1 && channels != 3 && channels != 4)
+      return NULL;
+
+   /* Map channels to PNG color_type */
+   if (channels == 1) {
+      color_type = 0;  /* grayscale */
+      pixel_bytes = 1;
+   } else if (channels == 3) {
+      color_type = 2;  /* RGB */
+      pixel_bytes = 3;
+   } else {
+      color_type = 6;  /* RGBA */
+      pixel_bytes = 4;
+   }
+
+   row_bytes = (size_t)width * (size_t)pixel_bytes + 1u; /* +1 for filter byte */
+   raw_size = row_bytes * (size_t)height;
+
+   raw = (unsigned char *)STBI_AVIF_MALLOC(raw_size);
+   if (raw == NULL) return NULL;
+
+   /* Build raw scanlines with filter byte = 0 (None) */
+   raw_pos = 0u;
+   for (y = 0; y < height; ++y) {
+      raw[raw_pos++] = 0u; /* filter: None */
+      for (x = 0; x < width; ++x) {
+         const unsigned char *p = pixels + (((size_t)y * (size_t)width + (size_t)x) * (size_t)channels);
+         if (channels == 1) {
+            raw[raw_pos++] = p[0];
+         } else {
+            raw[raw_pos++] = p[0];
+            raw[raw_pos++] = p[1];
+            raw[raw_pos++] = p[2];
+            if (pixel_bytes == 4)
+               raw[raw_pos++] = p[3];
+         }
+      }
+   }
+
+   /* Wrap raw data in uncompressed zlib (deflate store blocks) */
+   zlib_size = 2u + raw_size + ((raw_size + 65534u) / 65535u) * 5u + 4u;
+   zlib = (unsigned char *)STBI_AVIF_MALLOC(zlib_size);
+   if (zlib == NULL) { STBI_AVIF_FREE(raw); return NULL; }
+
+   zpos = 0u;
+   zlib[zpos++] = 0x78u; /* CMF: deflate, window=32K */
+   zlib[zpos++] = 0x01u; /* FLG: check bits */
+   remain = raw_size;
+   raw_pos = 0u;
+   while (remain > 0u) {
+      block_len = remain > 65535u ? 65535u : remain;
+      zlib[zpos++] = (unsigned char)(remain <= 65535u ? 1u : 0u); /* BFINAL */
+      zlib[zpos++] = (unsigned char)(block_len & 0xFFu);
+      zlib[zpos++] = (unsigned char)((block_len >> 8) & 0xFFu);
+      zlib[zpos++] = (unsigned char)((~block_len) & 0xFFu);
+      zlib[zpos++] = (unsigned char)(((~block_len) >> 8) & 0xFFu);
+      memcpy(zlib + zpos, raw + raw_pos, block_len);
+      zpos += block_len;
+      raw_pos += block_len;
+      remain -= block_len;
+   }
+   adler = stbi_avif__png_adler32(raw, raw_size);
+   STBI_AVIF_FREE(raw);
+   stbi_avif__png_write_be32(zlib + zpos, adler);
+   zpos += 4u;
+
+   /* Compute total PNG file size:
+    * 8 (signature) + 25 (IHDR chunk) + 12+zpos (IDAT chunk) + 12 (IEND chunk) */
+   png_size = 8u + 25u + (12u + zpos) + 12u;
+   png_buf = (unsigned char *)STBI_AVIF_MALLOC(png_size);
+   if (png_buf == NULL) { STBI_AVIF_FREE(zlib); return NULL; }
+
+   wp = png_buf;
+
+   /* PNG signature */
+   wp[0] = 137u; wp[1] = 80u; wp[2] = 78u; wp[3] = 71u;
+   wp[4] = 13u;  wp[5] = 10u; wp[6] = 26u; wp[7] = 10u;
+   wp += 8;
+
+   /* IHDR chunk */
+   stbi_avif__png_write_be32(wp, 13u); wp += 4; /* length */
+   memcpy(wp, "IHDR", 4); wp += 4;
+   stbi_avif__png_write_be32(ihdr + 0, (unsigned long)width);
+   stbi_avif__png_write_be32(ihdr + 4, (unsigned long)height);
+   ihdr[8] = 8u;                        /* bit depth */
+   ihdr[9] = (unsigned char)color_type;  /* color type */
+   ihdr[10] = 0u;                        /* compression */
+   ihdr[11] = 0u;                        /* filter */
+   ihdr[12] = 0u;                        /* interlace */
+   memcpy(wp, ihdr, 13); wp += 13;
+   crc = 0xFFFFFFFFu;
+   crc = stbi_avif__png_crc32_update(crc, (const unsigned char *)"IHDR", 4u);
+   crc = stbi_avif__png_crc32_update(crc, ihdr, 13u) ^ 0xFFFFFFFFu;
+   stbi_avif__png_write_be32(wp, crc); wp += 4;
+
+   /* IDAT chunk */
+   stbi_avif__png_write_be32(wp, (unsigned long)zpos); wp += 4;
+   memcpy(wp, "IDAT", 4); wp += 4;
+   memcpy(wp, zlib, zpos); wp += zpos;
+   crc = 0xFFFFFFFFu;
+   crc = stbi_avif__png_crc32_update(crc, (const unsigned char *)"IDAT", 4u);
+   crc = stbi_avif__png_crc32_update(crc, zlib, zpos) ^ 0xFFFFFFFFu;
+   STBI_AVIF_FREE(zlib);
+   stbi_avif__png_write_be32(wp, crc); wp += 4;
+
+   /* IEND chunk */
+   stbi_avif__png_write_be32(wp, 0u); wp += 4;
+   memcpy(wp, "IEND", 4); wp += 4;
+   crc = 0xFFFFFFFFu;
+   crc = stbi_avif__png_crc32_update(crc, (const unsigned char *)"IEND", 4u) ^ 0xFFFFFFFFu;
+   stbi_avif__png_write_be32(wp, crc); wp += 4;
+
+   *out_len = (int)(wp - png_buf);
+   return png_buf;
+}
+
+int stbi_avif_write_png(const char *filename, const unsigned char *pixels, int width, int height, int channels)
+{
+   FILE *fp;
+   unsigned char *buf;
+   int buf_len;
+   size_t written;
+
+   if (filename == NULL)
+      return 0;
+
+   buf = stbi_avif_write_png_to_memory(pixels, width, height, channels, &buf_len);
+   if (buf == NULL)
+      return 0;
+
+   fp = fopen(filename, "wb");
+   if (fp == NULL) { STBI_AVIF_FREE(buf); return 0; }
+
+   written = fwrite(buf, 1u, (size_t)buf_len, fp);
+   STBI_AVIF_FREE(buf);
+
+   if (fclose(fp) != 0) return 0;
+   if (written != (size_t)buf_len) return 0;
+   return 1;
+}
+
+#endif /* STB_AVIF_WRITE_PNG */
 
 #endif
