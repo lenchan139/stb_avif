@@ -368,3 +368,241 @@ done
 - [ ] Fix DC rounding to use `(sum + (count >> 1)) >> log2(count)`
 - [ ] Verify SMOOTH weights table indices are correct for non-square blocks
 - [ ] Check ref_count limit (currently `bw + bh + 2`, should be `2 * max(bw, bh)`)
+
+---
+
+## 10. Detailed Comparison: stb_avif.h vs dav1d Reference Decoder
+
+### 10.1 Intra Prediction — CRITICAL DIFFERENCES
+
+#### V_PRED / H_PRED (Modes 1, 2) — **WRONG**
+
+| | stb_avif.h (line 8175) | dav1d (`ipred_v_c` / `ipred_h_c`) |
+|---|---|---|
+| V_PRED | `val = top[tix] + ((2*x+1) * amp) / (2*bw) - amp/2` | `dst[x] = top[x]` (pure copy) |
+| H_PRED | `val = left[tiy] + ((2*y+1) * amp) / (2*bh) - amp/2` | `dst[x] = left[y]` (constant fill per row) |
+
+stb_avif.h adds a linear gradient ramp that does not exist in the AV1 spec. This alone causes significant error on every V/H predicted block.
+
+#### Angular Modes D45–D67 (Modes 3-8) — **COMPLETELY WRONG**
+
+stb_avif.h uses crude averaging formulas:
+```c
+case 3u: /* D45 */  val = top[dix] + (di * amp) / (bw+bh) - amp/2;
+case 4u: /* D135 */ val = (top[tix] + left[tiy] + top_left) / 3 + ...;
+case 5u: /* D113 */ val = (2*top[tix] + top[dix] + left[tiy]) / 4;
+// etc.
+```
+
+dav1d uses the proper **Z1/Z2/Z3 angular predictors** with sub-pixel interpolation:
+```c
+// Z1 (angles 0-90): top-right diagonal
+dx = dav1d_dr_intra_derivative[angle >> 1];
+xpos = dx * (y + 1);
+frac = xpos & 0x3E;  // 6-bit fraction, even-only
+base = xpos >> 6;
+val = ((64 - frac) * top[base] + frac * top[base + 1] + 32) >> 6;
+
+// Z2 (angles 90-180): uses both top and left refs with dx/dy
+// Z3 (angles 180-270): bottom-left diagonal, uses dy
+```
+
+**Required tables:**
+```c
+// dr_intra_derivative[44] — derivative lookup indexed by (angle >> 1)
+static const int dr_intra_derivative[44] = {
+    0, 1023, 0, 547, 372, 0, 0, 273, 215, 0, 178, 151, 0, 132, 116, 0,
+    102, 0, 90, 80, 0, 71, 64, 0, 57, 51, 0, 45, 0, 40, 35, 0,
+    31, 27, 0, 23, 19, 0, 15, 0, 11, 0, 7, 3
+};
+
+// mode_to_angle_map[8] — nominal angle per directional mode
+static const int mode_to_angle_map[8] = { 90, 180, 45, 135, 113, 157, 203, 67 };
+```
+
+#### Angle Delta — **READ BUT DISCARDED** (line 10315)
+
+```c
+// CURRENT (stb_avif.h line 10313-10316):
+if (y_mode >= 1u && y_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8) {
+    stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+        ctx->angle_delta_cdf[y_mode - 1u], 7);  // return value IGNORED
+}
+```
+
+dav1d: `angle = mode_to_angle_map[mode - V_PRED] + 3 * (angle_delta - 3)`
+(CDF symbol 0-6 maps to delta -3..+3, so actual_delta = symbol - 3)
+
+The final angle selects which zone predictor (Z1/Z2/Z3) to use:
+- angle ≤ 90 → Z1
+- 90 < angle < 180 → Z2
+- angle ≥ 180 → Z3
+- angle == 90 exactly → V_PRED (pure vertical)
+- angle == 180 exactly → H_PRED (pure horizontal)
+
+#### DC Prediction Rounding — **APPROXIMATE**
+
+| | stb_avif.h | dav1d |
+|---|---|---|
+| Square blocks | `sum / count` (truncating division) | `(sum + (count >> 1)) >> ctz(count)` (rounded) |
+| Non-square 2:1 | `sum / count` | After shift, multiply by `0x5556 >> 16` |
+| Non-square 4:1 | `sum / count` | After shift, multiply by `0x3334 >> 16` |
+
+#### Smooth Weights — **CORRECT but indexing needs verification**
+
+stb_avif.h: `stbi_avif__sm_weights[sm_bw + sm_x]` (offset = block width)
+dav1d: `dav1d_sm_weights[width]` then index `weights[x]` for x=0..width-1
+
+Both use the same offset-by-blocksize scheme. Values match ✓
+
+However stb_avif.h has a `sm_x` scaling for non-standard sizes (`sm_x = bw > sm_bw ? (x * sm_bw) / bw : x`) which shouldn't be needed — block sizes are always powers of 2.
+
+#### Edge Preparation — **MISSING MAJOR FEATURES**
+
+dav1d's `ipred_prepare` does:
+1. **Extended reference loading**: reads `2*bw` top pixels (into top-right) and `2*bh` left pixels (below-left)
+2. **Edge filtering**: 3-tap `[4,8,4]/16`, `[5,6,5]/16`, or 5-tap `[2,4,4,4,2]/16` kernel on edges, selected by angle and block size
+3. **Edge upsampling**: 4-tap `{-1,9,9,-1}/16` kernel doubles resolution for steep angles on small blocks (angle < 40 && size ≤ 16)
+4. **Top-left corner filtering** for Z2: `*topleft = ((topleft[-1] + topleft[1]) * 5 + topleft[0] * 6 + 8) >> 4`
+
+stb_avif.h has NONE of these. It loads exactly `bw+bh+2` reference pixels with simple clamping.
+
+### 10.2 Inverse Transforms — MISSING CLIPPING
+
+| Feature | stb_avif.h | dav1d |
+|---------|-----------|-------|
+| COS_BIT | 12 ✓ | 12 ✓ |
+| cospi table | Matches ✓ | ✓ |
+| HALF_BTF macro | Uses `long` to avoid overflow ✓ | Uses decomposed rotation to avoid overflow |
+| **Inter-stage clipping** | **MISSING** | Clips to `INT16_MIN..INT16_MAX` between butterfly stages |
+| **Post-row clipping** | **MISSING** | Clips to `col_clip_min..col_clip_max` after row_shift |
+| Row shift values | Computed from `lw+lh` sum | Hardcoded per TX size pair (may differ for edge cases) |
+| Rect2 scaling | `(coeff * 181 + 128) >> 8` ✓ | Same ✓ |
+| Final normalization | `>> 4` ✓ | `(val + 8) >> 4` ✓ |
+| DC-only fast path | Not implemented | `(dc * 181 + 128) >> 8` chain for rect, then column `(dc * 181 + 128 + 2048) >> 12` |
+
+**Impact:** Missing clipping causes overflow on 10-bit content with large coefficients. For 8-bit content it's less critical but can still produce wrong values for extreme coefficient magnitudes.
+
+### 10.3 Dequantization — **dq_shift IS WRONG FOR TX_32X32**
+
+```c
+// stb_avif.h (line 10060-10064):
+if (tx2dszctx >= 6)       dequant_val >>= 2;
+else if (tx2dszctx >= 5 || (txw >= 32 || txh >= 32))
+                           dequant_val >>= 1;
+```
+
+```c
+// dav1d:
+dq_shift = imax(0, t_dim->ctx - 2);
+// t_dim->ctx values: TX_32X32 → ctx=3, shift=1
+// t_dim->ctx values: TX_64X64 → ctx=4, shift=2
+```
+
+| TX size | stb tx2dszctx | stb shift | dav1d ctx | dav1d shift | **Match?** |
+|---------|-------------|-----------|-----------|-------------|------------|
+| 4×4 | 0 | 0 | 0 | 0 | ✓ |
+| 8×8 | 2 | 0 | 1 | 0 | ✓ |
+| 16×16 | 4 | 0 | 2 | 0 | ✓ |
+| 32×32 | 6 | **2** | 3 | **1** | **✗ WRONG** |
+| 64×64 | 6 | 2 | 4 | 2 | ✓ |
+| 16×32 | 5 | 1 | 3 | 1 | ✓ |
+| 32×64 | 6 | 2 | 4 | 2 | ✓ |
+| 8×32 | 4 (txh≥32) | 1 | 2 | 0 | **✗ WRONG** |
+| 4×16 | 2 | 0 | 1 | 0 | ✓ |
+
+**TX_32×32 gets >>2 instead of >>1** — all 32×32 TX block coefficients are halved (divided by 4 instead of 2). This causes systematic under-reconstruction.
+
+**TX_8×32 gets >>1 instead of >>0** — the `(txw >= 32 || txh >= 32)` clause catches this wrongly.
+
+**Fix:** Replace the heuristic with `dq_shift = max(0, max(log2w, log2h) - 2)` where `log2w`, `log2h` are the log2 of TX dimensions in pixels divided by 4, i.e.:
+```c
+int max_txsz_log2 = (tx_log2w > tx_log2h) ? tx_log2w : tx_log2h;
+int dq_shift = max_txsz_log2 > 2 ? max_txsz_log2 - 2 : 0;
+```
+Where `tx_log2w/h` are 0=4px, 1=8px, 2=16px, 3=32px, 4=64px.
+
+### 10.4 Coefficient Decode — MOSTLY CORRECT
+
+| Feature | stb_avif.h | dav1d | Match? |
+|---------|-----------|-------|--------|
+| EOB bin decode | ✓ | ✓ | ✓ |
+| EOB extra bits | ✓ | ✓ | ✓ |
+| Scan order (square) | Hardcoded tables | Hardcoded tables | ✓ |
+| Scan order (rect) | Runtime generated | Hardcoded tables | Functionally ✓ |
+| Level context (2D) | `get_lower_levels_ctx_2d` | `get_lo_ctx` + offset tables | Needs audit |
+| BR context | Separate functions | Inline with mag sum | Needs audit |
+| Golomb coding | ✓ read_golomb for lvl≥15 | ✓ | ✓ |
+| DC sign context | ✓ from neighbor entropy | ✓ | ✓ |
+| **Overflow mask** | **MISSING** | `(dq * tok) & 0xffffff` for tok≥15 | **WRONG for large coefficients** |
+| **cf_max clamp** | **MISSING** | `umin(dq, cf_max)` where `cf_max = ~(~127U << bpc)` | **Can overflow** |
+| **QM (quant matrix)** | **MISSING** | `(dq * qm[rc] + 16) >> 5` when txtp < IDTX | **Missing feature** |
+| cul_level compute | ✓ | ✓ | ✓ |
+
+### 10.5 CFL (Chroma from Luma) — **WRONG ALGORITHM**
+
+dav1d CFL:
+1. During luma reconstruction, compute the **subsampled luma AC signal**: average neighboring luma pixels into chroma-resolution grid, then subtract the block-wide DC average
+2. Store this AC signal as a temporary buffer
+3. For UV prediction: `pred[x] = DC_pred[x] + clip(alpha * AC[x], -(1<<bd-1), (1<<bd-1)-1)`
+4. The AC signal rounding: `(alpha * AC + 32) >> 6`
+
+stb_avif.h CFL (line 8263-8372):
+1. Computes a **per-pixel** luma average by averaging the subsample region (correct general idea)
+2. But computes `y_avg` as the block-wide average, then `ac = per_pixel_luma_avg - y_avg`
+3. Scales as `delta = (alpha * ac + 4) >> 3` — wrong scaling factor (should be >>6 per spec, though alpha might be pre-scaled)
+4. The per-pixel approach is functionally similar but slower and may give slightly different rounding
+
+**Key issue:** The CFL scaling factor `>> 3` differs from dav1d's `>> 6`. This could cause 8× over-prediction on chroma, producing severely wrong colors on CFL blocks.
+
+### 10.6 Filter Intra — **IMPLEMENTED, MOSTLY CORRECT**
+
+stb_avif.h (line 7953-8057) implements the 4×2 sub-block 7-tap filter correctly:
+- Processes in 4×2 sub-blocks ✓
+- 7 reference pixels per sub-block ✓
+- `acc = sum(tap[i] * ref[i])`, then `(acc + 8) >> 4`, then clip ✓
+- Tap table `stbi_avif__filter_intra_taps[5][8][7]` — needs to be verified against dav1d's `dav1d_filter_intra_taps[5][64]` (different memory layout but same values)
+
+### 10.7 TX Size Selection — MOSTLY CORRECT
+
+| Feature | stb_avif.h | dav1d | Match? |
+|---------|-----------|-------|--------|
+| tx_size_cdf index | `max_dim - 1` | `t_dim->max - 1` | ✓ |
+| Context (tctx) | above/left TX comparison | `get_tx_ctx()` — similar comparison | Needs audit |
+| Depth iteration | Manual: halve larger dim | Lookup: `t_dim->sub` | Approximate ✓ |
+| nsyms | `min(max_dim, 2) + 1` | `imin(t_dim->max, 2) + 1` | ✓ |
+
+### 10.8 Post-Processing — IMPLEMENTED
+
+| Feature | stb_avif.h | dav1d | Status |
+|---------|-----------|-------|--------|
+| CDEF | ✓ (line 11777) | ✓ | Implemented (needs verification) |
+| Loop Restoration (Wiener) | ✓ (line 12540) | ✓ | Implemented |
+| Loop Restoration (Sgrproj) | ✓ (line 12540) | ✓ | Implemented |
+| Film Grain | ✓ (line 12011) | ✓ | Implemented |
+| SuperRes | ✓ (line 12854) | ✓ | Implemented |
+
+---
+
+## 11. Complete Missing/Wrong Feature List (sorted by estimated impact)
+
+| # | Feature | Location | Issue | Est. MAE Impact |
+|---|---------|----------|-------|-----------------|
+| 1 | **V/H prediction gradient** | L8175-8176 | Spurious gradient terms | ~5-8 MAE |
+| 2 | **Angular prediction (Z1/Z2/Z3)** | L8177-8196 | Crude approximations, not real algorithm | ~8-12 MAE |
+| 3 | **Angle delta discarded** | L10313-10316 | Read but return value ignored | ~2-4 MAE |
+| 4 | **dq_shift wrong for TX_32×32** | L10060-10064 | >>2 instead of >>1 (halves coefficients) | ~3-5 MAE |
+| 5 | **dq_shift wrong for TX_8×32** | L10060-10064 | >>1 instead of >>0 | ~1-2 MAE |
+| 6 | **CFL scaling factor** | L8354 | `>>3` instead of `>>6` (8× over-prediction) | ~2-4 MAE |
+| 7 | **Transform inter-stage clipping** | idct/iadst functions | No clipping between butterfly stages | ~1-3 MAE |
+| 8 | **DC rounding** | L8164 | `sum/count` vs `(sum+count/2)>>ctz(count)` | ~0.5-1 MAE |
+| 9 | **Extended reference pixels** | L8092-8117 | Only bw+bh+2 refs, no top-right/below-left | ~1-2 MAE |
+| 10 | **Edge filtering** | Not implemented | 3/5-tap filter on reference edges | ~0.5-1 MAE |
+| 11 | **Edge upsampling** | Not implemented | 4-tap upsample for steep angles on small blocks | ~0.3-0.5 MAE |
+| 12 | **Dequant overflow mask** | L10058 | Missing `& 0xffffff` for tok≥15 | ~0.1-0.5 MAE |
+| 13 | **Dequant cf_max clamp** | L10058 | Missing upper clamp | ~0.1 MAE |
+| 14 | **Quantization matrix** | Not implemented | Missing QM support (only used if enabled in frame header) | 0-1 MAE |
+| 15 | **Top-left corner filtering (Z2)** | Not implemented | `(tl[-1]+tl[1])*5 + tl[0]*6 + 8) >> 4` | ~0.1 MAE |
+| 16 | **Smooth weight scaling** | L8207 | Unnecessary sm_x/sm_y rescaling for non-power-of-2 | ~0 (blocks are always power-of-2) |
+
+**Total estimated recoverable MAE: ~25-40 (current MAE is 27.9)**
