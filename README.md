@@ -12,17 +12,18 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - ISOBMFF container parsing (`ftyp`, `meta`, `pitm`, `iprp`, `iloc`, `ispe`, `av1C`)
 - AV1 OBU parsing with both **reduced** and **full (non-reduced)** sequence/frame headers
 - AV1 intra-frame decode: superblock partition tree, all intra prediction modes (directional, DC, smooth, paeth, CFL, filter-intra, palette), arithmetic range coder, inverse transforms (DCT/ADST/identity 4×4–32×32), dequantization
+- **CDEF (Constrained Directional Enhancement Filter)** — direction finding, primary/secondary tap filtering with constrained damping on Y, U, V planes. Major visual quality improvement for lossy encodes.
 - YUV→RGBA conversion: BT.601 / BT.709 / BT.2020 (full-range and limited-range), identity matrix
 - 8-bit and 10-bit (down-shifted to 8-bit output) support
 - Monochrome (grayscale) image support
 - `desired_channels` parameter: request 1 (grayscale), 3 (RGB), or 4 (RGBA) channel output
+- Film grain parameter parsing — files with film grain params are accepted (grain synthesis not applied, parameters parsed and skipped)
 
 ### Not Yet Implemented
 
-- CDEF (Constrained Directional Enhancement Filter) — parameters parsed but filter not applied; may cause visible blocking artifacts
 - Loop restoration filter (Wiener / self-guided) — parameters parsed but not applied
 - Alpha plane support (auxiliary `auxl` items for transparency)
-- Film grain synthesis — files with film grain parameters are rejected
+- Film grain synthesis — parameters are parsed but grain noise is not synthesized
 - YUV 4:2:2 chroma subsampling
 - Animation / multi-frame sequences
 
@@ -31,7 +32,6 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - Static AVIF only (still pictures)
 - 8-bit and 10-bit content (output is always 8-bit per channel)
 - No animation
-- No film grain
 - No embedded alpha support
 - Pure C89 (uses `long long` for range decoder only)
 - No external dependencies except libc
@@ -67,7 +67,7 @@ This converts all sample AVIF files in `example_avif/` to PNG in `output_png/`.
 
 ## Next Implementation Milestones
 
-1. CDEF filter — major visual quality improvement for lossy encodes
-2. Loop restoration filter (Wiener / self-guided) — quality improvement for high-quality encodes
-3. Alpha plane support — web-essential feature for transparent images
-4. Film grain synthesis — completeness for encoder-emitted grain parameters
+1. Loop restoration filter (Wiener / self-guided) — quality improvement for high-quality encodes
+2. Alpha plane support — web-essential feature for transparent images
+3. Film grain synthesis — apply grain noise for encoder-emitted grain parameters
+4. YUV 4:2:2 chroma subsampling — professional workflow support

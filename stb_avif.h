@@ -240,6 +240,8 @@ typedef struct
    int delta_q_v_ac;
    int cdef_bits;
    int cdef_damping;
+   int cdef_y_strengths[8];   /* up to 8 CDEF strength values for Y */
+   int cdef_uv_strengths[8];  /* up to 8 CDEF strength values for UV */
 } stbi_avif__av1_frame_header;
 
 typedef struct
@@ -1819,9 +1821,13 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          frame->cdef_bits = (int)cdef_bits_val;
          nb_cdef_strengths = 1 << frame->cdef_bits;
          for (ci = 0; ci < nb_cdef_strengths; ++ci) {
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* Y strength */
+            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+            frame->cdef_y_strengths[ci] = (int)value;
             if (!seq->monochrome) {
-               if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* UV strength */
+               if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+               frame->cdef_uv_strengths[ci] = (int)value;
+            } else {
+               frame->cdef_uv_strengths[ci] = 0;
             }
          }
       }
@@ -1885,7 +1891,119 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          if (!stbi_avif__bit_read_flag(&bits, &apply_grain))
             return 0;
          if (apply_grain)
-            return stbi_avif__fail("AV1 film grain is not supported yet");
+         {
+            /* film_grain_params() — AV1 spec §5.9.30
+             * Parse and skip all film grain parameters so files with
+             * film grain can still be decoded (without grain synthesis). */
+            unsigned long fg_val;
+            int num_y_points, num_cb_points, num_cr_points;
+            int fg_i;
+            int chroma_scaling_from_luma = 0;
+
+            /* grain_seed: 16 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 16u, &fg_val)) return 0;
+            /* update_grain: 1 bit (for non-SWITCH frames; AVIF is always KEY_FRAME) */
+            /* For key frames, update_grain is not present; it's always 1 */
+
+            /* num_y_points: 4 bits, then each point is (8+8) bits */
+            if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+            num_y_points = (int)fg_val;
+            for (fg_i = 0; fg_i < num_y_points; ++fg_i)
+            {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0; /* point_y_value */
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0; /* point_y_scaling */
+            }
+
+            /* chroma_scaling_from_luma: 1 bit */
+            if (!seq->monochrome) {
+               if (!stbi_avif__bit_read_flag(&bits, &chroma_scaling_from_luma)) return 0;
+            }
+
+            if (seq->monochrome || chroma_scaling_from_luma ||
+                (seq->subsampling_x == 1 && seq->subsampling_y == 1 && num_y_points == 0))
+            {
+               num_cb_points = 0;
+               num_cr_points = 0;
+            }
+            else
+            {
+               /* num_cb_points: 4 bits + points */
+               if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+               num_cb_points = (int)fg_val;
+               for (fg_i = 0; fg_i < num_cb_points; ++fg_i)
+               {
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               }
+               /* num_cr_points: 4 bits + points */
+               if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+               num_cr_points = (int)fg_val;
+               for (fg_i = 0; fg_i < num_cr_points; ++fg_i)
+               {
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               }
+            }
+
+            /* grain_scaling_minus_8: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+
+            /* ar_coeff_lag: 2 bits */
+            {
+               int ar_coeff_lag;
+               int num_pos_luma, num_pos_chroma;
+               if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+               ar_coeff_lag = (int)fg_val;
+               num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
+               if (num_y_points > 0) {
+                  num_pos_chroma = num_pos_luma + 1;
+               } else {
+                  num_pos_chroma = num_pos_luma;
+               }
+               /* ar_coeffs_y: num_pos_luma × 8 bits (if num_y_points > 0) */
+               if (num_y_points > 0) {
+                  for (fg_i = 0; fg_i < num_pos_luma; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  }
+               }
+               /* ar_coeffs_cb: num_pos_chroma × 8 bits */
+               if (num_cb_points > 0 || chroma_scaling_from_luma) {
+                  for (fg_i = 0; fg_i < num_pos_chroma; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  }
+               }
+               /* ar_coeffs_cr: num_pos_chroma × 8 bits */
+               if (num_cr_points > 0 || chroma_scaling_from_luma) {
+                  for (fg_i = 0; fg_i < num_pos_chroma; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  }
+               }
+            }
+
+            /* ar_coeff_shift_minus_6: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+
+            /* grain_scale_shift: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+
+            /* cb_mult, cb_luma_mult, cb_offset */
+            if (num_cb_points > 0) {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+            }
+            /* cr_mult, cr_luma_mult, cr_offset */
+            if (num_cr_points > 0) {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+            }
+
+            /* overlap_flag: 1 bit */
+            if (!stbi_avif__bit_read_flag(&bits, &fg_i)) return 0;
+            /* clip_to_restricted_range: 1 bit */
+            if (!stbi_avif__bit_read_flag(&bits, &fg_i)) return 0;
+         }
       }
 
    frame->header_bits_consumed = bits.bit_offset;
@@ -7495,6 +7613,10 @@ typedef struct
    unsigned int                  sb_size_mi;
    int                           cdef_transmitted[4];
    int                           monochrome;
+   unsigned char                *cdef_idx;       /* per-64x64 block CDEF index grid */
+   unsigned int                  cdef_grid_cols; /* grid columns = ceil(frame_width / 64) */
+   unsigned int                  cdef_grid_rows; /* grid rows = ceil(frame_height / 64) */
+   const stbi_avif__av1_frame_header *fhdr;     /* frame header (for CDEF strengths) */
 
    /* Adaptive CDF state */
    unsigned short  partition_cdf[5][4][11];
@@ -9288,7 +9410,13 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          unsigned int cdef_val;
          cdef_val = stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)ctx->cdef_bits);
          ctx->cdef_transmitted[cdef_index] = 1;
-         (void)cdef_val; /* We don't apply CDEF filtering */
+         /* Store CDEF index in the grid */
+         if (ctx->cdef_idx != NULL) {
+            unsigned int cdef_grid_r = mi_row / 16u;
+            unsigned int cdef_grid_c = mi_col / 16u;
+            if (cdef_grid_r < ctx->cdef_grid_rows && cdef_grid_c < ctx->cdef_grid_cols)
+               ctx->cdef_idx[cdef_grid_r * ctx->cdef_grid_cols + cdef_grid_c] = (unsigned char)cdef_val;
+         }
       }
    }
 
@@ -10401,6 +10529,296 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
 
 /*
  * =============================================================================
+ *  CDEF (Constrained Directional Enhancement Filter) - AV1 spec 7.15
+ * =============================================================================
+ */
+
+/* CDEF direction offsets: [8 directions][2 distances][2 coords (dy, dx)] */
+static const int stbi_avif__cdef_directions[8][2][2] = {
+   {{ -1,  1 }, { -2,  2 }},
+   {{  0,  1 }, { -1,  2 }},
+   {{  0,  1 }, {  0,  2 }},
+   {{  0,  1 }, {  1,  2 }},
+   {{  1,  1 }, {  2,  2 }},
+   {{  1,  0 }, {  2,  1 }},
+   {{  1,  0 }, {  2,  0 }},
+   {{  1,  0 }, {  2, -1 }}
+};
+
+static const int stbi_avif__cdef_pri_taps[2][2] = {
+   { 4, 2 },  /* even primary strength */
+   { 3, 3 }   /* odd primary strength */
+};
+
+static const int stbi_avif__cdef_sec_taps[2] = { 2, 1 };
+
+static int stbi_avif__cdef_floor_log2(int x)
+{
+   int log2 = 0;
+   while (x > 1) { x >>= 1; ++log2; }
+   return log2;
+}
+
+static int stbi_avif__cdef_constrain(int diff, int strength, int damping)
+{
+   int sign, v, damp;
+   if (strength == 0 || diff == 0) return 0;
+   sign = (diff < 0) ? -1 : 1;
+   v = (diff < 0) ? -diff : diff;
+   damp = damping - stbi_avif__cdef_floor_log2(strength);
+   if (damp < 0) damp = 0;
+   if (v >= strength) return 0;
+   v = v - (v >> damp);
+   if (v < 0) v = 0;
+   return sign * v;
+}
+
+static int stbi_avif__cdef_find_dir(const unsigned short *src, unsigned int stride,
+                                     unsigned int bit_depth)
+{
+   int partial_hv[2][8];
+   int partial_diag[2][15];
+   int partial_alt[4][11];
+   unsigned int cost[8];
+   int y, x, best_dir;
+   unsigned int best_cost;
+   int rnd = (int)(1u << (bit_depth - 8u)) * 128;
+
+   /* Normalization divisors for direction partial sums, derived from AV1 spec §7.15.1.
+    * div_table[i] = 840 / line_length, where line_length is the number of pixels
+    * on diagonal line i of the 8×8 block (1,2,3,...,8,...,3,2,1).
+    * alt_div_table[i] = similar for 22.5°/67.5° angled partial sums.
+    * Cost = sum(partial_sum² * 840 / line_length) to normalize for line length. */
+   static const unsigned int div_table[15] = {
+      840, 420, 280, 210, 168, 140, 120, 105, 120, 140, 168, 210, 280, 420, 840
+   };
+   static const unsigned int alt_div_table[11] = {
+      420, 210, 140, 105, 105, 105, 105, 105, 140, 210, 420
+   };
+
+   memset(partial_hv, 0, sizeof(partial_hv));
+   memset(partial_diag, 0, sizeof(partial_diag));
+   memset(partial_alt, 0, sizeof(partial_alt));
+   memset(cost, 0, sizeof(cost));
+
+   for (y = 0; y < 8; ++y) {
+      for (x = 0; x < 8; ++x) {
+         int v = (int)src[(unsigned)y * stride + (unsigned)x] - rnd;
+         partial_diag[0][y + x] += v;
+         partial_diag[1][y + 7 - x] += v;
+         partial_hv[0][y] += v;
+         partial_hv[1][x] += v;
+         partial_alt[0][y + (x >> 1)] += v;
+         partial_alt[1][y + ((7 - x) >> 1)] += v;
+         partial_alt[2][(y >> 1) + x] += v;
+         partial_alt[3][(y >> 1) + 7 - x] += v;
+      }
+   }
+
+   for (y = 0; y < 8; ++y) {
+      cost[2] += (unsigned int)(partial_hv[0][y] * partial_hv[0][y]);
+      cost[6] += (unsigned int)(partial_hv[1][y] * partial_hv[1][y]);
+   }
+   cost[2] *= 105u;
+   cost[6] *= 105u;
+
+   /* Note: we divide before multiply to avoid 32-bit overflow.
+    * Precision loss is negligible since we only need relative ordering
+    * of costs for direction selection. */
+   for (y = 0; y < 15; ++y) {
+      cost[0] += (unsigned int)(partial_diag[0][y] * partial_diag[0][y]) / div_table[y] * 840u;
+      cost[4] += (unsigned int)(partial_diag[1][y] * partial_diag[1][y]) / div_table[y] * 840u;
+   }
+
+   for (y = 0; y < 11; ++y) {
+      cost[1] += (unsigned int)(partial_alt[0][y] * partial_alt[0][y]) / alt_div_table[y] * 840u;
+      cost[3] += (unsigned int)(partial_alt[1][y] * partial_alt[1][y]) / alt_div_table[y] * 840u;
+      cost[5] += (unsigned int)(partial_alt[2][y] * partial_alt[2][y]) / alt_div_table[y] * 840u;
+      cost[7] += (unsigned int)(partial_alt[3][y] * partial_alt[3][y]) / alt_div_table[y] * 840u;
+   }
+
+   best_dir = 0;
+   best_cost = cost[0];
+   for (y = 1; y < 8; ++y) {
+      if (cost[y] > best_cost) {
+         best_cost = cost[y];
+         best_dir = y;
+      }
+   }
+   return best_dir;
+}
+
+static void stbi_avif__cdef_filter_block(unsigned short *dst, unsigned int dst_stride,
+                                          const unsigned short *src, unsigned int src_stride,
+                                          unsigned int src_w, unsigned int src_h,
+                                          unsigned int bx, unsigned int by,
+                                          unsigned int bw, unsigned int bh,
+                                          int dir, int pri_strength, int sec_strength,
+                                          int damping, unsigned int bit_depth)
+{
+   int maxv = (int)((1u << bit_depth) - 1u);
+   const int *pri_t = stbi_avif__cdef_pri_taps[pri_strength & 1];
+   unsigned int y, x;
+   for (y = 0; y < bh; ++y) {
+      for (x = 0; x < bw; ++x) {
+         unsigned int py = by + y;
+         unsigned int px = bx + x;
+         int sum = 0;
+         int center, result, k;
+         if (py >= src_h || px >= src_w) continue;
+         center = (int)src[py * src_stride + px];
+         if (pri_strength > 0) {
+            for (k = 0; k < 2; ++k) {
+               int dy = stbi_avif__cdef_directions[dir][k][0];
+               int dx = stbi_avif__cdef_directions[dir][k][1];
+               int ny1 = (int)py + dy, nx1 = (int)px + dx;
+               int ny2 = (int)py - dy, nx2 = (int)px - dx;
+               int s0 = center, s1 = center;
+               if (ny1 >= 0 && (unsigned)ny1 < src_h && nx1 >= 0 && (unsigned)nx1 < src_w)
+                  s0 = (int)src[(unsigned)ny1 * src_stride + (unsigned)nx1];
+               if (ny2 >= 0 && (unsigned)ny2 < src_h && nx2 >= 0 && (unsigned)nx2 < src_w)
+                  s1 = (int)src[(unsigned)ny2 * src_stride + (unsigned)nx2];
+               sum += pri_t[k] * stbi_avif__cdef_constrain(s0 - center, pri_strength, damping);
+               sum += pri_t[k] * stbi_avif__cdef_constrain(s1 - center, pri_strength, damping);
+            }
+         }
+         if (sec_strength > 0) {
+            for (k = 0; k < 2; ++k) {
+               int dir2 = (dir + 2) & 7;
+               int dir3 = (dir + 6) & 7;
+               int dy2 = stbi_avif__cdef_directions[dir2][k][0];
+               int dx2 = stbi_avif__cdef_directions[dir2][k][1];
+               int dy3 = stbi_avif__cdef_directions[dir3][k][0];
+               int dx3 = stbi_avif__cdef_directions[dir3][k][1];
+               int nay = (int)py+dy2, nax = (int)px+dx2;
+               int nby = (int)py-dy2, nbx = (int)px-dx2;
+               int ncy = (int)py+dy3, ncx = (int)px+dx3;
+               int ndy = (int)py-dy3, ndx = (int)px-dx3;
+               int sa = center, sb = center, sc = center, sd = center;
+               if (nay >= 0 && (unsigned)nay < src_h && nax >= 0 && (unsigned)nax < src_w)
+                  sa = (int)src[(unsigned)nay * src_stride + (unsigned)nax];
+               if (nby >= 0 && (unsigned)nby < src_h && nbx >= 0 && (unsigned)nbx < src_w)
+                  sb = (int)src[(unsigned)nby * src_stride + (unsigned)nbx];
+               if (ncy >= 0 && (unsigned)ncy < src_h && ncx >= 0 && (unsigned)ncx < src_w)
+                  sc = (int)src[(unsigned)ncy * src_stride + (unsigned)ncx];
+               if (ndy >= 0 && (unsigned)ndy < src_h && ndx >= 0 && (unsigned)ndx < src_w)
+                  sd = (int)src[(unsigned)ndy * src_stride + (unsigned)ndx];
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sa - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sb - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sc - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sd - center, sec_strength, damping);
+            }
+         }
+         result = center + ((8 + sum) >> 4);
+         if (result < 0) result = 0;
+         if (result > maxv) result = maxv;
+         dst[py * dst_stride + px] = (unsigned short)result;
+      }
+   }
+}
+
+static void stbi_avif__av1_cdef_filter(stbi_avif__av1_planes *planes,
+                                        const stbi_avif__av1_frame_header *fhdr,
+                                        const stbi_avif__av1_sequence_header *seq,
+                                        const unsigned char *cdef_idx,
+                                        unsigned int cdef_grid_cols,
+                                        unsigned int cdef_grid_rows)
+{
+   unsigned int w = planes->width;
+   unsigned int h = planes->height;
+   unsigned int cw = planes->cw;
+   unsigned int ch = planes->ch;
+   unsigned int bd = planes->bit_depth;
+   unsigned int cdef_unit_r, cdef_unit_c;
+   unsigned short *y_copy, *u_copy, *v_copy;
+   size_t y_size, c_size;
+
+   if (fhdr->cdef_bits == 0 && fhdr->cdef_damping == 0) return;
+   if (cdef_idx == NULL && fhdr->cdef_bits > 0) return;
+
+   y_size = (size_t)w * h * sizeof(unsigned short);
+   c_size = (size_t)cw * ch * sizeof(unsigned short);
+   y_copy = (unsigned short *)STBI_AVIF_MALLOC(y_size);
+   if (!y_copy) return;
+   memcpy(y_copy, planes->y, y_size);
+
+   u_copy = NULL;
+   v_copy = NULL;
+   if (!seq->monochrome) {
+      u_copy = (unsigned short *)STBI_AVIF_MALLOC(c_size);
+      v_copy = (unsigned short *)STBI_AVIF_MALLOC(c_size);
+      if (!u_copy || !v_copy) {
+         STBI_AVIF_FREE(y_copy);
+         STBI_AVIF_FREE(u_copy);
+         STBI_AVIF_FREE(v_copy);
+         return;
+      }
+      memcpy(u_copy, planes->u, c_size);
+      memcpy(v_copy, planes->v, c_size);
+   }
+
+   for (cdef_unit_r = 0; cdef_unit_r < cdef_grid_rows; ++cdef_unit_r) {
+      for (cdef_unit_c = 0; cdef_unit_c < cdef_grid_cols; ++cdef_unit_c) {
+         unsigned int idx;
+         int y_strength, uv_strength;
+         int y_pri, y_sec_idx, y_sec;
+         int uv_pri, uv_sec_idx, uv_sec;
+         int damping;
+         unsigned int base_y, base_x, blk_r, blk_c;
+
+         idx = (cdef_idx != NULL) ? cdef_idx[cdef_unit_r * cdef_grid_cols + cdef_unit_c] : 0u;
+         y_strength = fhdr->cdef_y_strengths[idx];
+         uv_strength = fhdr->cdef_uv_strengths[idx];
+         y_pri = (y_strength >> 2) << ((int)bd - 8);
+         y_sec_idx = y_strength & 3;
+         y_sec = (y_sec_idx == 0) ? 0 : (y_sec_idx << ((int)bd - 8));
+         uv_pri = (uv_strength >> 2) << ((int)bd - 8);
+         uv_sec_idx = uv_strength & 3;
+         uv_sec = (uv_sec_idx == 0) ? 0 : (uv_sec_idx << ((int)bd - 8));
+         damping = fhdr->cdef_damping;
+         base_y = cdef_unit_r * 64u;
+         base_x = cdef_unit_c * 64u;
+
+         if (y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0) continue;
+
+         for (blk_r = 0; blk_r < 64u && base_y + blk_r < h; blk_r += 8u) {
+            for (blk_c = 0; blk_c < 64u && base_x + blk_c < w; blk_c += 8u) {
+               unsigned int bx = base_x + blk_c;
+               unsigned int by = base_y + blk_r;
+               int dir = 0;
+
+               if (y_pri > 0 || y_sec > 0) {
+                  if (bx + 8u <= w && by + 8u <= h)
+                     dir = stbi_avif__cdef_find_dir(y_copy + by * w + bx, w, bd);
+                  stbi_avif__cdef_filter_block(planes->y, w, y_copy, w, w, h,
+                                                bx, by, 8u, 8u,
+                                                dir, y_pri, y_sec, damping, bd);
+               }
+
+               if (!seq->monochrome && (uv_pri > 0 || uv_sec > 0)) {
+                  unsigned int cbx = bx >> planes->subx;
+                  unsigned int cby = by >> planes->suby;
+                  unsigned int cbw = 8u >> planes->subx;
+                  unsigned int cbh = 8u >> planes->suby;
+                  stbi_avif__cdef_filter_block(planes->u, cw, u_copy, cw, cw, ch,
+                                                cbx, cby, cbw, cbh,
+                                                dir, uv_pri, uv_sec, damping, bd);
+                  stbi_avif__cdef_filter_block(planes->v, cw, v_copy, cw, cw, ch,
+                                                cbx, cby, cbw, cbh,
+                                                dir, uv_pri, uv_sec, damping, bd);
+               }
+            }
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(y_copy);
+   STBI_AVIF_FREE(u_copy);
+   STBI_AVIF_FREE(v_copy);
+}
+
+/*
+ * =============================================================================
  *  TOP-LEVEL DECODE FUNCTION
  * =============================================================================
  */
@@ -10491,6 +10909,17 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.cdef_bits = fhdr->cdef_bits;
    ctx.sb_size_mi = seq->use_128x128_superblock ? 32u : 16u;
    ctx.monochrome = seq->monochrome;
+   ctx.fhdr = fhdr;
+   ctx.cdef_grid_cols = (fhdr->frame_width + 63u) / 64u;
+   ctx.cdef_grid_rows = (fhdr->frame_height + 63u) / 64u;
+   if (fhdr->cdef_bits > 0) {
+      size_t grid_size = (size_t)ctx.cdef_grid_cols * ctx.cdef_grid_rows;
+      ctx.cdef_idx = (unsigned char *)STBI_AVIF_MALLOC(grid_size);
+      if (!ctx.cdef_idx) { stbi_avif__av1_free_planes(&planes); return NULL; }
+      memset(ctx.cdef_idx, 0, grid_size);
+   } else {
+      ctx.cdef_idx = NULL;
+   }
 
    ctx.above_modes = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
@@ -10515,6 +10944,7 @@ static unsigned char *stbi_avif__av1_decode(
       STBI_AVIF_FREE(ctx.above_entropy[0]);
       STBI_AVIF_FREE(ctx.above_entropy[1]);
       STBI_AVIF_FREE(ctx.above_entropy[2]);
+      STBI_AVIF_FREE(ctx.cdef_idx);
       stbi_avif__av1_free_planes(&planes);
       return (unsigned char *)stbi_avif__fail_ptr("out of memory (mode maps)");
    }
@@ -10581,6 +11011,7 @@ static unsigned char *stbi_avif__av1_decode(
                                              (size_t)tile_payload_size, 0u)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
          STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
 
@@ -10593,6 +11024,7 @@ static unsigned char *stbi_avif__av1_decode(
                                       sb_col_start, sb_col_end)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
          STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
    }
@@ -10600,6 +11032,11 @@ static unsigned char *stbi_avif__av1_decode(
    STBI_AVIF_FREE(ctx.above_modes);
    STBI_AVIF_FREE(ctx.left_modes);
    STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+
+   /* Apply CDEF filter */
+   stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
+                               ctx.cdef_grid_cols, ctx.cdef_grid_rows);
+   STBI_AVIF_FREE(ctx.cdef_idx);
 
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
@@ -11461,7 +11898,8 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
             size_t i;
             for (i = 0; i < pixel_count; ++i)
             {
-               /* ITU-R BT.601 luminance: Y = 0.299R + 0.587G + 0.114B */
+               /* ITU-R BT.601 luminance, fixed-point: Y ≈ 0.301R + 0.586G + 0.113B
+                * (77/256, 150/256, 29/256 approximate 0.299, 0.587, 0.114) */
                int r = rgba[i * 4u + 0u];
                int g = rgba[i * 4u + 1u];
                int b = rgba[i * 4u + 2u];
