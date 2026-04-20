@@ -165,6 +165,15 @@ typedef struct
    size_t alpha_payload_offset;
    size_t alpha_payload_size;
    int has_alpha_av1_config;
+   /* Color profile (colr box) */
+   int has_icc_profile;          /* 1 if ICC profile found in colr box */
+   size_t icc_profile_offset;    /* offset into file buffer of ICC profile data */
+   size_t icc_profile_size;      /* size of ICC profile data in bytes */
+   int has_nclx;                 /* 1 if nclx color info found */
+   unsigned int nclx_colour_primaries;
+   unsigned int nclx_transfer_characteristics;
+   unsigned int nclx_matrix_coefficients;
+   int nclx_full_range;
 } stbi_avif__parser;
 
 typedef struct
@@ -14031,6 +14040,32 @@ static int stbi_avif__parse_ipco(const stbi_avif__buffer *buffer, const stbi_avi
          parser->has_av1_config = 1;
          property.data_offset = child_payload;
          property.data_size = child.size - child.header_size;
+      }
+      else if (child.type == STBI_AVIF_FOURCC('c','o','l','r'))
+      {
+         /* colr box: contains either ICC profile (type='prof'/'rICC') or nclx color info.
+          * Per ISOBMFF / HEIF spec. */
+         child_payload = child.offset + child.header_size;
+         if (child.size > child.header_size + 4u) {
+            unsigned long colr_type = stbi_avif__read_be32(buffer->data + child_payload);
+            if (colr_type == STBI_AVIF_FOURCC('p','r','o','f') ||
+                colr_type == STBI_AVIF_FOURCC('r','I','C','C')) {
+               /* ICC profile: data starts after the 4-byte colour_type field */
+               parser->has_icc_profile = 1;
+               parser->icc_profile_offset = child_payload + 4u;
+               parser->icc_profile_size = child.size - child.header_size - 4u;
+            } else if (colr_type == STBI_AVIF_FOURCC('n','c','l','x')) {
+               /* nclx: colour_primaries(2) + transfer_characteristics(2) +
+                *       matrix_coefficients(2) + full_range_flag(1) = 7 bytes */
+               if (child.size >= child.header_size + 4u + 7u) {
+                  parser->has_nclx = 1;
+                  parser->nclx_colour_primaries = stbi_avif__read_be16(buffer->data + child_payload + 4);
+                  parser->nclx_transfer_characteristics = stbi_avif__read_be16(buffer->data + child_payload + 6);
+                  parser->nclx_matrix_coefficients = stbi_avif__read_be16(buffer->data + child_payload + 8);
+                  parser->nclx_full_range = (int)(buffer->data[child_payload + 10] >> 7);
+               }
+            }
+         }
       }
 
       if (!stbi_avif__append_property(parser, &property))
