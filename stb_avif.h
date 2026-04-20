@@ -6979,6 +6979,46 @@ static const short stbi_avif__av1_ac_qlookup_10[256] = {
    5476, 5584, 5692, 5804, 5916, 6032, 6148, 6268, 6388, 6512, 6640, 6768, 6900, 7036, 7172, 7312,
 };
 
+/* AV1 DC quantizer lookup (12-bit) [256 entries] — AV1 spec Table 7-3 */
+static const short stbi_avif__av1_dc_qlookup_12[256] = {
+   4, 12, 18, 25, 33, 41, 50, 60, 70, 80, 91, 103, 115, 127, 140, 153,
+   166, 180, 194, 208, 222, 237, 251, 266, 281, 296, 312, 327, 343, 358, 374, 390,
+   405, 421, 437, 453, 469, 484, 500, 516, 532, 548, 564, 580, 596, 611, 627, 643,
+   659, 674, 690, 706, 721, 737, 752, 768, 783, 798, 814, 829, 844, 859, 874, 889,
+   904, 919, 934, 949, 964, 978, 993, 1008, 1022, 1037, 1051, 1065, 1080, 1094, 1108, 1122,
+   1136, 1151, 1165, 1179, 1192, 1206, 1220, 1234, 1248, 1261, 1275, 1288, 1302, 1315, 1329, 1342,
+   1368, 1393, 1419, 1444, 1469, 1494, 1519, 1544, 1569, 1594, 1618, 1643, 1668, 1692, 1717, 1741,
+   1765, 1789, 1814, 1838, 1862, 1885, 1909, 1933, 1957, 1992, 2027, 2061, 2096, 2130, 2165, 2199,
+   2233, 2267, 2300, 2334, 2367, 2400, 2434, 2467, 2499, 2532, 2575, 2618, 2661, 2704, 2746, 2788,
+   2830, 2872, 2913, 2954, 2995, 3036, 3076, 3127, 3177, 3226, 3275, 3324, 3373, 3421, 3469, 3517,
+   3565, 3621, 3677, 3733, 3788, 3843, 3897, 3951, 4005, 4058, 4119, 4181, 4241, 4301, 4361, 4420,
+   4479, 4546, 4612, 4677, 4742, 4807, 4871, 4942, 5013, 5083, 5153, 5222, 5291, 5367, 5442, 5517,
+   5591, 5665, 5745, 5825, 5905, 5984, 6063, 6149, 6234, 6319, 6404, 6495, 6587, 6678, 6769, 6867,
+   6966, 7064, 7163, 7269, 7376, 7483, 7599, 7715, 7832, 7958, 8085, 8214, 8352, 8492, 8635, 8788,
+   8945, 9104, 9275, 9450, 9639, 9832, 10031, 10245, 10465, 10702, 10946, 11210, 11482, 11776, 12081, 12409,
+   12750, 13118, 13501, 13913, 14343, 14807, 15290, 15812, 16356, 16943, 17575, 18237, 18949, 19718, 20521, 21387,
+};
+
+/* AV1 AC quantizer lookup (12-bit) [256 entries] — AV1 spec Table 7-4 */
+static const short stbi_avif__av1_ac_qlookup_12[256] = {
+   4, 13, 19, 27, 35, 44, 54, 64, 75, 87, 99, 112, 126, 139, 154, 168,
+   183, 199, 214, 230, 247, 263, 280, 297, 314, 331, 349, 366, 384, 402, 420, 438,
+   456, 475, 493, 511, 530, 548, 567, 586, 604, 623, 642, 660, 679, 698, 716, 735,
+   753, 772, 791, 809, 828, 846, 865, 884, 902, 920, 939, 957, 976, 994, 1012, 1030,
+   1049, 1067, 1085, 1103, 1121, 1139, 1157, 1175, 1193, 1211, 1229, 1246, 1264, 1282, 1299, 1317,
+   1335, 1352, 1370, 1387, 1405, 1422, 1440, 1457, 1474, 1491, 1509, 1526, 1543, 1560, 1577, 1595,
+   1627, 1660, 1693, 1725, 1758, 1791, 1824, 1856, 1889, 1922, 1954, 1987, 2020, 2052, 2085, 2118,
+   2150, 2183, 2216, 2248, 2281, 2313, 2346, 2378, 2411, 2459, 2508, 2556, 2605, 2653, 2701, 2750,
+   2798, 2847, 2895, 2943, 2992, 3040, 3088, 3137, 3185, 3234, 3298, 3362, 3426, 3491, 3555, 3619,
+   3684, 3748, 3812, 3876, 3941, 4005, 4069, 4149, 4230, 4310, 4390, 4470, 4550, 4631, 4711, 4791,
+   4871, 4967, 5064, 5160, 5256, 5352, 5448, 5544, 5641, 5737, 5849, 5961, 6073, 6185, 6297, 6410,
+   6522, 6650, 6778, 6906, 7034, 7162, 7290, 7435, 7579, 7723, 7867, 8011, 8155, 8315, 8475, 8635,
+   8795, 8956, 9132, 9308, 9484, 9660, 9836, 10028, 10220, 10412, 10604, 10812, 11020, 11228, 11437, 11661,
+   11885, 12109, 12333, 12573, 12813, 13053, 13309, 13565, 13821, 14093, 14365, 14637, 14925, 15213, 15502, 15806,
+   16110, 16414, 16734, 17054, 17390, 17726, 18062, 18414, 18766, 19134, 19502, 19886, 20270, 20670, 21070, 21486,
+   21902, 22334, 22766, 23214, 23662, 24126, 24590, 25070, 25551, 26047, 26559, 27071, 27599, 28143, 28687, 29247,
+};
+
 /* Default diagonal scan order for TX sizes */
 static const unsigned short stbi_avif__av1_scan_4x4[16] = {
    0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15,
@@ -7134,14 +7174,18 @@ static int stbi_avif__av1_dc_qlookup_value(unsigned int bit_depth, unsigned int 
 {
    if (bit_depth <= 8u)
       return (int)stbi_avif__av1_dc_qlookup[qindex];
-   return (int)stbi_avif__av1_dc_qlookup_10[qindex];
+   if (bit_depth <= 10u)
+      return (int)stbi_avif__av1_dc_qlookup_10[qindex];
+   return (int)stbi_avif__av1_dc_qlookup_12[qindex];
 }
 
 static int stbi_avif__av1_ac_qlookup_value(unsigned int bit_depth, unsigned int qindex)
 {
    if (bit_depth <= 8u)
       return (int)stbi_avif__av1_ac_qlookup[qindex];
-   return (int)stbi_avif__av1_ac_qlookup_10[qindex];
+   if (bit_depth <= 10u)
+      return (int)stbi_avif__av1_ac_qlookup_10[qindex];
+   return (int)stbi_avif__av1_ac_qlookup_12[qindex];
 }
 
 /*
@@ -10488,7 +10532,7 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          {
             int Y;
             if (p->bit_depth > 8u)
-               Y = (int)(yrow[ix] >> 2);
+               Y = (int)(yrow[ix] >> (p->bit_depth - 8u));
             else
                Y = (int)yrow[ix];
             drow[ix * 4u + 0u] = stbi_avif__clamp_u8(Y);
@@ -10496,7 +10540,7 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
             drow[ix * 4u + 2u] = stbi_avif__clamp_u8(Y);
             if (alpha_plane != NULL) {
                int A = (int)alpha_plane[iy * w + ix];
-               if (alpha_bit_depth > 8u) A >>= 2;
+               if (alpha_bit_depth > 8u) A >>= (int)(alpha_bit_depth - 8u);
                drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
             } else {
                drow[ix * 4u + 3u] = 255u;
@@ -10521,10 +10565,11 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
 
          if (p->bit_depth > 8u)
          {
-            /* 10-bit: shift to 8-bit by dropping 2 LSBs */
-            Y = (int)(yrow[ix] >> 2);
-            U = (int)(urow[cx] >> 2);
-            V = (int)(vrow[cx] >> 2);
+            /* 10/12-bit: shift to 8-bit by dropping LSBs */
+            unsigned int shift = p->bit_depth - 8u;
+            Y = (int)(yrow[ix] >> shift);
+            U = (int)(urow[cx] >> shift);
+            V = (int)(vrow[cx] >> shift);
          }
          else
          {
@@ -10609,7 +10654,7 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          drow[ix * 4u + 2u] = stbi_avif__clamp_u8(B);
          if (alpha_plane != NULL) {
             int A = (int)alpha_plane[iy * w + ix];
-            if (alpha_bit_depth > 8u) A >>= 2;
+            if (alpha_bit_depth > 8u) A >>= (int)(alpha_bit_depth - 8u);
             drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
          } else {
             drow[ix * 4u + 3u] = 255u;
