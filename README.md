@@ -1,27 +1,40 @@
 # stb_avif
 
-This repository starts a pure C89, libc-only AVIF decoder in a stb-style single-header form.
+A pure C89, libc-only AVIF decoder in stb-style single-header form.
 
-Current implementation status:
+## Current Implementation Status
 
-- Public single-header API exists in `stb_avif.h`
-- File and memory loaders are implemented
-- Core AVIF container metadata parsing is implemented for still-image structure discovery
-- Width and height are reported through `ispe` when the primary item is associated correctly
-- AV1 `av1C` validation, OBU walking, and reduced still-picture sequence-header validation are implemented
-- Frame reconstruction and RGBA output are not implemented yet
+**Working end-to-end pipeline:** AVIF container → AV1 intra-frame decode → YUV→RGBA → PNG output.
 
-Current v1 target subset:
+### Implemented
 
-- Static AVIF only
-- 8-bit only
+- Single-header API in `stb_avif.h` (define `STB_AVIF_IMPLEMENTATION` in one translation unit)
+- ISOBMFF container parsing (`ftyp`, `meta`, `pitm`, `iprp`, `iloc`, `ispe`, `av1C`)
+- AV1 OBU parsing with both **reduced** and **full (non-reduced)** sequence/frame headers
+- AV1 intra-frame decode: superblock partition tree, all intra prediction modes (directional, DC, smooth, paeth, CFL, filter-intra, palette), arithmetic range coder, inverse transforms (DCT/ADST/identity 4×4–32×32), dequantization
+- **CDEF (Constrained Directional Enhancement Filter)** — direction finding, primary/secondary tap filtering with constrained damping on Y, U, V planes. Major visual quality improvement for lossy encodes.
+- **Loop Restoration Filter** — Wiener (7-tap symmetric separable convolution) and Sgrproj (self-guided box filter with projection). Applied per-plane after CDEF for additional deblocking/deringing.
+- YUV→RGBA conversion: BT.601 / BT.709 / BT.2020 (full-range and limited-range), identity matrix
+- 8-bit and 10-bit (down-shifted to 8-bit output) support
+- Monochrome (grayscale) image support
+- `desired_channels` parameter: request 1 (grayscale), 3 (RGB), or 4 (RGBA) channel output
+- YUV 4:2:2 chroma subsampling
+- Alpha plane support (via `iref`/`auxl` auxiliary items — decoded as separate monochrome AV1 frame)
+- **Film Grain Synthesis** — auto-regressive grain template generation, piecewise-linear intensity scaling, per-block application on Y/Cb/Cr planes
+
+### Not Yet Implemented
+
+- Animation / multi-frame sequences
+
+### Current v1 Target Subset
+
+- Static AVIF only (still pictures)
+- 8-bit and 10-bit content (output is always 8-bit per channel)
 - No animation
-- No film grain
-- No embedded alpha support
-- Pure C89
+- Pure C89 (uses `long long` for range decoder only)
 - No external dependencies except libc
 
-Example:
+## Example
 
 ```c
 #define STB_AVIF_IMPLEMENTATION
@@ -34,19 +47,23 @@ if (!rgba) {
 }
 ```
 
-Build the current test harness:
+## Build and Test
+
+Compile the test harness:
 
 ```sh
 cc -std=c89 -Wall -Wextra -pedantic tests/test_decode.c -o tests/test_decode
 ```
 
-Expected behavior today:
+Run the conversion test suite:
 
-- `stbi_avif_info()` can succeed on constrained files with the required metadata
-- `stbi_avif_load()` validates the AVIF container and constrained AV1 headers, then fails with `AV1 headers parsed, but frame reconstruction is not implemented yet`
+```sh
+bash test_run.sh
+```
 
-Next implementation milestones:
+This converts all sample AVIF files in `example_avif/` to PNG in `output_png/`.
 
-1. Deepen frame-header parsing beyond the current reduced still-picture validation path
-2. Implement intra-only reconstruction for the constrained subset
-3. Add fixed-point YUV to RGBA conversion for 4:2:0, 4:2:2, and 4:4:4
+## Next Implementation Milestones
+
+1. Per-unit loop restoration parameters — currently applies default coefficients; per-unit parsing would use entropy-coded parameters from the tile bitstream
+2. Animation / multi-frame sequence support

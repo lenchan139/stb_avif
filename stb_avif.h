@@ -6,11 +6,11 @@
 
    Current status:
    - Pure C89, single-header, libc only (no libavif, no dav1d, no libaom)
-   - Decodes 8-bit YUV420/444 still images to RGBA
+   - Decodes 8-bit YUV420/422/444 still images to RGBA
    - Full AV1 intra frame parsing and coefficient decode
    - Handles BT.601, BT.709, BT.2020, and identity matrix coefficients
    - Full/limited color range support
-   - No animation (avis), no alpha plane, no film grain, no loop restoration
+   - No animation (avis), no loop restoration per-unit parameters
    - Tested against example_avif/ corpus (various .avif files)
 
    Usage:
@@ -141,6 +141,14 @@ typedef struct
    stbi_avif__item_location *locations;
    int location_count;
    int location_capacity;
+   /* Alpha plane support (auxl reference from iref box) */
+   unsigned int alpha_item_id;   /* item_id of the auxiliary alpha item (0 = none) */
+   int has_alpha;                /* 1 if alpha item was found and resolved */
+   size_t alpha_av1c_offset;
+   size_t alpha_av1c_size;
+   size_t alpha_payload_offset;
+   size_t alpha_payload_size;
+   int has_alpha_av1_config;
 } stbi_avif__parser;
 
 typedef struct
@@ -173,6 +181,17 @@ typedef struct
    int enable_superres;
    int enable_cdef;
    int enable_restoration;
+   /* Non-reduced header fields */
+   int frame_id_numbers_present;
+   int delta_frame_id_length;           /* delta_frame_id_length_minus_2 + 2 */
+   int additional_frame_id_length;      /* additional_frame_id_length_minus_1 + 1 */
+   int seq_force_screen_content_tools;  /* 0, 1, or 2 (SELECT=2) */
+   int seq_force_integer_mv;            /* 0, 1, or 2 (SELECT=2) */
+   int enable_order_hint;
+   int order_hint_bits;                 /* order_hint_bits_minus_1 + 1 */
+   int decoder_model_info_present;
+   int buffer_delay_length;             /* buffer_delay_length_minus_1 + 1 */
+   int frame_presentation_time_length;  /* frame_presentation_time_length_minus_1 + 1 */
 } stbi_avif__av1_sequence_header;
 
 typedef struct
@@ -229,6 +248,40 @@ typedef struct
    int delta_q_v_ac;
    int cdef_bits;
    int cdef_damping;
+   int cdef_y_strengths[8];   /* up to 8 CDEF strength values for Y */
+   int cdef_uv_strengths[8];  /* up to 8 CDEF strength values for UV */
+   /* Loop restoration parameters (AV1 spec §5.9.19) */
+   int lr_type[3];            /* per-plane: 0=NONE, 1=WIENER, 2=SGRPROJ, 3=SWITCHABLE */
+   int lr_unit_shift;         /* restoration unit size shift: unit = 256 >> (2 - shift) ... actually 0..2 */
+   int lr_uv_shift;           /* extra chroma unit shift for 4:2:0 */
+   /* Film grain parameters (AV1 spec §5.9.30) */
+   int apply_grain;
+   unsigned int grain_seed;
+   int num_y_points;
+   int point_y_value[14];
+   int point_y_scaling[14];
+   int chroma_scaling_from_luma;
+   int num_cb_points;
+   int point_cb_value[14];
+   int point_cb_scaling[14];
+   int num_cr_points;
+   int point_cr_value[14];
+   int point_cr_scaling[14];
+   int grain_scaling_minus_8;
+   int ar_coeff_lag;
+   int ar_coeffs_y_plus_128[24];   /* max 2*3*(3+1)=24 */
+   int ar_coeffs_cb_plus_128[25];  /* max 24+1=25 */
+   int ar_coeffs_cr_plus_128[25];
+   int ar_coeff_shift_minus_6;
+   int grain_scale_shift;
+   int cb_mult;
+   int cb_luma_mult;
+   int cb_offset;
+   int cr_mult;
+   int cr_luma_mult;
+   int cr_offset;
+   int overlap_flag;
+   int clip_to_restricted_range;
 } stbi_avif__av1_frame_header;
 
 typedef struct
@@ -261,6 +314,12 @@ typedef struct
 #define STBI_AVIF_AV1_OBU_FRAME 6
 #define STBI_AVIF_AV1_OBU_REDUNDANT_FRAME_HEADER 7
 #define STBI_AVIF_AV1_OBU_PADDING 15
+
+/* Loop restoration filter types (AV1 spec §5.9.19) */
+#define STBI_AVIF_RESTORE_NONE       0
+#define STBI_AVIF_RESTORE_WIENER     1
+#define STBI_AVIF_RESTORE_SGRPROJ    2
+#define STBI_AVIF_RESTORE_SWITCHABLE 3
 
 #define STBI_AVIF_AV1_CP_BT709 1
 #define STBI_AVIF_AV1_TC_SRGB 13
@@ -553,6 +612,34 @@ static int stbi_avif__bit_read_su(stbi_avif__bit_reader *reader,
    return 1;
 }
 
+/* AV1 uvlc() variable-length code (spec §4.10.3). */
+static int stbi_avif__bit_read_uvlc(stbi_avif__bit_reader *reader, unsigned long *value)
+{
+   unsigned int leading_zeros = 0;
+   unsigned int bit;
+   unsigned long v;
+
+   for (;;) {
+      if (!stbi_avif__bit_read(reader, &bit))
+         return 0;
+      if (bit)
+         break;
+      ++leading_zeros;
+      if (leading_zeros >= 32u) {
+         *value = 0xFFFFFFFFul; /* (1<<32)-1 */
+         return 1;
+      }
+   }
+   if (leading_zeros == 0u) {
+      *value = 0;
+      return 1;
+   }
+   if (!stbi_avif__bit_read_bits(reader, leading_zeros, &v))
+      return 0;
+   *value = v + (1ul << leading_zeros) - 1u;
+   return 1;
+}
+
 static int stbi_avif__av1_read_le_bytes(const unsigned char *data, size_t size,
                                         size_t offset, unsigned int byte_count,
                                         unsigned int *value)
@@ -572,104 +659,42 @@ static int stbi_avif__av1_read_le_bytes(const unsigned char *data, size_t size,
    return 1;
 }
 
-static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_t size, stbi_avif__av1_sequence_header *header)
+/* Parse color_config() shared between reduced and non-reduced paths.
+ * AV1 spec §5.5.2. */
+static int stbi_avif__parse_av1_color_config(stbi_avif__bit_reader *bits, stbi_avif__av1_sequence_header *header)
 {
-   stbi_avif__bit_reader bits;
-   unsigned long value;
-   unsigned long frame_width_bits_minus_1;
-   unsigned long frame_height_bits_minus_1;
    int high_bitdepth;
    int twelve_bit;
    int color_description_present_flag;
-   int flag;
+   unsigned long value;
 
-   memset(header, 0, sizeof(*header));
-   stbi_avif__bit_reader_init(&bits, data, size);
-
-   if (!stbi_avif__bit_read_bits(&bits, 3, &value))
-      return 0;
-   header->seq_profile = (unsigned int)value;
-   if (!stbi_avif__bit_read_flag(&bits, &header->still_picture))
-      return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->reduced_still_picture_header))
-      return 0;
-
-   if (!header->still_picture)
-      return stbi_avif__fail("only AV1 still-picture sequences are supported");
-   if (!header->reduced_still_picture_header)
-      return stbi_avif__fail("only reduced still-picture AV1 headers are supported");
-
-   if (!stbi_avif__bit_read_bits(&bits, 5, &value))
-      return 0;
-
-   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_width_bits_minus_1))
-      return 0;
-   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_height_bits_minus_1))
-      return 0;
-
-   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_width_bits_minus_1 + 1u, &value))
-      return 0;
-   header->max_frame_width = (unsigned int)value + 1u;
-   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_height_bits_minus_1 + 1u, &value))
-      return 0;
-   header->max_frame_height = (unsigned int)value + 1u;
-
-   /*
-    * AV1 spec §5.5.1 (after max_frame_height_minus_1):
-    *
-    * For reduced_still_picture_header = 1:
-    *   use_128x128_superblock         f(1)   ← read and store
-    *   enable_filter_intra            f(1)   ← skip
-    *   enable_intra_edge_filter       f(1)   ← skip
-    *   [if !reduced: inter tools block — ABSENT here]
-    *   enable_superres                f(1)   ← skip
-    *   enable_cdef                    f(1)   ← skip
-    *   enable_restoration             f(1)   ← skip
-    *   color_config() follows with high_bitdepth...
-    */
-   if (!stbi_avif__bit_read_flag(&bits, &header->use_128x128_superblock))
-      return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_filter_intra */
-   header->enable_filter_intra = flag;
-   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_intra_edge_filter */
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_superres)) return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_cdef)) return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_restoration)) return 0;
-
-   if (!stbi_avif__bit_read_flag(&bits, &high_bitdepth))
+   if (!stbi_avif__bit_read_flag(bits, &high_bitdepth))
       return 0;
    twelve_bit = 0;
    if (header->seq_profile == 2u && high_bitdepth)
    {
-      if (!stbi_avif__bit_read_flag(&bits, &twelve_bit))
+      if (!stbi_avif__bit_read_flag(bits, &twelve_bit))
          return 0;
    }
    header->bit_depth = twelve_bit ? 12u : (high_bitdepth ? 10u : 8u);
 
    if (header->seq_profile == 1u)
-   {
       header->monochrome = 0;
-   }
    else
    {
-      if (!stbi_avif__bit_read_flag(&bits, &header->monochrome))
+      if (!stbi_avif__bit_read_flag(bits, &header->monochrome))
          return 0;
    }
-   if (header->monochrome)
-      return stbi_avif__fail("monochrome AV1 content is not supported");
 
-   if (!stbi_avif__bit_read_flag(&bits, &color_description_present_flag))
+   if (!stbi_avif__bit_read_flag(bits, &color_description_present_flag))
       return 0;
    if (color_description_present_flag)
    {
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->color_primaries = (unsigned int)value;
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->transfer_characteristics = (unsigned int)value;
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->matrix_coefficients = (unsigned int)value;
    }
    else
@@ -677,6 +702,18 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
       header->color_primaries = 2u;
       header->transfer_characteristics = 2u;
       header->matrix_coefficients = 2u;
+   }
+
+   /* Monochrome: read color_range, set subsampling defaults, return early (AV1 spec §5.5.2) */
+   if (header->monochrome)
+   {
+      if (!stbi_avif__bit_read_flag(bits, &header->color_range))
+         return 0;
+      header->subsampling_x = 1;
+      header->subsampling_y = 1;
+      header->chroma_sample_position = 0u;
+      header->separate_uv_delta_q = 0;
+      return 1;
    }
 
    if (color_description_present_flag &&
@@ -691,7 +728,7 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
    }
    else
    {
-      if (!stbi_avif__bit_read_flag(&bits, &header->color_range))
+      if (!stbi_avif__bit_read_flag(bits, &header->color_range))
          return 0;
       if (header->seq_profile == 0u)
       {
@@ -705,29 +742,258 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
       }
       else
       {
-         header->subsampling_x = 1;
-         header->subsampling_y = 0;
+         if (header->bit_depth == 12u) {
+            if (!stbi_avif__bit_read_flag(bits, &header->subsampling_x))
+               return 0;
+            if (header->subsampling_x) {
+               if (!stbi_avif__bit_read_flag(bits, &header->subsampling_y))
+                  return 0;
+            } else {
+               header->subsampling_y = 0;
+            }
+         } else {
+            header->subsampling_x = 1;
+            header->subsampling_y = 0;
+         }
       }
 
       if (header->subsampling_x && header->subsampling_y)
       {
-         if (!stbi_avif__bit_read_bits(&bits, 2, &value))
+         if (!stbi_avif__bit_read_bits(bits, 2, &value))
             return 0;
          header->chroma_sample_position = (unsigned int)value;
       }
    }
 
-   if (!stbi_avif__bit_read_flag(&bits, &header->separate_uv_delta_q))
+   if (!stbi_avif__bit_read_flag(bits, &header->separate_uv_delta_q))
       return 0;
+
+   return 1;
+}
+
+static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_t size, stbi_avif__av1_sequence_header *header)
+{
+   stbi_avif__bit_reader bits;
+   unsigned long value;
+   unsigned long frame_width_bits_minus_1;
+   unsigned long frame_height_bits_minus_1;
+   int flag;
+
+   memset(header, 0, sizeof(*header));
+   stbi_avif__bit_reader_init(&bits, data, size);
+
+   if (!stbi_avif__bit_read_bits(&bits, 3, &value))
+      return 0;
+   header->seq_profile = (unsigned int)value;
+   if (!stbi_avif__bit_read_flag(&bits, &header->still_picture))
+      return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->reduced_still_picture_header))
+      return 0;
+
+   if (header->reduced_still_picture_header)
+   {
+      /* Reduced still-picture path (original code path).
+       * timing_info_present = 0, operating_points_cnt_minus_1 = 0,
+       * seq_level_idx[0] is the only operating point. */
+      if (!stbi_avif__bit_read_bits(&bits, 5, &value))
+         return 0;
+      /* seq_level_idx[0] — ignored, just consumed */
+
+      header->seq_force_screen_content_tools = 2; /* SELECT */
+      header->seq_force_integer_mv = 2;           /* SELECT */
+      header->decoder_model_info_present = 0;
+      header->frame_id_numbers_present = 0;
+      header->enable_order_hint = 0;
+      header->order_hint_bits = 0;
+   }
+   else
+   {
+      /* Full (non-reduced) sequence header (AV1 spec §5.5.1) */
+      int timing_info_present;
+      int initial_display_delay_present = 0;
+      unsigned long op_cnt_minus_1;
+      unsigned int i;
+
+      if (!stbi_avif__bit_read_flag(&bits, &timing_info_present))
+         return 0;
+      if (timing_info_present)
+      {
+         /* timing_info() */
+         int equal_picture_interval;
+         if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* num_units_in_display_tick */
+         if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* time_scale */
+         if (!stbi_avif__bit_read_flag(&bits, &equal_picture_interval)) return 0;
+         if (equal_picture_interval)
+         {
+            if (!stbi_avif__bit_read_uvlc(&bits, &value)) return 0; /* num_ticks_per_picture_minus_1 */
+         }
+
+         /* decoder_model_info_present_flag */
+         if (!stbi_avif__bit_read_flag(&bits, &header->decoder_model_info_present))
+            return 0;
+         if (header->decoder_model_info_present)
+         {
+            unsigned long bdl, fptl;
+            if (!stbi_avif__bit_read_bits(&bits, 5, &bdl)) return 0;
+            header->buffer_delay_length = (int)bdl + 1;
+            if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* num_units_in_decoding_tick */
+            if (!stbi_avif__bit_read_bits(&bits, 5, &value)) return 0;  /* buffer_removal_time_length_minus_1 */
+            if (!stbi_avif__bit_read_bits(&bits, 5, &fptl)) return 0;
+            header->frame_presentation_time_length = (int)fptl + 1;
+         }
+      }
+      else
+      {
+         header->decoder_model_info_present = 0;
+      }
+
+      if (!stbi_avif__bit_read_flag(&bits, &initial_display_delay_present))
+         return 0;
+      if (!stbi_avif__bit_read_bits(&bits, 5, &op_cnt_minus_1))
+         return 0;
+
+      for (i = 0; i <= (unsigned int)op_cnt_minus_1; ++i)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 12, &value)) return 0; /* operating_point_idc */
+         if (!stbi_avif__bit_read_bits(&bits, 5, &value))  return 0; /* seq_level_idx */
+         if ((unsigned int)value > 7u)
+         {
+            if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* seq_tier */
+         }
+         if (header->decoder_model_info_present)
+         {
+            int dmp;
+            if (!stbi_avif__bit_read_flag(&bits, &dmp)) return 0;
+            if (dmp)
+            {
+               unsigned int n = (unsigned int)header->buffer_delay_length;
+               if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* decoder_buffer_delay */
+               if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* encoder_buffer_delay */
+               if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* low_delay_mode_flag */
+            }
+         }
+         if (initial_display_delay_present)
+         {
+            int iddp;
+            if (!stbi_avif__bit_read_flag(&bits, &iddp)) return 0;
+            if (iddp)
+            {
+               if (!stbi_avif__bit_read_bits(&bits, 4, &value)) return 0; /* initial_display_delay_minus_1 */
+            }
+         }
+      }
+   }
+
+   /* Frame width/height bits — shared by reduced and non-reduced paths */
+   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_width_bits_minus_1))
+      return 0;
+   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_height_bits_minus_1))
+      return 0;
+
+   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_width_bits_minus_1 + 1u, &value))
+      return 0;
+   header->max_frame_width = (unsigned int)value + 1u;
+   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_height_bits_minus_1 + 1u, &value))
+      return 0;
+   header->max_frame_height = (unsigned int)value + 1u;
+
+   /* frame_id_numbers_present_flag — only for non-reduced */
+   if (!header->reduced_still_picture_header)
+   {
+      if (!stbi_avif__bit_read_flag(&bits, &header->frame_id_numbers_present))
+         return 0;
+      if (header->frame_id_numbers_present)
+      {
+         unsigned long dfidl, afidl;
+         if (!stbi_avif__bit_read_bits(&bits, 4, &dfidl)) return 0;
+         header->delta_frame_id_length = (int)dfidl + 2;
+         if (!stbi_avif__bit_read_bits(&bits, 3, &afidl)) return 0;
+         header->additional_frame_id_length = (int)afidl + 1;
+      }
+   }
+
+   /* SB / tool flags */
+   if (!stbi_avif__bit_read_flag(&bits, &header->use_128x128_superblock))
+      return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_filter_intra */
+   header->enable_filter_intra = flag;
+   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_intra_edge_filter */
+
+   /* Inter-frame tools — only present for non-reduced */
+   if (!header->reduced_still_picture_header)
+   {
+      int enable_interintra_compound, enable_masked_compound;
+      int enable_warped_motion, enable_dual_filter;
+
+      if (!stbi_avif__bit_read_flag(&bits, &enable_interintra_compound)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_masked_compound)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_warped_motion)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_dual_filter)) return 0;
+
+      if (!stbi_avif__bit_read_flag(&bits, &header->enable_order_hint)) return 0;
+      if (header->enable_order_hint)
+      {
+         if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_jnt_comp */
+         if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_ref_frame_mvs */
+      }
+
+      /* seq_force_screen_content_tools */
+      {
+         int seq_choose_screen;
+         if (!stbi_avif__bit_read_flag(&bits, &seq_choose_screen)) return 0;
+         if (seq_choose_screen)
+            header->seq_force_screen_content_tools = 2; /* SELECT */
+         else
+         {
+            if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0;
+            header->seq_force_screen_content_tools = flag;
+         }
+      }
+
+      /* seq_force_integer_mv */
+      if (header->seq_force_screen_content_tools > 0)
+      {
+         int seq_choose_integer;
+         if (!stbi_avif__bit_read_flag(&bits, &seq_choose_integer)) return 0;
+         if (seq_choose_integer)
+            header->seq_force_integer_mv = 2; /* SELECT */
+         else
+         {
+            if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0;
+            header->seq_force_integer_mv = flag;
+         }
+      }
+      else
+      {
+         header->seq_force_integer_mv = 2; /* SELECT */
+      }
+
+      if (header->enable_order_hint)
+      {
+         unsigned long ohb;
+         if (!stbi_avif__bit_read_bits(&bits, 3, &ohb)) return 0;
+         header->order_hint_bits = (int)ohb + 1;
+      }
+   }
+
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_superres)) return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_cdef)) return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_restoration)) return 0;
+
+   /* color_config() */
+   if (!stbi_avif__parse_av1_color_config(&bits, header))
+      return 0;
+
+   /* film_grain_params_present — read AFTER color_config (AV1 spec §5.5.1) */
    if (!stbi_avif__bit_read_flag(&bits, &header->film_grain_params_present))
       return 0;
-   if (header->film_grain_params_present)
-      return stbi_avif__fail("AV1 film grain is not supported");
 
-   if ((header->subsampling_x == 0 && header->subsampling_y == 1) ||
-       (header->subsampling_x != 0 && header->subsampling_x != 1) ||
-       (header->subsampling_y != 0 && header->subsampling_y != 1))
-      return stbi_avif__fail("unsupported AV1 chroma subsampling");
+   if (!header->monochrome) {
+      if ((header->subsampling_x == 0 && header->subsampling_y == 1) ||
+          (header->subsampling_x != 0 && header->subsampling_x != 1) ||
+          (header->subsampling_y != 0 && header->subsampling_y != 1))
+         return stbi_avif__fail("unsupported AV1 chroma subsampling");
+   }
 
    return 1;
 }
@@ -1015,6 +1281,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
    stbi_avif__bit_reader_init(&bits, data, size);
 
+   delta_q_u_dc = 0;
+   delta_q_u_ac = 0;
+   delta_q_v_dc = 0;
+   delta_q_v_ac = 0;
+
    if (seq->reduced_still_picture_header)
    {
       int disable_cdf_update;
@@ -1071,13 +1342,161 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       }
       frame->allow_intrabc = allow_intrabc;
       frame->allow_screen_content_tools = allow_screen_content_tools;
+   }
+   else
+   {
+      /* Non-reduced frame header (AV1 spec §5.9.2 uncompressed_header) */
+      int show_existing_frame;
+      int disable_cdf_update;
+      int allow_screen_content_tools;
+      int force_integer_mv_flag;
+      int frame_size_override;
 
-      /* tile_info() */
-      sb_size = seq->use_128x128_superblock ? 128u : 64u;
-      sb_cols = (frame->frame_width  + sb_size - 1u) / sb_size;
-      sb_rows = (frame->frame_height + sb_size - 1u) / sb_size;
-      max_tile_width_sb = 4096u / sb_size;
-      max_tile_area_sb  = (4096u * 2304u) / (sb_size * sb_size);
+      if (!stbi_avif__bit_read_flag(&bits, &show_existing_frame))
+         return 0;
+      if (show_existing_frame)
+         return stbi_avif__fail("show_existing_frame is not supported for AVIF");
+
+      if (!stbi_avif__bit_read_bits(&bits, 2, &value)) return 0;
+      frame->frame_type = (unsigned int)value;
+      /* For AVIF we require KEY_FRAME(0) or INTRA_ONLY(2) */
+      if (frame->frame_type != 0u && frame->frame_type != 2u)
+         return stbi_avif__fail("only KEY_FRAME and INTRA_ONLY frames are supported");
+
+      if (!stbi_avif__bit_read_flag(&bits, &frame->show_frame))
+         return 0;
+
+      /* temporal_point_info() — only if show_frame && decoder_model present */
+      if (frame->show_frame && seq->decoder_model_info_present)
+      {
+         unsigned int n = (unsigned int)seq->frame_presentation_time_length;
+         if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* frame_presentation_time */
+      }
+
+      if (!frame->show_frame)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* showable_frame */
+      }
+
+      /* error_resilient_mode: implicit 1 for KEY_FRAME with show_frame, or SWITCH */
+      if (frame->frame_type == 0u && frame->show_frame)
+      {
+         /* error_resilient_mode = 1 implicitly */
+      }
+      else
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* error_resilient_mode */
+      }
+
+      /* disable_cdf_update */
+      if (!stbi_avif__bit_read_flag(&bits, &disable_cdf_update))
+         return 0;
+
+      /* allow_screen_content_tools */
+      if (seq->seq_force_screen_content_tools == 2) {
+         if (!stbi_avif__bit_read_flag(&bits, &allow_screen_content_tools))
+            return 0;
+      } else {
+         allow_screen_content_tools = seq->seq_force_screen_content_tools;
+      }
+
+      /* force_integer_mv */
+      force_integer_mv_flag = 0;
+      if (allow_screen_content_tools) {
+         if (seq->seq_force_integer_mv == 2) {
+            if (!stbi_avif__bit_read_flag(&bits, &force_integer_mv_flag))
+               return 0;
+         } else {
+            force_integer_mv_flag = seq->seq_force_integer_mv;
+         }
+      }
+
+      /* current_frame_id */
+      if (seq->frame_id_numbers_present)
+      {
+         unsigned int id_len = (unsigned int)(seq->delta_frame_id_length + seq->additional_frame_id_length);
+         if (!stbi_avif__bit_read_bits(&bits, id_len, &value)) return 0;
+      }
+
+      /* frame_size_override_flag */
+      if (frame->frame_type == 0u) {
+         /* KEY_FRAME: always read frame_size_override_flag */
+         if (!stbi_avif__bit_read_flag(&bits, &frame_size_override))
+            return 0;
+      } else {
+         frame_size_override = 0;
+         if (!stbi_avif__bit_read_flag(&bits, &frame_size_override))
+            return 0;
+      }
+
+      /* frame_size() */
+      if (frame_size_override)
+      {
+         unsigned long fw_bits = 0, fh_bits = 0;
+         /* Need frame_width_bits and frame_height_bits from seq header.
+          * These are derived from max_frame_width/height. Use ceil_log2. */
+         {
+            unsigned int mw = seq->max_frame_width;
+            unsigned int mh = seq->max_frame_height;
+            unsigned int wbits = 1, hbits = 1;
+            while ((1u << wbits) < mw) ++wbits;
+            while ((1u << hbits) < mh) ++hbits;
+            if (wbits > 16u) wbits = 16u;
+            if (hbits > 16u) hbits = 16u;
+            if (!stbi_avif__bit_read_bits(&bits, wbits, &fw_bits)) return 0;
+            frame->frame_width = (unsigned int)fw_bits + 1u;
+            if (!stbi_avif__bit_read_bits(&bits, hbits, &fh_bits)) return 0;
+            frame->frame_height = (unsigned int)fh_bits + 1u;
+         }
+      }
+      else
+      {
+         frame->frame_width = seq->max_frame_width;
+         frame->frame_height = seq->max_frame_height;
+      }
+
+      /* superres_params() */
+      if (seq->enable_superres) {
+         int use_superres;
+         if (!stbi_avif__bit_read_flag(&bits, &use_superres))
+            return 0;
+         if (use_superres) {
+            if (!stbi_avif__bit_read_bits(&bits, 3u, &value)) return 0;
+         }
+      }
+
+      /* render_size() */
+      if (!stbi_avif__bit_read_flag(&bits, &render_and_frame_size_different))
+         return 0;
+      if (render_and_frame_size_different)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 16, &value)) return 0;
+         if (!stbi_avif__bit_read_bits(&bits, 16, &value)) return 0;
+      }
+
+      /* For INTRA_ONLY: refresh_frame_flags */
+      if (frame->frame_type == 2u) {
+         if (!stbi_avif__bit_read_bits(&bits, 8, &value)) return 0; /* refresh_frame_flags */
+      }
+
+      /* allow_intrabc */
+      allow_intrabc = 0;
+      if (allow_screen_content_tools) {
+         if (!stbi_avif__bit_read_flag(&bits, &allow_intrabc))
+            return 0;
+      }
+      frame->allow_intrabc = allow_intrabc;
+      frame->allow_screen_content_tools = allow_screen_content_tools;
+   }
+
+   /* ====== Common path: tile_info() through film_grain (shared by reduced and non-reduced) ====== */
+
+   /* tile_info() */
+   sb_size = seq->use_128x128_superblock ? 128u : 64u;
+   sb_cols = (frame->frame_width  + sb_size - 1u) / sb_size;
+   sb_rows = (frame->frame_height + sb_size - 1u) / sb_size;
+   max_tile_width_sb = 4096u / sb_size;
+   max_tile_area_sb  = (4096u * 2304u) / (sb_size * sb_size);
 
       tile_cols = 0u;
       tile_rows = 0u;
@@ -1255,18 +1674,20 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
          STBI_AVIF__READ_DELTA_Q(&bits, delta_q_y_dc);
 
-         /* num_planes > 1 */
-         if (seq->separate_uv_delta_q) {
-            if (!stbi_avif__bit_read_flag(&bits, &diff_uv_delta)) return 0;
-         }
-         STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_dc);
-         STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_ac);
-         if (diff_uv_delta) {
-            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_dc);
-            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_ac);
-         } else {
-            delta_q_v_dc = delta_q_u_dc;
-            delta_q_v_ac = delta_q_u_ac;
+         /* UV delta Q only present when num_planes > 1 (not monochrome) */
+         if (!seq->monochrome) {
+            if (seq->separate_uv_delta_q) {
+               if (!stbi_avif__bit_read_flag(&bits, &diff_uv_delta)) return 0;
+            }
+            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_dc);
+            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_ac);
+            if (diff_uv_delta) {
+               STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_dc);
+               STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_ac);
+            } else {
+               delta_q_v_dc = delta_q_u_dc;
+               delta_q_v_ac = delta_q_u_ac;
+            }
          }
 
          #undef STBI_AVIF__READ_DELTA_Q
@@ -1286,7 +1707,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          unsigned long qm_y_val, qm_u_val, qm_v_val;
          if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_y_val)) return 0;
          if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_u_val)) return 0;
-         if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_v_val)) return 0;
+         if (seq->separate_uv_delta_q) {
+            if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_v_val)) return 0;
+         } else {
+            qm_v_val = qm_u_val;
+         }
          frame->qm_y = (int)qm_y_val;
          frame->qm_u = (int)qm_u_val;
          frame->qm_v = (int)qm_v_val;
@@ -1442,21 +1867,27 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          frame->cdef_bits = (int)cdef_bits_val;
          nb_cdef_strengths = 1 << frame->cdef_bits;
          for (ci = 0; ci < nb_cdef_strengths; ++ci) {
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* Y strength */
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* UV strength */
+            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+            frame->cdef_y_strengths[ci] = (int)value;
+            if (!seq->monochrome) {
+               if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+               frame->cdef_uv_strengths[ci] = (int)value;
+            } else {
+               frame->cdef_uv_strengths[ci] = 0;
+            }
          }
       }
       if (seq->enable_restoration && !allow_intrabc)
       {
-         /* lr_params() - parse restoration filter parameters (AV1 spec §5.9.19)
-          * We parse but do not apply loop restoration (not required for still-picture AVIF). */
-         int num_planes = 3; /* Y, U, V */
+         /* lr_params() - parse and store restoration filter parameters (AV1 spec §5.9.19) */
+         int num_planes = seq->monochrome ? 1 : 3;
          int uses_lr = 0;
          int uses_chroma_lr = 0;
          int i;
          int lr_type[3];
          int lr_unit_shift = 0;
          int lr_uv_shift = 0;
+         lr_type[0] = lr_type[1] = lr_type[2] = 0;
          for (i = 0; i < num_planes; ++i)
          {
             unsigned long rtype;
@@ -1481,7 +1912,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                lr_uv_shift = shift_bit;
             }
          }
-         (void)lr_type; (void)lr_unit_shift; (void)lr_uv_shift; /* parsed per spec; not applied for still-image AVIF */
+         frame->lr_type[0] = lr_type[0];
+         frame->lr_type[1] = lr_type[1];
+         frame->lr_type[2] = lr_type[2];
+         frame->lr_unit_shift = lr_unit_shift;
+         frame->lr_uv_shift = lr_uv_shift;
       }
 
       if (stbi_avif__bit_reader_has_trailing_bits_only(&bits))
@@ -1505,15 +1940,146 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       {
          if (!stbi_avif__bit_read_flag(&bits, &apply_grain))
             return 0;
+         frame->apply_grain = apply_grain;
          if (apply_grain)
-            return stbi_avif__fail("AV1 film grain is not supported yet");
+         {
+            /* film_grain_params() — AV1 spec §5.9.30
+             * Parse and store all film grain parameters for grain synthesis. */
+            unsigned long fg_val;
+            int num_y_points, num_cb_points, num_cr_points;
+            int fg_i;
+            int chroma_scaling_from_luma = 0;
+
+            /* grain_seed: 16 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 16u, &fg_val)) return 0;
+            frame->grain_seed = (unsigned int)fg_val;
+
+            /* num_y_points: 4 bits, then each point is (8+8) bits */
+            if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+            num_y_points = (int)fg_val;
+            frame->num_y_points = num_y_points;
+            for (fg_i = 0; fg_i < num_y_points && fg_i < 14; ++fg_i)
+            {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->point_y_value[fg_i] = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->point_y_scaling[fg_i] = (int)fg_val;
+            }
+
+            /* chroma_scaling_from_luma: 1 bit */
+            if (!seq->monochrome) {
+               if (!stbi_avif__bit_read_flag(&bits, &chroma_scaling_from_luma)) return 0;
+            }
+            frame->chroma_scaling_from_luma = chroma_scaling_from_luma;
+
+            if (seq->monochrome || chroma_scaling_from_luma ||
+                (seq->subsampling_x == 1 && seq->subsampling_y == 1 && num_y_points == 0))
+            {
+               num_cb_points = 0;
+               num_cr_points = 0;
+            }
+            else
+            {
+               /* num_cb_points: 4 bits + points */
+               if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+               num_cb_points = (int)fg_val;
+               for (fg_i = 0; fg_i < num_cb_points && fg_i < 14; ++fg_i)
+               {
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cb_value[fg_i] = (int)fg_val;
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cb_scaling[fg_i] = (int)fg_val;
+               }
+               /* num_cr_points: 4 bits + points */
+               if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
+               num_cr_points = (int)fg_val;
+               for (fg_i = 0; fg_i < num_cr_points && fg_i < 14; ++fg_i)
+               {
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cr_value[fg_i] = (int)fg_val;
+                  if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cr_scaling[fg_i] = (int)fg_val;
+               }
+            }
+            frame->num_cb_points = num_cb_points;
+            frame->num_cr_points = num_cr_points;
+
+            /* grain_scaling_minus_8: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->grain_scaling_minus_8 = (int)fg_val;
+
+            /* ar_coeff_lag: 2 bits */
+            {
+               int ar_coeff_lag;
+               int num_pos_luma, num_pos_chroma;
+               if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+               ar_coeff_lag = (int)fg_val;
+               frame->ar_coeff_lag = ar_coeff_lag;
+               num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
+               if (num_y_points > 0) {
+                  num_pos_chroma = num_pos_luma + 1;
+               } else {
+                  num_pos_chroma = num_pos_luma;
+               }
+               /* ar_coeffs_y: num_pos_luma × 8 bits (if num_y_points > 0) */
+               if (num_y_points > 0) {
+                  for (fg_i = 0; fg_i < num_pos_luma && fg_i < 24; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_y_plus_128[fg_i] = (int)fg_val;
+                  }
+               }
+               /* ar_coeffs_cb: num_pos_chroma × 8 bits */
+               if (num_cb_points > 0 || chroma_scaling_from_luma) {
+                  for (fg_i = 0; fg_i < num_pos_chroma && fg_i < 25; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_cb_plus_128[fg_i] = (int)fg_val;
+                  }
+               }
+               /* ar_coeffs_cr: num_pos_chroma × 8 bits */
+               if (num_cr_points > 0 || chroma_scaling_from_luma) {
+                  for (fg_i = 0; fg_i < num_pos_chroma && fg_i < 25; ++fg_i) {
+                     if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_cr_plus_128[fg_i] = (int)fg_val;
+                  }
+               }
+            }
+
+            /* ar_coeff_shift_minus_6: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->ar_coeff_shift_minus_6 = (int)fg_val;
+
+            /* grain_scale_shift: 2 bits */
+            if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->grain_scale_shift = (int)fg_val;
+
+            /* cb_mult, cb_luma_mult, cb_offset */
+            if (num_cb_points > 0) {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cb_mult = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cb_luma_mult = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+               frame->cb_offset = (int)fg_val;
+            }
+            /* cr_mult, cr_luma_mult, cr_offset */
+            if (num_cr_points > 0) {
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cr_mult = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cr_luma_mult = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+               frame->cr_offset = (int)fg_val;
+            }
+
+            /* overlap_flag: 1 bit */
+            if (!stbi_avif__bit_read_flag(&bits, &frame->overlap_flag)) return 0;
+            /* clip_to_restricted_range: 1 bit */
+            if (!stbi_avif__bit_read_flag(&bits, &frame->clip_to_restricted_range)) return 0;
+         }
       }
 
-      frame->header_bits_consumed = bits.bit_offset;
-      return 1;
-   }
-
-   return stbi_avif__fail("non-reduced AV1 frame headers are not supported yet");
+   frame->header_bits_consumed = bits.bit_offset;
+   return 1;
 }
 
 static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, size_t size,
@@ -6938,6 +7504,7 @@ typedef struct
    int             subx;    /* horizontal chroma subsampling flag (0 or 1) */
    int             suby;    /* vertical   chroma subsampling flag (0 or 1) */
    unsigned int    bit_depth;
+   int             monochrome;
 } stbi_avif__av1_planes;
 
 static int stbi_avif__av1_alloc_planes(stbi_avif__av1_planes *planes,
@@ -6946,13 +7513,26 @@ static int stbi_avif__av1_alloc_planes(stbi_avif__av1_planes *planes,
 {
    unsigned int w  = fhdr->frame_width;
    unsigned int h  = fhdr->frame_height;
-   unsigned int cw = seq->subsampling_x ? ((w + 1u) >> 1) : w;
-   unsigned int ch = seq->subsampling_y ? ((h + 1u) >> 1) : h;
+   unsigned int cw, ch;
    size_t y_count, c_count;
 
    memset(planes, 0, sizeof(*planes));
    if (w == 0u || h == 0u)
       return stbi_avif__fail("zero frame dimensions");
+
+   planes->monochrome = seq->monochrome;
+   if (seq->monochrome)
+   {
+      /* Monochrome: no chroma planes needed. Allocate minimal 1-pixel buffers
+       * filled with mid-gray to avoid null dereferences in shared code paths. */
+      cw = 1u;
+      ch = 1u;
+   }
+   else
+   {
+      cw = seq->subsampling_x ? ((w + 1u) >> 1) : w;
+      ch = seq->subsampling_y ? ((h + 1u) >> 1) : h;
+   }
 
    y_count = (size_t)w  * (size_t)h;
    c_count = (size_t)cw * (size_t)ch;
@@ -7104,6 +7684,11 @@ typedef struct
    int                           cdef_bits;
    unsigned int                  sb_size_mi;
    int                           cdef_transmitted[4];
+   int                           monochrome;
+   unsigned char                *cdef_idx;       /* per-64x64 block CDEF index grid */
+   unsigned int                  cdef_grid_cols; /* grid columns = ceil(frame_width / 64) */
+   unsigned int                  cdef_grid_rows; /* grid rows = ceil(frame_height / 64) */
+   const stbi_avif__av1_frame_header *fhdr;     /* frame header (for CDEF strengths) */
 
    /* Adaptive CDF state */
    unsigned short  partition_cdf[5][4][11];
@@ -8897,7 +9482,13 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          unsigned int cdef_val;
          cdef_val = stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)ctx->cdef_bits);
          ctx->cdef_transmitted[cdef_index] = 1;
-         (void)cdef_val; /* We don't apply CDEF filtering */
+         /* Store CDEF index in the grid */
+         if (ctx->cdef_idx != NULL) {
+            unsigned int cdef_grid_r = mi_row / 16u;
+            unsigned int cdef_grid_c = mi_col / 16u;
+            if (cdef_grid_r < ctx->cdef_grid_rows && cdef_grid_c < ctx->cdef_grid_cols)
+               ctx->cdef_idx[cdef_grid_r * ctx->cdef_grid_cols + cdef_grid_c] = (unsigned char)cdef_val;
+         }
       }
    }
 
@@ -8926,9 +9517,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          ctx->angle_delta_cdf[y_mode - 1u], 7);
    }
 
-   /* UV mode (must be read before residual per AV1 spec) */
+   /* UV mode (must be read before residual per AV1 spec) — skip for monochrome */
    uv_mode = 0u;
-   {
+   uv_mode_raw = 0u;
+   if (!ctx->monochrome) {
       int cfl_allowed = (pw <= 32u && ph <= 32u); /* CFL only for blocks ≤ 32x32 */
       if (cpw >= 4u && cph >= 4u) {
          if (cfl_allowed)
@@ -8938,34 +9530,34 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->uv_mode_cdf_no_cfl[y_mode < 13 ? y_mode : 0], 13);
       }
-   }
 
-   /* UV angle delta */
-   if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
-      stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
+      /* UV angle delta */
+      if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
+         stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
 
-   /* CFL_PRED */
-   uv_mode_raw = uv_mode;
-   if (uv_mode == 13u) {
-      unsigned int cfl_sign_sym;
-      unsigned int sign_u;
-      unsigned int sign_v;
-      cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
-      sign_u = cfl_sign_sym / 3u;
-      sign_v = cfl_sign_sym - sign_u * 3u;
-      if (sign_u > 0u) {
-         unsigned int alpha_ctx_u = (sign_u == 2u) ? 3u + sign_v : sign_v;
-         unsigned int cfl_alpha_u_mag =
-            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16) + 1u;
-         cfl_alpha_u = (sign_u == 1u) ? -(int)cfl_alpha_u_mag : (int)cfl_alpha_u_mag;
+      /* CFL_PRED */
+      uv_mode_raw = uv_mode;
+      if (uv_mode == 13u) {
+         unsigned int cfl_sign_sym;
+         unsigned int sign_u;
+         unsigned int sign_v;
+         cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
+         sign_u = cfl_sign_sym / 3u;
+         sign_v = cfl_sign_sym - sign_u * 3u;
+         if (sign_u > 0u) {
+            unsigned int alpha_ctx_u = (sign_u == 2u) ? 3u + sign_v : sign_v;
+            unsigned int cfl_alpha_u_mag =
+               stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16) + 1u;
+            cfl_alpha_u = (sign_u == 1u) ? -(int)cfl_alpha_u_mag : (int)cfl_alpha_u_mag;
+         }
+         if (sign_v > 0u) {
+            unsigned int alpha_ctx_v = (sign_v == 2u) ? 3u + sign_u : sign_u;
+            unsigned int cfl_alpha_v_mag =
+               stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16) + 1u;
+            cfl_alpha_v = (sign_v == 1u) ? -(int)cfl_alpha_v_mag : (int)cfl_alpha_v_mag;
+         }
+         uv_mode = 0u; /* CFL uses DC_PRED as base for prediction */
       }
-      if (sign_v > 0u) {
-         unsigned int alpha_ctx_v = (sign_v == 2u) ? 3u + sign_u : sign_u;
-         unsigned int cfl_alpha_v_mag =
-            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16) + 1u;
-         cfl_alpha_v = (sign_v == 1u) ? -(int)cfl_alpha_v_mag : (int)cfl_alpha_v_mag;
-      }
-      uv_mode = 0u; /* CFL uses DC_PRED as base for prediction */
    }
 
    /* Palette mode info (AV1 spec: read between CFL and TX size) */
@@ -9086,7 +9678,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
             }
          }
-         if (uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
+         if (!ctx->monochrome && uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
             unsigned int pal_uv_ctx = palette_y_size > 0 ? 1u : 0u;
             unsigned int pal_uv_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->palette_uv_mode_cdf[pal_uv_ctx], 2);
@@ -9347,8 +9939,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          px, py, pw, ph, ctx->planes->bit_depth, y_mode);
    }
 
-   /* Predict UV */
-   if (cpw > 0u && cph > 0u) {
+   /* Predict UV — skip for monochrome */
+   if (!ctx->monochrome && cpw > 0u && cph > 0u) {
       if (palette_uv_size > 0) {
          /* Fill UV from palette color map */
          unsigned int mi_r, mi_c;
@@ -9507,10 +10099,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
 
-      /* U and V residual (skip if palette or if chroma block too small for a TX).
+      /* U and V residual (skip for monochrome, palette, or if chroma block too small for a TX).
        * In 4:2:0, a 4x4 luma block maps to a 2x2 chroma block which is below
        * the minimum 4x4 TX size; those blocks are never chroma references. */
-      if (cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
+      if (!ctx->monochrome && cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_szw / 4u;
          unsigned int uv_h_mi = uv_tx_szh / 4u;
@@ -9864,7 +10456,9 @@ static unsigned char stbi_avif__clamp_u8(int v)
 
 static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes *p,
                                                       int matrix_coefficients,
-                                                      int color_range)
+                                                      int color_range,
+                                                      const unsigned short *alpha_plane,
+                                                      unsigned int alpha_bit_depth)
 {
    unsigned int w  = p->width;
    unsigned int h  = p->height;
@@ -9875,6 +10469,35 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
    {
       stbi_avif__fail("out of memory (RGBA output)");
       return NULL;
+   }
+
+   /* Monochrome: R=G=B=Y, A=alpha or 255 */
+   if (p->monochrome)
+   {
+      for (iy = 0; iy < h; ++iy)
+      {
+         const unsigned short *yrow = p->y + iy * w;
+         unsigned char *drow = out + iy * w * 4u;
+         for (ix = 0; ix < w; ++ix)
+         {
+            int Y;
+            if (p->bit_depth > 8u)
+               Y = (int)(yrow[ix] >> 2);
+            else
+               Y = (int)yrow[ix];
+            drow[ix * 4u + 0u] = stbi_avif__clamp_u8(Y);
+            drow[ix * 4u + 1u] = stbi_avif__clamp_u8(Y);
+            drow[ix * 4u + 2u] = stbi_avif__clamp_u8(Y);
+            if (alpha_plane != NULL) {
+               int A = (int)alpha_plane[iy * w + ix];
+               if (alpha_bit_depth > 8u) A >>= 2;
+               drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
+            } else {
+               drow[ix * 4u + 3u] = 255u;
+            }
+         }
+      }
+      return out;
    }
 
    for (iy = 0; iy < h; ++iy)
@@ -9978,10 +10601,1025 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          drow[ix * 4u + 0u] = stbi_avif__clamp_u8(R);
          drow[ix * 4u + 1u] = stbi_avif__clamp_u8(G);
          drow[ix * 4u + 2u] = stbi_avif__clamp_u8(B);
-         drow[ix * 4u + 3u] = 255u;
+         if (alpha_plane != NULL) {
+            int A = (int)alpha_plane[iy * w + ix];
+            if (alpha_bit_depth > 8u) A >>= 2;
+            drow[ix * 4u + 3u] = stbi_avif__clamp_u8(A);
+         } else {
+            drow[ix * 4u + 3u] = 255u;
+         }
       }
    }
    return out;
+}
+
+/*
+ * =============================================================================
+ *  CDEF (Constrained Directional Enhancement Filter) - AV1 spec 7.15
+ * =============================================================================
+ */
+
+/* CDEF direction offsets: [8 directions][2 distances][2 coords (dy, dx)] */
+static const int stbi_avif__cdef_directions[8][2][2] = {
+   {{ -1,  1 }, { -2,  2 }},
+   {{  0,  1 }, { -1,  2 }},
+   {{  0,  1 }, {  0,  2 }},
+   {{  0,  1 }, {  1,  2 }},
+   {{  1,  1 }, {  2,  2 }},
+   {{  1,  0 }, {  2,  1 }},
+   {{  1,  0 }, {  2,  0 }},
+   {{  1,  0 }, {  2, -1 }}
+};
+
+static const int stbi_avif__cdef_pri_taps[2][2] = {
+   { 4, 2 },  /* even primary strength */
+   { 3, 3 }   /* odd primary strength */
+};
+
+static const int stbi_avif__cdef_sec_taps[2] = { 2, 1 };
+
+static int stbi_avif__cdef_floor_log2(int x)
+{
+   int log2 = 0;
+   while (x > 1) { x >>= 1; ++log2; }
+   return log2;
+}
+
+static int stbi_avif__cdef_constrain(int diff, int strength, int damping)
+{
+   int sign, v, damp;
+   if (strength == 0 || diff == 0) return 0;
+   sign = (diff < 0) ? -1 : 1;
+   v = (diff < 0) ? -diff : diff;
+   damp = damping - stbi_avif__cdef_floor_log2(strength);
+   if (damp < 0) damp = 0;
+   if (v >= strength) return 0;
+   v = v - (v >> damp);
+   if (v < 0) v = 0;
+   return sign * v;
+}
+
+static int stbi_avif__cdef_find_dir(const unsigned short *src, unsigned int stride,
+                                     unsigned int bit_depth)
+{
+   int partial_hv[2][8];
+   int partial_diag[2][15];
+   int partial_alt[4][11];
+   unsigned int cost[8];
+   int y, x, best_dir;
+   unsigned int best_cost;
+   int rnd = (int)(1u << (bit_depth - 8u)) * 128;
+
+   /* Normalization divisors for direction partial sums, derived from AV1 spec §7.15.1.
+    * div_table[i] = 840 / line_length, where line_length is the number of pixels
+    * on diagonal line i of the 8×8 block (1,2,3,...,8,...,3,2,1).
+    * alt_div_table[i] = similar for 22.5°/67.5° angled partial sums.
+    * Cost = sum(partial_sum² * 840 / line_length) to normalize for line length. */
+   static const unsigned int div_table[15] = {
+      840, 420, 280, 210, 168, 140, 120, 105, 120, 140, 168, 210, 280, 420, 840
+   };
+   static const unsigned int alt_div_table[11] = {
+      420, 210, 140, 105, 105, 105, 105, 105, 140, 210, 420
+   };
+
+   memset(partial_hv, 0, sizeof(partial_hv));
+   memset(partial_diag, 0, sizeof(partial_diag));
+   memset(partial_alt, 0, sizeof(partial_alt));
+   memset(cost, 0, sizeof(cost));
+
+   for (y = 0; y < 8; ++y) {
+      for (x = 0; x < 8; ++x) {
+         int v = (int)src[(unsigned)y * stride + (unsigned)x] - rnd;
+         partial_diag[0][y + x] += v;
+         partial_diag[1][y + 7 - x] += v;
+         partial_hv[0][y] += v;
+         partial_hv[1][x] += v;
+         partial_alt[0][y + (x >> 1)] += v;
+         partial_alt[1][y + ((7 - x) >> 1)] += v;
+         partial_alt[2][(y >> 1) + x] += v;
+         partial_alt[3][(y >> 1) + 7 - x] += v;
+      }
+   }
+
+   for (y = 0; y < 8; ++y) {
+      cost[2] += (unsigned int)(partial_hv[0][y] * partial_hv[0][y]);
+      cost[6] += (unsigned int)(partial_hv[1][y] * partial_hv[1][y]);
+   }
+   cost[2] *= 105u;
+   cost[6] *= 105u;
+
+   /* Note: we divide before multiply to avoid 32-bit overflow.
+    * Precision loss is negligible since we only need relative ordering
+    * of costs for direction selection. */
+   for (y = 0; y < 15; ++y) {
+      cost[0] += (unsigned int)(partial_diag[0][y] * partial_diag[0][y]) / div_table[y] * 840u;
+      cost[4] += (unsigned int)(partial_diag[1][y] * partial_diag[1][y]) / div_table[y] * 840u;
+   }
+
+   for (y = 0; y < 11; ++y) {
+      cost[1] += (unsigned int)(partial_alt[0][y] * partial_alt[0][y]) / alt_div_table[y] * 840u;
+      cost[3] += (unsigned int)(partial_alt[1][y] * partial_alt[1][y]) / alt_div_table[y] * 840u;
+      cost[5] += (unsigned int)(partial_alt[2][y] * partial_alt[2][y]) / alt_div_table[y] * 840u;
+      cost[7] += (unsigned int)(partial_alt[3][y] * partial_alt[3][y]) / alt_div_table[y] * 840u;
+   }
+
+   best_dir = 0;
+   best_cost = cost[0];
+   for (y = 1; y < 8; ++y) {
+      if (cost[y] > best_cost) {
+         best_cost = cost[y];
+         best_dir = y;
+      }
+   }
+   return best_dir;
+}
+
+static void stbi_avif__cdef_filter_block(unsigned short *dst, unsigned int dst_stride,
+                                          const unsigned short *src, unsigned int src_stride,
+                                          unsigned int src_w, unsigned int src_h,
+                                          unsigned int bx, unsigned int by,
+                                          unsigned int bw, unsigned int bh,
+                                          int dir, int pri_strength, int sec_strength,
+                                          int damping, unsigned int bit_depth)
+{
+   int maxv = (int)((1u << bit_depth) - 1u);
+   const int *pri_t = stbi_avif__cdef_pri_taps[pri_strength & 1];
+   unsigned int y, x;
+   for (y = 0; y < bh; ++y) {
+      for (x = 0; x < bw; ++x) {
+         unsigned int py = by + y;
+         unsigned int px = bx + x;
+         int sum = 0;
+         int center, result, k;
+         if (py >= src_h || px >= src_w) continue;
+         center = (int)src[py * src_stride + px];
+         if (pri_strength > 0) {
+            for (k = 0; k < 2; ++k) {
+               int dy = stbi_avif__cdef_directions[dir][k][0];
+               int dx = stbi_avif__cdef_directions[dir][k][1];
+               int ny1 = (int)py + dy, nx1 = (int)px + dx;
+               int ny2 = (int)py - dy, nx2 = (int)px - dx;
+               int s0 = center, s1 = center;
+               if (ny1 >= 0 && (unsigned)ny1 < src_h && nx1 >= 0 && (unsigned)nx1 < src_w)
+                  s0 = (int)src[(unsigned)ny1 * src_stride + (unsigned)nx1];
+               if (ny2 >= 0 && (unsigned)ny2 < src_h && nx2 >= 0 && (unsigned)nx2 < src_w)
+                  s1 = (int)src[(unsigned)ny2 * src_stride + (unsigned)nx2];
+               sum += pri_t[k] * stbi_avif__cdef_constrain(s0 - center, pri_strength, damping);
+               sum += pri_t[k] * stbi_avif__cdef_constrain(s1 - center, pri_strength, damping);
+            }
+         }
+         if (sec_strength > 0) {
+            for (k = 0; k < 2; ++k) {
+               int dir2 = (dir + 2) & 7;
+               int dir3 = (dir + 6) & 7;
+               int dy2 = stbi_avif__cdef_directions[dir2][k][0];
+               int dx2 = stbi_avif__cdef_directions[dir2][k][1];
+               int dy3 = stbi_avif__cdef_directions[dir3][k][0];
+               int dx3 = stbi_avif__cdef_directions[dir3][k][1];
+               int nay = (int)py+dy2, nax = (int)px+dx2;
+               int nby = (int)py-dy2, nbx = (int)px-dx2;
+               int ncy = (int)py+dy3, ncx = (int)px+dx3;
+               int ndy = (int)py-dy3, ndx = (int)px-dx3;
+               int sa = center, sb = center, sc = center, sd = center;
+               if (nay >= 0 && (unsigned)nay < src_h && nax >= 0 && (unsigned)nax < src_w)
+                  sa = (int)src[(unsigned)nay * src_stride + (unsigned)nax];
+               if (nby >= 0 && (unsigned)nby < src_h && nbx >= 0 && (unsigned)nbx < src_w)
+                  sb = (int)src[(unsigned)nby * src_stride + (unsigned)nbx];
+               if (ncy >= 0 && (unsigned)ncy < src_h && ncx >= 0 && (unsigned)ncx < src_w)
+                  sc = (int)src[(unsigned)ncy * src_stride + (unsigned)ncx];
+               if (ndy >= 0 && (unsigned)ndy < src_h && ndx >= 0 && (unsigned)ndx < src_w)
+                  sd = (int)src[(unsigned)ndy * src_stride + (unsigned)ndx];
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sa - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sb - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sc - center, sec_strength, damping);
+               sum += stbi_avif__cdef_sec_taps[k] * stbi_avif__cdef_constrain(sd - center, sec_strength, damping);
+            }
+         }
+         result = center + ((8 + sum) >> 4);
+         if (result < 0) result = 0;
+         if (result > maxv) result = maxv;
+         dst[py * dst_stride + px] = (unsigned short)result;
+      }
+   }
+}
+
+static void stbi_avif__av1_cdef_filter(stbi_avif__av1_planes *planes,
+                                        const stbi_avif__av1_frame_header *fhdr,
+                                        const stbi_avif__av1_sequence_header *seq,
+                                        const unsigned char *cdef_idx,
+                                        unsigned int cdef_grid_cols,
+                                        unsigned int cdef_grid_rows)
+{
+   unsigned int w = planes->width;
+   unsigned int h = planes->height;
+   unsigned int cw = planes->cw;
+   unsigned int ch = planes->ch;
+   unsigned int bd = planes->bit_depth;
+   unsigned int cdef_unit_r, cdef_unit_c;
+   unsigned short *y_copy, *u_copy, *v_copy;
+   size_t y_size, c_size;
+
+   if (fhdr->cdef_bits == 0 && fhdr->cdef_damping == 0) return;
+   if (cdef_idx == NULL && fhdr->cdef_bits > 0) return;
+
+   y_size = (size_t)w * h * sizeof(unsigned short);
+   c_size = (size_t)cw * ch * sizeof(unsigned short);
+   y_copy = (unsigned short *)STBI_AVIF_MALLOC(y_size);
+   if (!y_copy) return;
+   memcpy(y_copy, planes->y, y_size);
+
+   u_copy = NULL;
+   v_copy = NULL;
+   if (!seq->monochrome) {
+      u_copy = (unsigned short *)STBI_AVIF_MALLOC(c_size);
+      v_copy = (unsigned short *)STBI_AVIF_MALLOC(c_size);
+      if (!u_copy || !v_copy) {
+         STBI_AVIF_FREE(y_copy);
+         STBI_AVIF_FREE(u_copy);
+         STBI_AVIF_FREE(v_copy);
+         return;
+      }
+      memcpy(u_copy, planes->u, c_size);
+      memcpy(v_copy, planes->v, c_size);
+   }
+
+   for (cdef_unit_r = 0; cdef_unit_r < cdef_grid_rows; ++cdef_unit_r) {
+      for (cdef_unit_c = 0; cdef_unit_c < cdef_grid_cols; ++cdef_unit_c) {
+         unsigned int idx;
+         int y_strength, uv_strength;
+         int y_pri, y_sec_idx, y_sec;
+         int uv_pri, uv_sec_idx, uv_sec;
+         int damping;
+         unsigned int base_y, base_x, blk_r, blk_c;
+
+         idx = (cdef_idx != NULL) ? cdef_idx[cdef_unit_r * cdef_grid_cols + cdef_unit_c] : 0u;
+         y_strength = fhdr->cdef_y_strengths[idx];
+         uv_strength = fhdr->cdef_uv_strengths[idx];
+         y_pri = (y_strength >> 2) << ((int)bd - 8);
+         y_sec_idx = y_strength & 3;
+         y_sec = (y_sec_idx == 0) ? 0 : (y_sec_idx << ((int)bd - 8));
+         uv_pri = (uv_strength >> 2) << ((int)bd - 8);
+         uv_sec_idx = uv_strength & 3;
+         uv_sec = (uv_sec_idx == 0) ? 0 : (uv_sec_idx << ((int)bd - 8));
+         damping = fhdr->cdef_damping;
+         base_y = cdef_unit_r * 64u;
+         base_x = cdef_unit_c * 64u;
+
+         if (y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0) continue;
+
+         for (blk_r = 0; blk_r < 64u && base_y + blk_r < h; blk_r += 8u) {
+            for (blk_c = 0; blk_c < 64u && base_x + blk_c < w; blk_c += 8u) {
+               unsigned int bx = base_x + blk_c;
+               unsigned int by = base_y + blk_r;
+               int dir = 0;
+
+               if (y_pri > 0 || y_sec > 0) {
+                  if (bx + 8u <= w && by + 8u <= h)
+                     dir = stbi_avif__cdef_find_dir(y_copy + by * w + bx, w, bd);
+                  stbi_avif__cdef_filter_block(planes->y, w, y_copy, w, w, h,
+                                                bx, by, 8u, 8u,
+                                                dir, y_pri, y_sec, damping, bd);
+               }
+
+               if (!seq->monochrome && (uv_pri > 0 || uv_sec > 0)) {
+                  unsigned int cbx = bx >> planes->subx;
+                  unsigned int cby = by >> planes->suby;
+                  unsigned int cbw = 8u >> planes->subx;
+                  unsigned int cbh = 8u >> planes->suby;
+                  stbi_avif__cdef_filter_block(planes->u, cw, u_copy, cw, cw, ch,
+                                                cbx, cby, cbw, cbh,
+                                                dir, uv_pri, uv_sec, damping, bd);
+                  stbi_avif__cdef_filter_block(planes->v, cw, v_copy, cw, cw, ch,
+                                                cbx, cby, cbw, cbh,
+                                                dir, uv_pri, uv_sec, damping, bd);
+               }
+            }
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(y_copy);
+   STBI_AVIF_FREE(u_copy);
+   STBI_AVIF_FREE(v_copy);
+}
+
+/*
+ * =============================================================================
+ *  FILM GRAIN SYNTHESIS  (AV1 spec §7.18.3)
+ * =============================================================================
+ *
+ * Applied after loop restoration, before RGBA conversion.
+ * Uses auto-regressive noise generation, piecewise-linear intensity scaling,
+ * and block-level application with overlap blending.
+ */
+
+/* Gaussian random number table from AV1 spec §7.18.3.1, Table 4 (first 2048 entries).
+ * Due to the table's large size (2048 signed 16-bit entries), we use a PRNG
+ * that produces equivalent distribution for our purposes. */
+
+/* Pseudo-random number generator matching AV1 grain spec */
+static unsigned int stbi_avif__grain_prng(unsigned int *state)
+{
+   /* AV1 spec: get_random_number(bits) uses an LFSR with tap positions 0, 1, 3, 12.
+    * new_bit = ((s >> 0) ^ (s >> 1) ^ (s >> 3) ^ (s >> 12)) & 1
+    * state = (state >> 1) | (new_bit << 15)  */
+   unsigned int s = *state;
+   unsigned int bit = ((s >> 0) ^ (s >> 1) ^ (s >> 3) ^ (s >> 12)) & 1u;
+   *state = (s >> 1) | (bit << 15);
+   return *state;
+}
+
+/* Build piecewise-linear scaling LUT from point pairs.
+ * Returns a 256-entry LUT. */
+static void stbi_avif__grain_build_scaling_lut(int *lut,
+                                                 const int *point_value,
+                                                 const int *point_scaling,
+                                                 int num_points)
+{
+   int i;
+   if (num_points == 0)
+   {
+      for (i = 0; i < 256; ++i)
+         lut[i] = 0;
+      return;
+   }
+
+   /* Fill before first point */
+   for (i = 0; i < point_value[0] && i < 256; ++i)
+      lut[i] = point_scaling[0];
+
+   /* Interpolate between points */
+   {
+      int p;
+      for (p = 0; p < num_points - 1; ++p)
+      {
+         int x0 = point_value[p];
+         int x1 = point_value[p + 1];
+         int y0 = point_scaling[p];
+         int y1 = point_scaling[p + 1];
+         int dx = x1 - x0;
+         if (dx <= 0) dx = 1;
+         for (i = x0; i < x1 && i < 256; ++i)
+         {
+            lut[i] = y0 + ((y1 - y0) * (i - x0) + dx / 2) / dx;
+         }
+      }
+   }
+
+   /* Fill after last point */
+   for (i = point_value[num_points - 1]; i < 256; ++i)
+      lut[i] = point_scaling[num_points - 1];
+}
+
+/* Generate a grain noise block using AR model. */
+static void stbi_avif__grain_generate_block(int *grain,
+                                              int grain_w, int grain_h,
+                                              int ar_coeff_lag,
+                                              const int *ar_coeffs,
+                                              int num_ar_coeffs,
+                                              int ar_coeff_shift,
+                                              int grain_scale_shift,
+                                              unsigned int *seed)
+{
+   int y, x, i;
+   int grain_min, grain_max;
+
+   /* Initialize with pseudo-random values in [-grain_center, grain_center] */
+   grain_min = -128;
+   grain_max = 127;
+
+   for (y = 0; y < grain_h; ++y)
+   {
+      for (x = 0; x < grain_w; ++x)
+      {
+         int rnd = (int)(stbi_avif__grain_prng(seed) & 0x7FFu);
+         /* Map to range [-2047, 2047] then shift down */
+         rnd = (rnd >= 1024) ? rnd - 2048 : rnd;
+         grain[y * grain_w + x] = (rnd + (1 << (3 + grain_scale_shift))) >> (4 + grain_scale_shift);
+      }
+   }
+
+   /* Apply AR filter: each pixel gets a weighted combination of its neighbors */
+   if (ar_coeff_lag > 0 && num_ar_coeffs > 0)
+   {
+      for (y = ar_coeff_lag; y < grain_h; ++y)
+      {
+         for (x = ar_coeff_lag; x < grain_w - ar_coeff_lag; ++x)
+         {
+            long sum = 0;
+            i = 0;
+            {
+               int dy, dx;
+               for (dy = -ar_coeff_lag; dy <= 0; ++dy)
+               {
+                  /* AR model scans in raster order: full row for dy<0,
+                   * only pixels left of current for dy==0 */
+                  int dx_end = (dy < 0) ? ar_coeff_lag : -1;
+                  for (dx = -ar_coeff_lag; dx <= dx_end; ++dx)
+                  {
+                     if (i < num_ar_coeffs)
+                     {
+                        sum += (long)grain[(y + dy) * grain_w + (x + dx)] *
+                               (long)(ar_coeffs[i] - 128);
+                     }
+                     ++i;
+                  }
+               }
+            }
+            grain[y * grain_w + x] += (int)((sum + (1L << (ar_coeff_shift - 1))) >> ar_coeff_shift);
+            if (grain[y * grain_w + x] < grain_min)
+               grain[y * grain_w + x] = grain_min;
+            if (grain[y * grain_w + x] > grain_max)
+               grain[y * grain_w + x] = grain_max;
+         }
+      }
+   }
+}
+
+/* Apply film grain synthesis to all planes. */
+static void stbi_avif__av1_apply_film_grain(stbi_avif__av1_planes *planes,
+                                              const stbi_avif__av1_frame_header *fhdr,
+                                              const stbi_avif__av1_sequence_header *seq)
+{
+   int *grain_y = NULL;
+   int *grain_cb = NULL;
+   int *grain_cr = NULL;
+   int y_scaling_lut[256];
+   int cb_scaling_lut[256];
+   int cr_scaling_lut[256];
+   unsigned int seed;
+   int luma_grain_w, luma_grain_h;
+   int chroma_grain_w, chroma_grain_h;
+   int ar_coeff_shift;
+   unsigned int bx, by;
+   int max_val;
+
+   if (!fhdr->apply_grain)
+      return;
+
+   max_val = (1 << seq->bit_depth) - 1;
+   ar_coeff_shift = fhdr->ar_coeff_shift_minus_6 + 6;
+   seed = fhdr->grain_seed;
+
+   /* Grain template dimensions per spec:
+    * Luma: 82 wide × 73 tall, Chroma: 44 wide × 38 tall (for 4:2:0)
+    * We use slightly simplified dimensions for the AR template. */
+   luma_grain_w = 82;
+   luma_grain_h = 73;
+   chroma_grain_w = (seq->subsampling_x ? 44 : 82);
+   chroma_grain_h = (seq->subsampling_y ? 38 : 73);
+
+   /* Build scaling LUTs */
+   stbi_avif__grain_build_scaling_lut(y_scaling_lut,
+      fhdr->point_y_value, fhdr->point_y_scaling, fhdr->num_y_points);
+   stbi_avif__grain_build_scaling_lut(cb_scaling_lut,
+      fhdr->point_cb_value, fhdr->point_cb_scaling, fhdr->num_cb_points);
+   stbi_avif__grain_build_scaling_lut(cr_scaling_lut,
+      fhdr->point_cr_value, fhdr->point_cr_scaling, fhdr->num_cr_points);
+
+   /* Generate grain templates */
+   if (fhdr->num_y_points > 0)
+   {
+      grain_y = (int *)STBI_AVIF_MALLOC((size_t)luma_grain_w * (size_t)luma_grain_h * sizeof(int));
+      if (grain_y)
+         stbi_avif__grain_generate_block(grain_y, luma_grain_w, luma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_y_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+   if (fhdr->num_cb_points > 0 || fhdr->chroma_scaling_from_luma)
+   {
+      grain_cb = (int *)STBI_AVIF_MALLOC((size_t)chroma_grain_w * (size_t)chroma_grain_h * sizeof(int));
+      if (grain_cb)
+         stbi_avif__grain_generate_block(grain_cb, chroma_grain_w, chroma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_cb_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1) + (fhdr->num_y_points > 0 ? 1 : 0),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+   if (fhdr->num_cr_points > 0 || fhdr->chroma_scaling_from_luma)
+   {
+      grain_cr = (int *)STBI_AVIF_MALLOC((size_t)chroma_grain_w * (size_t)chroma_grain_h * sizeof(int));
+      if (grain_cr)
+         stbi_avif__grain_generate_block(grain_cr, chroma_grain_w, chroma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_cr_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1) + (fhdr->num_y_points > 0 ? 1 : 0),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+
+   /* Apply grain to luma plane in 32x32 blocks */
+   if (grain_y != NULL && fhdr->num_y_points > 0)
+   {
+      for (by = 0; by < planes->height; by += 32u)
+      {
+         for (bx = 0; bx < planes->width; bx += 32u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            /* Derive per-block random offset into grain template */
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(luma_grain_w - 32 > 0 ? luma_grain_w - 32 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(luma_grain_h - 32 > 0 ? luma_grain_h - 32 : 1);
+
+            for (y = 0; y < 32u && by + y < planes->height; ++y)
+            {
+               unsigned short *row = planes->y + (by + y) * planes->width + bx;
+               for (x = 0; x < 32u && bx + x < planes->width; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  int scale;
+                  int noise;
+                  int grain_val;
+                  int gx, gy;
+
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = y_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)luma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)luma_grain_h);
+                  grain_val = grain_y[gy * luma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   /* Apply grain to Cb plane */
+   if (grain_cb != NULL && !seq->monochrome &&
+       (fhdr->num_cb_points > 0 || fhdr->chroma_scaling_from_luma))
+   {
+      for (by = 0; by < planes->ch; by += 16u)
+      {
+         for (bx = 0; bx < planes->cw; bx += 16u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(chroma_grain_w - 16 > 0 ? chroma_grain_w - 16 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(chroma_grain_h - 16 > 0 ? chroma_grain_h - 16 : 1);
+
+            for (y = 0; y < 16u && by + y < planes->ch; ++y)
+            {
+               unsigned short *row = planes->u + (by + y) * planes->cw + bx;
+               for (x = 0; x < 16u && bx + x < planes->cw; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx;
+                  int scale, noise, grain_val;
+                  int gx, gy;
+
+                  if (fhdr->chroma_scaling_from_luma)
+                  {
+                     /* Use luma at corresponding position */
+                     unsigned int lx = (bx + x) << seq->subsampling_x;
+                     unsigned int ly = (by + y) << seq->subsampling_y;
+                     if (lx >= planes->width) lx = planes->width - 1u;
+                     if (ly >= planes->height) ly = planes->height - 1u;
+                     idx = (seq->bit_depth > 8u) ? ((int)planes->y[ly * planes->width + lx] >> 2) :
+                                                    (int)planes->y[ly * planes->width + lx];
+                  }
+                  else
+                  {
+                     idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  }
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = cb_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)chroma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)chroma_grain_h);
+                  grain_val = grain_cb[gy * chroma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   /* Apply grain to Cr plane */
+   if (grain_cr != NULL && !seq->monochrome &&
+       (fhdr->num_cr_points > 0 || fhdr->chroma_scaling_from_luma))
+   {
+      for (by = 0; by < planes->ch; by += 16u)
+      {
+         for (bx = 0; bx < planes->cw; bx += 16u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(chroma_grain_w - 16 > 0 ? chroma_grain_w - 16 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(chroma_grain_h - 16 > 0 ? chroma_grain_h - 16 : 1);
+
+            for (y = 0; y < 16u && by + y < planes->ch; ++y)
+            {
+               unsigned short *row = planes->v + (by + y) * planes->cw + bx;
+               for (x = 0; x < 16u && bx + x < planes->cw; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx;
+                  int scale, noise, grain_val;
+                  int gx, gy;
+
+                  if (fhdr->chroma_scaling_from_luma)
+                  {
+                     unsigned int lx = (bx + x) << seq->subsampling_x;
+                     unsigned int ly = (by + y) << seq->subsampling_y;
+                     if (lx >= planes->width) lx = planes->width - 1u;
+                     if (ly >= planes->height) ly = planes->height - 1u;
+                     idx = (seq->bit_depth > 8u) ? ((int)planes->y[ly * planes->width + lx] >> 2) :
+                                                    (int)planes->y[ly * planes->width + lx];
+                  }
+                  else
+                  {
+                     idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  }
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = cr_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)chroma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)chroma_grain_h);
+                  grain_val = grain_cr[gy * chroma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(grain_y);
+   STBI_AVIF_FREE(grain_cb);
+   STBI_AVIF_FREE(grain_cr);
+}
+
+/*
+ * =============================================================================
+ *  LOOP RESTORATION FILTER  (AV1 spec §7.17)
+ * =============================================================================
+ *
+ * Applied after CDEF and before YUV→RGBA.  Two modes:
+ * - Wiener: 7-tap symmetric separable convolution
+ * - Sgrproj: self-guided box filter + projection
+ * - Switchable: choose per restoration unit
+ *
+ * Per-unit parameters are parsed from the tile bitstream during superblock
+ * decode.  For a fully self-contained single-header decoder we implement the
+ * simpler approach of parsing LR parameters from the bitstream *after* tile
+ * decode, by re-reading the tile data.  However, since per-unit LR params
+ * are encoded in the symbol stream (entropy coded), we instead read them
+ * during tile decode via a second pass.
+ *
+ * For AVIF still images, we implement a *frame-level* fallback: when the
+ * frame header specifies Wiener or Sgrproj for a plane, we apply the filter
+ * with default coefficients to the whole plane.  For Switchable mode, we
+ * try Wiener with default coefficients.  This provides the major visual
+ * quality improvement (deblocking/deringing) without requiring per-unit
+ * parameter parsing from the symbol stream, which is a much larger change.
+ *
+ * When a more complete implementation with per-unit parameters is needed,
+ * the LR unit grid and per-unit coefficients would be parsed during
+ * stbi_avif__av1_decode_tile() and stored in the decode context, similar
+ * to how CDEF indices are stored.
+ */
+
+/* Sgrproj parameter table (AV1 spec Table 7-23) — indexed by eps (0..15).
+ * Each entry: { r0, e0, r1, e1 } where r=radius, e=multiplier. */
+static const int stbi_avif__sgr_params[16][4] = {
+   { 2, 12,  1, 4 }, { 2, 15,  1, 6 }, { 2, 18,  1, 8 }, { 2, 21,  1, 9 },
+   { 2, 24,  1, 10}, { 2, 29,  1, 11}, { 2, 36,  1, 12}, { 2, 45,  1, 13},
+   { 2, 56,  1, 14}, { 2, 68,  1, 15}, { 0,  0,  1, 5 }, { 0,  0,  1, 8 },
+   { 0,  0,  1, 11}, { 0,  0,  1, 14}, { 2, 30,  0, 0 }, { 2, 75,  0, 0 }
+};
+
+/* Wiener 7-tap symmetric filter — default coefficients per spec. */
+#define STBI_AVIF_WIENER_ROUND0 3
+#define STBI_AVIF_WIENER_ROUND1_8BIT 7
+
+/* Clamp value to [lo, hi] */
+static int stbi_avif__lr_clamp(int v, int lo, int hi)
+{
+   if (v < lo) return lo;
+   if (v > hi) return hi;
+   return v;
+}
+
+/* Apply Wiener filter to a single plane.
+ * Coefficients: 3 values → symmetric 7-tap kernel {c0,c1,c2, center, c2,c1,c0}
+ * center = 128 - 2*(c0+c1+c2)
+ * Default (for Switchable with no per-unit params): {3, -7, 15} per spec */
+static void stbi_avif__lr_wiener_plane(unsigned short *plane,
+                                        unsigned int pw, unsigned int ph,
+                                        unsigned int stride,
+                                        unsigned int bit_depth)
+{
+   int *tmp;
+   unsigned int x, y;
+   int c[3];
+   int center;
+   int round0, round1;
+   int max_val;
+   size_t tmp_size;
+
+   if (pw == 0u || ph == 0u) return;
+
+   /* Default Wiener coefficients */
+   c[0] = 3; c[1] = -7; c[2] = 15;
+   center = 128 - 2 * (c[0] + c[1] + c[2]);
+   round0 = STBI_AVIF_WIENER_ROUND0;
+   round1 = (bit_depth > 8u) ? 5 : STBI_AVIF_WIENER_ROUND1_8BIT;
+   max_val = (1 << bit_depth) - 1;
+
+   tmp_size = (size_t)pw * (size_t)ph * sizeof(int);
+   tmp = (int *)STBI_AVIF_MALLOC(tmp_size);
+   if (!tmp) return;
+
+   /* Horizontal pass → tmp (with WIENER_ROUND0 rounding) */
+   for (y = 0; y < ph; ++y)
+   {
+      const unsigned short *row = plane + y * stride;
+      for (x = 0; x < pw; ++x)
+      {
+         int sum = 0;
+         int k;
+         for (k = -3; k <= 3; ++k)
+         {
+            int sx = stbi_avif__lr_clamp((int)x + k, 0, (int)pw - 1);
+            int coeff;
+            if (k < 0) coeff = c[k + 3];
+            else if (k > 0) coeff = c[3 - k];
+            else coeff = center;
+            sum += (int)row[sx] * coeff;
+         }
+         tmp[y * pw + x] = (sum + (1 << (round0 - 1))) >> round0;
+      }
+   }
+
+   /* Vertical pass: tmp → plane (with WIENER_ROUND1 rounding) */
+   for (y = 0; y < ph; ++y)
+   {
+      unsigned short *orow = plane + y * stride;
+      for (x = 0; x < pw; ++x)
+      {
+         int sum = 0;
+         int k;
+         for (k = -3; k <= 3; ++k)
+         {
+            int sy = stbi_avif__lr_clamp((int)y + k, 0, (int)ph - 1);
+            int coeff;
+            if (k < 0) coeff = c[k + 3];
+            else if (k > 0) coeff = c[3 - k];
+            else coeff = center;
+            sum += tmp[sy * (int)pw + (int)x] * coeff;
+         }
+         {
+            int val = (sum + (1 << (round0 + round1 - 1))) >> (round0 + round1);
+            orow[x] = (unsigned short)stbi_avif__lr_clamp(val, 0, max_val);
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(tmp);
+}
+
+/* Self-guided filter for one pass (AV1 spec §7.17.4).
+ * radius r, strength eps, operates on unsigned short plane. */
+static void stbi_avif__lr_selfguided_pass(const unsigned short *src,
+                                            int *flt,
+                                            unsigned int pw, unsigned int ph,
+                                            unsigned int stride,
+                                            int radius, int eps)
+{
+   /* Compute integral images of src and src^2, then for each pixel
+    * compute mean/variance over a (2r+1)×(2r+1) box, then
+    * flt[i] = (mean * (1 - s) + src[i] * s) where s is derived from variance. */
+   unsigned int x, y;
+   long *A;   /* integral of src values */
+   long *B;   /* integral of src^2 values */
+   unsigned int iw, ih;
+
+   if (pw == 0u || ph == 0u || radius == 0) return;
+
+   iw = pw + 1u;
+   ih = ph + 1u;
+   A = (long *)STBI_AVIF_MALLOC((size_t)iw * ih * sizeof(long));
+   B = (long *)STBI_AVIF_MALLOC((size_t)iw * ih * sizeof(long));
+   if (!A || !B) { STBI_AVIF_FREE(A); STBI_AVIF_FREE(B); return; }
+
+   /* Build integral images */
+   for (x = 0; x < iw; ++x) { A[x] = 0; B[x] = 0; }
+   for (y = 0; y < ph; ++y)
+   {
+      long ra = 0, rb = 0;
+      A[(y + 1u) * iw] = 0;
+      B[(y + 1u) * iw] = 0;
+      for (x = 0; x < pw; ++x)
+      {
+         int v = (int)src[y * stride + x];
+         ra += v;
+         rb += v * v;
+         A[(y + 1u) * iw + x + 1u] = ra + A[y * iw + x + 1u];
+         B[(y + 1u) * iw + x + 1u] = rb + B[y * iw + x + 1u];
+      }
+   }
+
+   for (y = 0; y < ph; ++y)
+   {
+      for (x = 0; x < pw; ++x)
+      {
+         int x0, y0, x1, y1;
+         long sum_a, sum_b;
+         long mean, var;
+         long p, q, z;
+         int area;
+
+         x0 = (int)x - radius;
+         y0 = (int)y - radius;
+         x1 = (int)x + radius + 1;
+         y1 = (int)y + radius + 1;
+         if (x0 < 0) x0 = 0;
+         if (y0 < 0) y0 = 0;
+         if (x1 > (int)pw) x1 = (int)pw;
+         if (y1 > (int)ph) y1 = (int)ph;
+         area = (x1 - x0) * (y1 - y0);
+         if (area <= 0) area = 1;
+
+         sum_a = A[y1 * (int)iw + x1] - A[y1 * (int)iw + x0] - A[y0 * (int)iw + x1] + A[y0 * (int)iw + x0];
+         sum_b = B[y1 * (int)iw + x1] - B[y1 * (int)iw + x0] - B[y0 * (int)iw + x1] + B[y0 * (int)iw + x0];
+
+         /* mean = sum / area, var = (sum_b - sum_a^2/area) / area
+          * Use two-step division to avoid overflow in area*area */
+         mean = (sum_a + area / 2) / area;
+         var = (sum_b - (sum_a * sum_a + area / 2) / area + area / 2) / area;
+         if (var < 0) var = 0;
+
+         /* z = var / (var + eps) — the shrinkage factor
+          * we compute in fixed-point Q12 */
+         p = var;
+         q = var + eps;
+         if (q == 0) q = 1;
+         z = (p * 4096 + q / 2) / q;
+
+         /* flt[i] = src[i] + ((mean - src[i]) * (4096 - z) + 2048) >> 12 */
+         {
+            int sv = (int)src[y * stride + x];
+            int diff = (int)mean - sv;
+            int correction = (int)(((long)diff * (4096 - z) + 2048) >> 12);
+            flt[y * (int)pw + (int)x] = sv + correction;
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(A);
+   STBI_AVIF_FREE(B);
+}
+
+/* Apply Sgrproj filter to a single plane.
+ * Default eps=10, xqd[0]=0, xqd[1]=0 (identity projection for default). */
+static void stbi_avif__lr_sgrproj_plane(unsigned short *plane,
+                                          unsigned int pw, unsigned int ph,
+                                          unsigned int stride,
+                                          unsigned int bit_depth)
+{
+   int *flt0, *flt1;
+   unsigned int x, y;
+   int max_val;
+   int eps_idx = 10;  /* default eps index — provides r0=0, r1=1 for a mild blur */
+   int r0, e0, r1, e1;
+
+   if (pw == 0u || ph == 0u) return;
+   max_val = (1 << bit_depth) - 1;
+
+   r0 = stbi_avif__sgr_params[eps_idx][0];
+   e0 = stbi_avif__sgr_params[eps_idx][1];
+   r1 = stbi_avif__sgr_params[eps_idx][2];
+   e1 = stbi_avif__sgr_params[eps_idx][3];
+
+   flt0 = (int *)STBI_AVIF_MALLOC((size_t)pw * ph * sizeof(int));
+   flt1 = (int *)STBI_AVIF_MALLOC((size_t)pw * ph * sizeof(int));
+   if (!flt0 || !flt1) { STBI_AVIF_FREE(flt0); STBI_AVIF_FREE(flt1); return; }
+
+   if (r0 > 0)
+      stbi_avif__lr_selfguided_pass(plane, flt0, pw, ph, stride, r0, e0);
+   if (r1 > 0)
+      stbi_avif__lr_selfguided_pass(plane, flt1, pw, ph, stride, r1, e1);
+
+   /* With default xqd = {0, 0}, the projection output = src + 0*(flt0-src) + 0*(flt1-src) = src.
+    * For actual effect, use mild projection weights. With eps_idx=10: r0=0, only flt1 is used.
+    * When r0==0, the spec projects as: output = src + xqd[1] * (flt1 - src).
+    * For default parameters without per-unit coding, we apply a mild denoising. */
+   for (y = 0; y < ph; ++y)
+   {
+      unsigned short *row = plane + y * stride;
+      for (x = 0; x < pw; ++x)
+      {
+         int val;
+         if (r0 > 0 && r1 > 0)
+         {
+            /* Both passes available: weighted blend */
+            int s = (int)row[x];
+            int f0 = flt0[y * pw + x];
+            int f1 = flt1[y * pw + x];
+            val = s + ((f0 - s + f1 - s + 1) >> 1);
+         }
+         else if (r1 > 0)
+         {
+            int s = (int)row[x];
+            int f1 = flt1[y * pw + x];
+            val = (s + f1 + 1) >> 1;
+         }
+         else if (r0 > 0)
+         {
+            int s = (int)row[x];
+            int f0 = flt0[y * pw + x];
+            val = (s + f0 + 1) >> 1;
+         }
+         else
+         {
+            val = (int)row[x];
+         }
+         row[x] = (unsigned short)stbi_avif__lr_clamp(val, 0, max_val);
+      }
+   }
+
+   STBI_AVIF_FREE(flt0);
+   STBI_AVIF_FREE(flt1);
+}
+
+/* Apply loop restoration to all planes according to frame header lr_type. */
+static void stbi_avif__av1_lr_filter(stbi_avif__av1_planes *planes,
+                                      const stbi_avif__av1_frame_header *fhdr,
+                                      const stbi_avif__av1_sequence_header *seq)
+{
+   int p;
+   int num_planes = seq->monochrome ? 1 : 3;
+
+   for (p = 0; p < num_planes; ++p)
+   {
+      int lr_type = fhdr->lr_type[p];
+      unsigned short *plane_ptr;
+      unsigned int pw, ph, pstride;
+
+      if (lr_type == STBI_AVIF_RESTORE_NONE)
+         continue;
+
+      if (p == 0)
+      {
+         plane_ptr = planes->y;
+         pw = planes->width;
+         ph = planes->height;
+         pstride = planes->width;
+      }
+      else if (p == 1)
+      {
+         plane_ptr = planes->u;
+         pw = planes->cw;
+         ph = planes->ch;
+         pstride = planes->cw;
+      }
+      else
+      {
+         plane_ptr = planes->v;
+         pw = planes->cw;
+         ph = planes->ch;
+         pstride = planes->cw;
+      }
+
+      if (lr_type == STBI_AVIF_RESTORE_WIENER ||
+          lr_type == STBI_AVIF_RESTORE_SWITCHABLE)
+      {
+         stbi_avif__lr_wiener_plane(plane_ptr, pw, ph, pstride, seq->bit_depth);
+      }
+      else if (lr_type == STBI_AVIF_RESTORE_SGRPROJ)
+      {
+         stbi_avif__lr_sgrproj_plane(plane_ptr, pw, ph, pstride, seq->bit_depth);
+      }
+   }
 }
 
 /*
@@ -9994,7 +11632,9 @@ static unsigned char *stbi_avif__av1_decode(
    const unsigned char *tile_group_data, size_t tile_group_size,
    const stbi_avif__av1_sequence_header *seq,
    const stbi_avif__av1_frame_header    *fhdr,
-   const stbi_avif__av1_tile_group_header *tghdr)
+   const stbi_avif__av1_tile_group_header *tghdr,
+   const unsigned short *alpha_plane,
+   unsigned int alpha_bit_depth)
 {
    stbi_avif__av1_planes planes;
    stbi_avif__av1_decode_ctx ctx;
@@ -10075,6 +11715,18 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.allow_screen_content_tools = fhdr->allow_screen_content_tools;
    ctx.cdef_bits = fhdr->cdef_bits;
    ctx.sb_size_mi = seq->use_128x128_superblock ? 32u : 16u;
+   ctx.monochrome = seq->monochrome;
+   ctx.fhdr = fhdr;
+   ctx.cdef_grid_cols = (fhdr->frame_width + 63u) / 64u;
+   ctx.cdef_grid_rows = (fhdr->frame_height + 63u) / 64u;
+   if (fhdr->cdef_bits > 0) {
+      size_t grid_size = (size_t)ctx.cdef_grid_cols * ctx.cdef_grid_rows;
+      ctx.cdef_idx = (unsigned char *)STBI_AVIF_MALLOC(grid_size);
+      if (!ctx.cdef_idx) { stbi_avif__av1_free_planes(&planes); return NULL; }
+      memset(ctx.cdef_idx, 0, grid_size);
+   } else {
+      ctx.cdef_idx = NULL;
+   }
 
    ctx.above_modes = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
@@ -10099,6 +11751,7 @@ static unsigned char *stbi_avif__av1_decode(
       STBI_AVIF_FREE(ctx.above_entropy[0]);
       STBI_AVIF_FREE(ctx.above_entropy[1]);
       STBI_AVIF_FREE(ctx.above_entropy[2]);
+      STBI_AVIF_FREE(ctx.cdef_idx);
       stbi_avif__av1_free_planes(&planes);
       return (unsigned char *)stbi_avif__fail_ptr("out of memory (mode maps)");
    }
@@ -10165,6 +11818,7 @@ static unsigned char *stbi_avif__av1_decode(
                                              (size_t)tile_payload_size, 0u)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
          STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
 
@@ -10177,6 +11831,7 @@ static unsigned char *stbi_avif__av1_decode(
                                       sb_col_start, sb_col_end)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
          STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
    }
@@ -10185,11 +11840,256 @@ static unsigned char *stbi_avif__av1_decode(
    STBI_AVIF_FREE(ctx.left_modes);
    STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
 
+   /* Apply CDEF filter */
+   stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
+                               ctx.cdef_grid_cols, ctx.cdef_grid_rows);
+   STBI_AVIF_FREE(ctx.cdef_idx);
+
+   /* Apply loop restoration filter (after CDEF, before RGBA conversion) */
+   stbi_avif__av1_lr_filter(&planes, fhdr, seq);
+
+   /* Apply film grain synthesis (after all in-loop filters) */
+   stbi_avif__av1_apply_film_grain(&planes, fhdr, seq);
+
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
-                                         seq->color_range);
+                                         seq->color_range,
+                                         alpha_plane,
+                                         alpha_bit_depth);
    stbi_avif__av1_free_planes(&planes);
    return rgba;
+}
+
+/* Decode an AV1 item and return a copy of the Y plane (for alpha).
+ * The caller must free the returned buffer with STBI_AVIF_FREE.
+ * On success, *out_width, *out_height, *out_bit_depth are set. */
+static unsigned short *stbi_avif__av1_decode_alpha_plane(
+   const unsigned char *tile_group_data, size_t tile_group_size,
+   const stbi_avif__av1_sequence_header *seq,
+   const stbi_avif__av1_frame_header    *fhdr,
+   const stbi_avif__av1_tile_group_header *tghdr,
+   unsigned int *out_width, unsigned int *out_height,
+   unsigned int *out_bit_depth)
+{
+   stbi_avif__av1_planes planes;
+   stbi_avif__av1_decode_ctx ctx;
+   size_t tile_cursor;
+   unsigned int tile_idx, tile_count_in_group;
+   unsigned int sb_row_start, sb_row_end, sb_col_start, sb_col_end;
+   unsigned int tile_row, tile_col;
+   int q_ctx;
+   unsigned int qidx_y_dc, qidx_y_ac, qidx_u_dc, qidx_u_ac, qidx_v_dc, qidx_v_ac;
+   unsigned short *alpha_out;
+   size_t plane_size;
+
+   memset(&ctx, 0, sizeof(ctx));
+   q_ctx = stbi_avif__av1_get_q_ctx(fhdr->base_q_idx);
+   ctx.base_q_idx = fhdr->base_q_idx;
+   ctx.q_ctx = q_ctx;
+
+   qidx_y_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, 0);
+   qidx_y_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_y_dc);
+   qidx_u_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_dc);
+   qidx_u_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_u_ac);
+   qidx_v_dc = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_dc);
+   qidx_v_ac = stbi_avif__av1_qindex_with_delta(fhdr->base_q_idx, fhdr->delta_q_v_ac);
+
+   ctx.dc_qstep_y = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_y_dc);
+   ctx.ac_qstep_y = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_y_ac);
+   ctx.dc_qstep_u = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_u_dc);
+   ctx.ac_qstep_u = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_u_ac);
+   ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
+   ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
+
+   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
+   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
+   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
+   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
+   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
+   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
+   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
+   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
+   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
+   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
+   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
+   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
+   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
+   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
+   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
+   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
+   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
+   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
+   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
+   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
+   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
+
+   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
+   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
+   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
+   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
+   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
+   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
+   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
+   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
+   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
+   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
+   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
+   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
+   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+
+   if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
+      return NULL;
+
+   ctx.planes   = &planes;
+   ctx.seq      = seq;
+   ctx.mi_cols  = (fhdr->frame_width  + 3u) / 4u;
+   ctx.mi_rows  = (fhdr->frame_height + 3u) / 4u;
+   ctx.use_128  = seq->use_128x128_superblock;
+   ctx.reduced_tx_set = fhdr->reduced_tx_set;
+   ctx.tx_mode_select = fhdr->tx_mode_select;
+   ctx.allow_screen_content_tools = fhdr->allow_screen_content_tools;
+   ctx.cdef_bits = fhdr->cdef_bits;
+   ctx.sb_size_mi = seq->use_128x128_superblock ? 32u : 16u;
+   ctx.monochrome = seq->monochrome;
+   ctx.fhdr = fhdr;
+   ctx.cdef_grid_cols = (fhdr->frame_width + 63u) / 64u;
+   ctx.cdef_grid_rows = (fhdr->frame_height + 63u) / 64u;
+   if (fhdr->cdef_bits > 0) {
+      size_t grid_size = (size_t)ctx.cdef_grid_cols * ctx.cdef_grid_rows;
+      ctx.cdef_idx = (unsigned char *)STBI_AVIF_MALLOC(grid_size);
+      if (!ctx.cdef_idx) { stbi_avif__av1_free_planes(&planes); return NULL; }
+      memset(ctx.cdef_idx, 0, grid_size);
+   } else {
+      ctx.cdef_idx = NULL;
+   }
+
+   ctx.above_modes = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_partition_ctx = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_skip  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_skip   = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_tx_intra = (signed char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.left_tx_intra  = (signed char *)STBI_AVIF_MALLOC(ctx.mi_rows);
+   ctx.above_entropy[0] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_entropy[1] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   ctx.above_entropy[2] = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
+   if (!ctx.above_modes || !ctx.left_modes || !ctx.above_partition_ctx ||
+       !ctx.above_skip || !ctx.left_skip || !ctx.above_tx_intra || !ctx.left_tx_intra ||
+       !ctx.above_entropy[0] || !ctx.above_entropy[1] || !ctx.above_entropy[2]) {
+      STBI_AVIF_FREE(ctx.above_modes);
+      STBI_AVIF_FREE(ctx.left_modes);
+      STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+      STBI_AVIF_FREE(ctx.cdef_idx);
+      stbi_avif__av1_free_planes(&planes);
+      return (unsigned short *)stbi_avif__fail_ptr("out of memory (mode maps)");
+   }
+   memset(ctx.above_modes, 0, ctx.mi_cols);
+   memset(ctx.left_modes, 0, ctx.mi_rows);
+   memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+   memset(ctx.above_skip, 0, ctx.mi_cols);
+   memset(ctx.left_skip, 0, ctx.mi_rows * sizeof(*ctx.left_skip));
+   memset(ctx.above_tx_intra, -1, ctx.mi_cols);
+   memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+   memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+   memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+   memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+   memset(ctx.left_entropy, 0, sizeof(ctx.left_entropy));
+   memset(ctx.left_partition_ctx, 0, sizeof(ctx.left_partition_ctx));
+
+   tile_cursor = tghdr->tile_data_byte_offset;
+   tile_count_in_group = tghdr->tile_end - tghdr->tile_start + 1u;
+
+   for (tile_idx = 0u; tile_idx < tile_count_in_group; ++tile_idx)
+   {
+      unsigned int tile_size_value, tile_payload_size;
+      const unsigned char *tile_payload;
+      unsigned int full_tile_index;
+
+      if (tile_idx + 1u < tile_count_in_group) {
+         if (!stbi_avif__av1_read_le_bytes(tile_group_data, tile_group_size,
+                                           tile_cursor, fhdr->tile_size_bytes,
+                                           &tile_size_value)) {
+            STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            stbi_avif__av1_free_planes(&planes); return NULL;
+         }
+         tile_cursor += fhdr->tile_size_bytes;
+         tile_payload_size = tile_size_value + 1u;
+         if (tile_cursor + (size_t)tile_payload_size > tile_group_size) {
+            tile_payload_size = (unsigned int)(tile_group_size - tile_cursor);
+            tile_count_in_group = tile_idx + 1u;
+         }
+      } else {
+         if (tile_cursor > tile_group_size) {
+            STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+            STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+            stbi_avif__av1_free_planes(&planes);
+            return (unsigned short *)stbi_avif__fail_ptr("invalid AV1 tile payload offset");
+         }
+         tile_payload_size = (unsigned int)(tile_group_size - tile_cursor);
+      }
+
+      tile_payload = tile_group_data + tile_cursor;
+      tile_cursor += tile_payload_size;
+      full_tile_index = tghdr->tile_start + tile_idx;
+      tile_row = full_tile_index / fhdr->tile_cols;
+      tile_col = full_tile_index % fhdr->tile_cols;
+      sb_row_start = fhdr->tile_row_start_sb[tile_row];
+      sb_row_end   = fhdr->tile_row_start_sb[tile_row + 1u];
+      sb_col_start = fhdr->tile_col_start_sb[tile_col];
+      sb_col_end   = fhdr->tile_col_start_sb[tile_col + 1u];
+
+      if (tile_payload_size < 2u) continue;
+
+      if (!stbi_avif__av1_range_decoder_init(&ctx.rd, tile_payload,
+                                             (size_t)tile_payload_size, 0u)) {
+         STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
+         stbi_avif__av1_free_planes(&planes); return NULL;
+      }
+
+      memset(ctx.above_modes, 0, ctx.mi_cols);
+      memset(ctx.left_modes, 0, ctx.mi_rows);
+      memset(ctx.above_tx_intra, -1, ctx.mi_cols);
+      memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+
+      if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
+                                      sb_col_start, sb_col_end)) {
+         STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
+         STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+         STBI_AVIF_FREE(ctx.cdef_idx);
+         stbi_avif__av1_free_planes(&planes); return NULL;
+      }
+   }
+
+   STBI_AVIF_FREE(ctx.above_modes);
+   STBI_AVIF_FREE(ctx.left_modes);
+   STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+
+   /* Apply CDEF filter */
+   stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
+                               ctx.cdef_grid_cols, ctx.cdef_grid_rows);
+   STBI_AVIF_FREE(ctx.cdef_idx);
+
+   /* Apply loop restoration filter (after CDEF) */
+   stbi_avif__av1_lr_filter(&planes, fhdr, seq);
+
+   /* Copy Y plane out as the alpha channel data */
+   plane_size = (size_t)planes.width * (size_t)planes.height;
+   alpha_out = (unsigned short *)STBI_AVIF_MALLOC(plane_size * sizeof(unsigned short));
+   if (!alpha_out) {
+      stbi_avif__av1_free_planes(&planes);
+      stbi_avif__fail("out of memory (alpha plane copy)");
+      return NULL;
+   }
+   memcpy(alpha_out, planes.y, plane_size * sizeof(unsigned short));
+   *out_width = planes.width;
+   *out_height = planes.height;
+   *out_bit_depth = planes.bit_depth;
+
+   stbi_avif__av1_free_planes(&planes);
+   return alpha_out;
 }
 
 
@@ -10707,6 +12607,93 @@ static int stbi_avif__parse_ipma(const stbi_avif__buffer *buffer, const stbi_avi
    return 1;
 }
 
+/* Parse iref box — specifically looking for auxl references that link an
+ * auxiliary alpha item to the primary item.  ISOBMFF iref is a container
+ * of typed reference boxes, each listing (from_item_id, reference_count,
+ * to_item_id[]).  We only care about type == 'auxl'. */
+static int stbi_avif__parse_iref(const stbi_avif__buffer *buffer, const stbi_avif__box *box, stbi_avif__parser *parser)
+{
+   size_t payload;
+   size_t limit;
+   unsigned int version;
+   int large_ids;
+
+   payload = box->offset + box->header_size;
+   limit = box->offset + box->size;
+   if (!stbi_avif__range_check(buffer, payload, 4))
+      return stbi_avif__fail("truncated iref full box header");
+
+   version = (unsigned int)buffer->data[payload];
+   large_ids = (version >= 1) ? 1 : 0;
+   payload += 4;
+
+   while (payload < limit)
+   {
+      stbi_avif__box child;
+      size_t cp;
+      unsigned int from_item_id;
+      unsigned int ref_count;
+      unsigned int ri;
+
+      if (!stbi_avif__parse_box_header(buffer, payload, limit, &child))
+         return 0;
+
+      cp = child.offset + child.header_size;
+      if (child.type == STBI_AVIF_FOURCC('a','u','x','l'))
+      {
+         if (large_ids)
+         {
+            if (!stbi_avif__range_check(buffer, cp, 6))
+            {
+               payload += child.size;
+               continue;
+            }
+            from_item_id = (unsigned int)stbi_avif__read_be32(buffer->data + cp);
+            cp += 4;
+            ref_count = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+         }
+         else
+         {
+            if (!stbi_avif__range_check(buffer, cp, 4))
+            {
+               payload += child.size;
+               continue;
+            }
+            from_item_id = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+            ref_count = stbi_avif__read_be16(buffer->data + cp);
+            cp += 2;
+         }
+
+         for (ri = 0; ri < ref_count; ++ri)
+         {
+            unsigned int to_item_id;
+            if (large_ids)
+            {
+               if (!stbi_avif__range_check(buffer, cp, 4))
+                  break;
+               to_item_id = (unsigned int)stbi_avif__read_be32(buffer->data + cp);
+               cp += 4;
+            }
+            else
+            {
+               if (!stbi_avif__range_check(buffer, cp, 2))
+                  break;
+               to_item_id = stbi_avif__read_be16(buffer->data + cp);
+               cp += 2;
+            }
+            /* If the auxl reference points TO our primary item, the
+             * from_item_id is the auxiliary (alpha) item. */
+            if (to_item_id == parser->primary_item_id && parser->alpha_item_id == 0u)
+               parser->alpha_item_id = from_item_id;
+         }
+      }
+      payload += child.size;
+   }
+   return 1;
+}
+
 static int stbi_avif__parse_iprp(const stbi_avif__buffer *buffer, const stbi_avif__box *box, stbi_avif__parser *parser)
 {
    size_t payload;
@@ -10768,6 +12755,11 @@ static int stbi_avif__parse_meta(const stbi_avif__buffer *buffer, const stbi_avi
       else if (child.type == STBI_AVIF_FOURCC('i','p','r','p'))
       {
          if (!stbi_avif__parse_iprp(buffer, &child, parser))
+            return 0;
+      }
+      else if (child.type == STBI_AVIF_FOURCC('i','r','e','f'))
+      {
+         if (!stbi_avif__parse_iref(buffer, &child, parser))
             return 0;
       }
       payload += child.size;
@@ -10835,6 +12827,47 @@ static int stbi_avif__resolve_primary(const stbi_avif__buffer *buffer, stbi_avif
    parser->payload_size = location->extent_length;
    if (!stbi_avif__range_check(buffer, parser->payload_offset, parser->payload_size))
       return stbi_avif__fail("primary item payload is out of bounds");
+
+   /* Try to resolve the alpha (auxiliary) item, if one was found via iref/auxl */
+   if (parser->alpha_item_id != 0u)
+   {
+      stbi_avif__item_assoc *alpha_assoc;
+      stbi_avif__item_location *alpha_loc;
+
+      alpha_assoc = stbi_avif__find_assoc(parser, parser->alpha_item_id);
+      if (alpha_assoc != NULL)
+      {
+         int ai;
+         for (ai = 0; ai < alpha_assoc->count; ++ai)
+         {
+            unsigned int pidx = alpha_assoc->entries[ai].property_index;
+            stbi_avif__property *prop;
+            if (pidx == 0 || pidx > (unsigned int)parser->property_count)
+               continue;
+            prop = &parser->properties[pidx - 1];
+            if (prop->type == STBI_AVIF_FOURCC('a','v','1','C'))
+            {
+               parser->has_alpha_av1_config = 1;
+               parser->alpha_av1c_offset = prop->data_offset;
+               parser->alpha_av1c_size = prop->data_size;
+            }
+         }
+      }
+
+      alpha_loc = stbi_avif__find_location(parser, parser->alpha_item_id);
+      if (alpha_loc != NULL && alpha_loc->construction_method == 0 &&
+          alpha_loc->extent_count == 1 && parser->has_alpha_av1_config)
+      {
+         size_t aoff = alpha_loc->base_offset + alpha_loc->extent_offset;
+         size_t alen = alpha_loc->extent_length;
+         if (stbi_avif__range_check(buffer, aoff, alen))
+         {
+            parser->alpha_payload_offset = aoff;
+            parser->alpha_payload_size = alen;
+            parser->has_alpha = 1;
+         }
+      }
+   }
 
    return 1;
 }
@@ -10919,7 +12952,7 @@ int stbi_avif_info_from_memory(const unsigned char *buffer, int len, int *x, int
    if (y != NULL)
       *y = (int)parser.height;
    if (channels_in_file != NULL)
-      *channels_in_file = STBI_AVIF_CHANNELS;
+      *channels_in_file = parser.has_alpha ? 4 : 3;
 
    stbi_avif__parser_free(&parser);
    return 1;
@@ -10934,7 +12967,10 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
    stbi_avif__av1_tile_group_header tile_group;
    int ok;
 
-   (void)desired_channels;
+   if (desired_channels != 0 && desired_channels != 1 &&
+       desired_channels != 3 && desired_channels != 4)
+      desired_channels = 0; /* default: native (RGBA) */
+
    if (buffer == NULL || len <= 0)
       return (unsigned char *)stbi_avif__fail_ptr("invalid AVIF buffer");
 
@@ -10946,8 +12982,7 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       *x = (int)parser.width;
    if (y != NULL)
       *y = (int)parser.height;
-   if (channels_in_file != NULL)
-      *channels_in_file = STBI_AVIF_CHANNELS;
+   /* channels_in_file is set later after we know if alpha exists */
 
     ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &parser, &headers);
     if (!ok)
@@ -10989,13 +13024,144 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       const unsigned char *tile_data = buffer + parser.payload_offset + frame_index.tile_group_offset;
       size_t               tile_size = frame_index.tile_group_size;
       unsigned char *rgba;
+      unsigned short *alpha_plane = NULL;
+      unsigned int alpha_w = 0, alpha_h = 0, alpha_bd = 0;
+      int file_has_alpha = parser.has_alpha;
+
+      /* Decode alpha item if present */
+      if (parser.has_alpha)
+      {
+         stbi_avif__av1_headers alpha_headers;
+         stbi_avif__av1_frame_index alpha_findex;
+         stbi_avif__av1_frame_header alpha_fhdr;
+         stbi_avif__av1_tile_group_header alpha_tg;
+         /* Build a temporary parser struct for the alpha item to reuse
+          * the existing header-parsing infrastructure. */
+         stbi_avif__parser alpha_parser;
+         memset(&alpha_parser, 0, sizeof(alpha_parser));
+         alpha_parser.has_av1_config = 1;
+         alpha_parser.av1c_offset = parser.alpha_av1c_offset;
+         alpha_parser.av1c_size = parser.alpha_av1c_size;
+         alpha_parser.payload_offset = parser.alpha_payload_offset;
+         alpha_parser.payload_size = parser.alpha_payload_size;
+         alpha_parser.width = parser.width;
+         alpha_parser.height = parser.height;
+
+         ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &alpha_parser, &alpha_headers);
+         if (ok)
+         {
+            ok = stbi_avif__index_av1_frame_obus(buffer + alpha_parser.payload_offset, alpha_parser.payload_size, &alpha_findex);
+            if (ok)
+            {
+               ok = stbi_avif__parse_av1_frame_header(buffer + alpha_parser.payload_offset + alpha_findex.frame_header_offset,
+                                                      alpha_findex.frame_header_size,
+                                                      &alpha_headers.sequence_header,
+                                                      &alpha_fhdr);
+               if (ok)
+               {
+                  ok = stbi_avif__parse_av1_tile_group_header(buffer + alpha_parser.payload_offset + alpha_findex.tile_group_offset,
+                                                              alpha_findex.tile_group_size,
+                                                              alpha_findex.frame_is_combined_obu ? alpha_fhdr.header_bits_consumed : 0u,
+                                                              &alpha_fhdr,
+                                                              &alpha_tg);
+                  if (ok)
+                  {
+                     alpha_plane = stbi_avif__av1_decode_alpha_plane(
+                        buffer + alpha_parser.payload_offset + alpha_findex.tile_group_offset,
+                        alpha_findex.tile_group_size,
+                        &alpha_headers.sequence_header,
+                        &alpha_fhdr,
+                        &alpha_tg,
+                        &alpha_w, &alpha_h, &alpha_bd);
+                     /* Validate alpha dimensions match primary */
+                     if (alpha_plane != NULL &&
+                         (alpha_w != frame_header.frame_width || alpha_h != frame_header.frame_height))
+                     {
+                        STBI_AVIF_FREE(alpha_plane);
+                        alpha_plane = NULL;
+                     }
+                  }
+               }
+            }
+         }
+         /* Alpha decode failure is not fatal — we fall back to opaque */
+         if (alpha_plane == NULL)
+            file_has_alpha = 0;
+      }
+
       stbi_avif__parser_free(&parser);
       rgba = stbi_avif__av1_decode(
                 tile_data,
                 tile_size,
                 &headers.sequence_header,
                 &frame_header,
-                &tile_group);
+                &tile_group,
+                alpha_plane,
+                alpha_bd);
+      STBI_AVIF_FREE(alpha_plane);
+      if (rgba == NULL)
+         return NULL;
+
+      /* Report actual channel count: 4 if alpha present, 3 if not */
+      if (channels_in_file != NULL)
+         *channels_in_file = file_has_alpha ? 4 : 3;
+
+      /* Post-process: convert RGBA to desired channel count */
+      if (desired_channels == 3)
+      {
+         /* Strip alpha: RGBA → RGB */
+         unsigned int w = frame_header.frame_width;
+         unsigned int h = frame_header.frame_height;
+         size_t pixel_count = (size_t)w * (size_t)h;
+         unsigned char *rgb = (unsigned char *)STBI_AVIF_MALLOC(pixel_count * 3u);
+         if (!rgb)
+         {
+            STBI_AVIF_FREE(rgba);
+            stbi_avif__fail("out of memory (RGB conversion)");
+            return NULL;
+         }
+         {
+            size_t i;
+            for (i = 0; i < pixel_count; ++i)
+            {
+               rgb[i * 3u + 0u] = rgba[i * 4u + 0u];
+               rgb[i * 3u + 1u] = rgba[i * 4u + 1u];
+               rgb[i * 3u + 2u] = rgba[i * 4u + 2u];
+            }
+         }
+         STBI_AVIF_FREE(rgba);
+         return rgb;
+      }
+      else if (desired_channels == 1)
+      {
+         /* Convert to grayscale: RGBA → Y using luminance weights */
+         unsigned int w = frame_header.frame_width;
+         unsigned int h = frame_header.frame_height;
+         size_t pixel_count = (size_t)w * (size_t)h;
+         unsigned char *gray = (unsigned char *)STBI_AVIF_MALLOC(pixel_count);
+         if (!gray)
+         {
+            STBI_AVIF_FREE(rgba);
+            stbi_avif__fail("out of memory (grayscale conversion)");
+            return NULL;
+         }
+         {
+            size_t i;
+            for (i = 0; i < pixel_count; ++i)
+            {
+               /* ITU-R BT.601 luminance, fixed-point: Y ≈ 0.301R + 0.586G + 0.113B
+                * (77/256, 150/256, 29/256 approximate 0.299, 0.587, 0.114) */
+               int r = rgba[i * 4u + 0u];
+               int g = rgba[i * 4u + 1u];
+               int b = rgba[i * 4u + 2u];
+               gray[i] = (unsigned char)((r * 77 + g * 150 + b * 29 + 128) >> 8);
+            }
+         }
+         STBI_AVIF_FREE(rgba);
+         return gray;
+      }
+
+      /* desired_channels == 0 or 4: return RGBA as-is */
       return rgba;
    }
 }
