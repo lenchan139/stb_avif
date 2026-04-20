@@ -12910,6 +12910,55 @@ static int stbi_avif__av1_apply_superres(stbi_avif__av1_planes *p,
  * =============================================================================
  */
 
+/*
+ * Reset all CDF tables in the decode context to default values.
+ * Per AV1 spec §7.4.2: each tile starts with default CDFs unless
+ * CDF update is propagated from a previous tile. For the base
+ * implementation, all tiles use default CDFs to ensure correct
+ * multi-tile decoding.
+ */
+static void stbi_avif__av1_reset_cdfs(stbi_avif__av1_decode_ctx *ctx, int q_ctx)
+{
+   memcpy(ctx->partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
+   memcpy(ctx->partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
+   memcpy(ctx->kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
+   memcpy(ctx->uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
+   memcpy(ctx->uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
+   memcpy(ctx->angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
+   memcpy(ctx->intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
+   memcpy(ctx->intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
+   memcpy(ctx->skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
+   memcpy(ctx->txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
+   memcpy(ctx->cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
+   memcpy(ctx->cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
+   memcpy(ctx->tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
+   memcpy(ctx->palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
+   memcpy(ctx->palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
+   memcpy(ctx->palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
+   memcpy(ctx->palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
+   memcpy(ctx->palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
+   memcpy(ctx->palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
+   memcpy(ctx->filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
+   memcpy(ctx->filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
+   memcpy(ctx->lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
+   memcpy(ctx->lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
+   memcpy(ctx->lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
+
+   memcpy(ctx->txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx->txb_skip_cdf));
+   memcpy(ctx->dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx->dc_sign_cdf));
+   memcpy(ctx->eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx->eob_extra_cdf));
+   memcpy(ctx->eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx->eob_multi16_cdf));
+   memcpy(ctx->eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx->eob_multi32_cdf));
+   memcpy(ctx->eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx->eob_multi64_cdf));
+   memcpy(ctx->eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx->eob_multi128_cdf));
+   memcpy(ctx->eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx->eob_multi256_cdf));
+   memcpy(ctx->eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx->eob_multi512_cdf));
+   memcpy(ctx->eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx->eob_multi1024_cdf));
+   memcpy(ctx->coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx->coeff_base_eob_cdf));
+   memcpy(ctx->coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx->coeff_base_cdf));
+   memcpy(ctx->coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx->coeff_br_cdf));
+}
+
 static unsigned char *stbi_avif__av1_decode(
    const unsigned char *tile_group_data, size_t tile_group_size,
    const stbi_avif__av1_sequence_header *seq,
@@ -12948,44 +12997,7 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
    ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
 
-   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
-   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
-   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
-   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
-   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
-   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
-   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
-   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
-   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
-   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
-   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
-   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
-   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
-   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
-   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
-   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
-   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
-   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
-   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
-   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
-   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
-   memcpy(ctx.lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
-   memcpy(ctx.lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
-   memcpy(ctx.lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
-
-   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
-   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
-   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
-   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
-   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
-   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
-   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
-   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
-   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
-   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
-   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
-   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
-   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+   stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
 
    if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
       return NULL;
@@ -13167,6 +13179,14 @@ static unsigned char *stbi_avif__av1_decode(
       memset(ctx.above_tx_intra, -1, ctx.mi_cols);
       memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
 
+      /* Per AV1 spec: reset CDFs to defaults at each tile start */
+      stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
+      memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+      memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+      memset(ctx.above_skip, 0, ctx.mi_cols);
+
       if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
                                       sb_col_start, sb_col_end)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
@@ -13261,44 +13281,7 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
    ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
    ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
 
-   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
-   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
-   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
-   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
-   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
-   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
-   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
-   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
-   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
-   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
-   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
-   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
-   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
-   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
-   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
-   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
-   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
-   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
-   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
-   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
-   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
-   memcpy(ctx.lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
-   memcpy(ctx.lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
-   memcpy(ctx.lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
-
-   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
-   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
-   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
-   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
-   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
-   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
-   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
-   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
-   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
-   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
-   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
-   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
-   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+   stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
 
    if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
       return NULL;
@@ -13471,6 +13454,14 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
       memset(ctx.left_modes, 0, ctx.mi_rows);
       memset(ctx.above_tx_intra, -1, ctx.mi_cols);
       memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+
+      /* Per AV1 spec: reset CDFs to defaults at each tile start */
+      stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
+      memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+      memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+      memset(ctx.above_skip, 0, ctx.mi_cols);
 
       if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
                                       sb_col_start, sb_col_end)) {
