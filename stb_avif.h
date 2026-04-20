@@ -252,6 +252,7 @@ typedef struct
    size_t header_bits_consumed;
    /* Segmentation */
    int seg_enabled;
+   int seg_id_pre_skip;  /* 1 if any segment has SEG_LVL_SKIP or SEG_LVL_GLOBALMV active */
    int seg_feature_enabled[8][8]; /* [segment_id][feature_id] */
    int seg_feature_data[8][8];
    /* Quantization matrix */
@@ -1806,6 +1807,19 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                } else {
                   frame->seg_feature_data[si][fi] = 0;
                }
+            }
+         }
+      }
+
+      /* Compute SegIdPreSkip: 1 if any segment has SEG_LVL_SKIP (6) or SEG_LVL_GLOBALMV (7) active.
+       * Per AV1 spec section 7.4.1: determines whether segment_id is read before or after skip. */
+      frame->seg_id_pre_skip = 0;
+      if (seg_enabled) {
+         int sps_i;
+         for (sps_i = 0; sps_i < 8; ++sps_i) {
+            if (frame->seg_feature_enabled[sps_i][6] || frame->seg_feature_enabled[sps_i][7]) {
+               frame->seg_id_pre_skip = 1;
+               break;
             }
          }
       }
@@ -7849,6 +7863,8 @@ typedef struct
    unsigned short  lr_switchable_cdf[4];         /* switchable: {NONE, WIENER, SGRPROJ, sentinel} */
    unsigned short  lr_wiener_cdf[3];             /* {NONE, WIENER, sentinel} */
    unsigned short  lr_sgrproj_cdf[3];            /* {NONE, SGRPROJ, sentinel} */
+   /* Segmentation CDF (8 segments + sentinel) */
+   unsigned short  seg_tree_cdf[9];
 } stbi_avif__av1_decode_ctx;
 
 
@@ -10224,6 +10240,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
    unsigned char palette_y_map[64 * 64]; /* max block 64x64 in 4x4 units */
    unsigned char palette_uv_map[64 * 64];
+   int seg_id;
+   int seg_dc_qstep_y, seg_ac_qstep_y;
+   int seg_dc_qstep_u, seg_ac_qstep_u;
+   int seg_dc_qstep_v, seg_ac_qstep_v;
 
    if (px >= ctx->planes->width)  return 1;
    if (py >= ctx->planes->height) return 1;
@@ -10231,6 +10251,13 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    palette_uv_size = 0;
    cfl_alpha_u = 0;
    cfl_alpha_v = 0;
+   seg_id = 0;
+   seg_dc_qstep_y = ctx->dc_qstep_y;
+   seg_ac_qstep_y = ctx->ac_qstep_y;
+   seg_dc_qstep_u = ctx->dc_qstep_u;
+   seg_ac_qstep_u = ctx->ac_qstep_u;
+   seg_dc_qstep_v = ctx->dc_qstep_v;
+   seg_ac_qstep_v = ctx->ac_qstep_v;
    if (px + pw > ctx->planes->width)  pw = ctx->planes->width  - px;
    if (py + ph > ctx->planes->height) ph = ctx->planes->height - py;
 
@@ -10243,6 +10270,12 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    if (cpy + cph > ctx->planes->ch) cph = ctx->planes->ch - cpy;
 
    /* ======== MODE INFO ======== */
+
+   /* Segmentation: read segment_id if seg_id_pre_skip, before skip flag.
+    * Per AV1 spec section 5.11.14 / section 6.4.1. */
+   if (ctx->fhdr->seg_enabled && ctx->fhdr->seg_id_pre_skip) {
+      seg_id = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->seg_tree_cdf, 8);
+   }
 
    /* KF Y mode context */
    above_mode = (mi_row > 0 && mi_col < ctx->mi_cols) ? ctx->above_modes[mi_col] : 0u;
@@ -10258,6 +10291,31 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       unsigned int skip_ctx_left  = (mi_col > 0u) ? ctx->left_skip[mi_row]  : 0u;
       unsigned int skip_ctx = skip_ctx_above + skip_ctx_left;
       skip = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->skip_cdf[skip_ctx], 2);
+   }
+
+   /* Segmentation: read segment_id after skip if !seg_id_pre_skip.
+    * Per AV1 spec section 5.11.14 / section 6.4.1. */
+   if (ctx->fhdr->seg_enabled && !ctx->fhdr->seg_id_pre_skip) {
+      seg_id = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->seg_tree_cdf, 8);
+   }
+
+   /* Apply SEG_LVL_ALT_Q (feature 0): adjust per-block qindex.
+    * Per AV1 spec section 7.12.2: qindex = clamp(base_q_idx + seg_data, 0, 255). */
+   if (ctx->fhdr->seg_enabled && seg_id >= 0 && seg_id < 8 &&
+       ctx->fhdr->seg_feature_enabled[seg_id][0]) {
+      int seg_q_delta = ctx->fhdr->seg_feature_data[seg_id][0];
+      unsigned int seg_qidx_y_ac = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, seg_q_delta);
+      unsigned int seg_qidx_y_dc = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, ctx->fhdr->delta_q_y_dc + seg_q_delta);
+      unsigned int seg_qidx_u_dc = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, ctx->fhdr->delta_q_u_dc + seg_q_delta);
+      unsigned int seg_qidx_u_ac = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, ctx->fhdr->delta_q_u_ac + seg_q_delta);
+      unsigned int seg_qidx_v_dc = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, ctx->fhdr->delta_q_v_dc + seg_q_delta);
+      unsigned int seg_qidx_v_ac = stbi_avif__av1_qindex_with_delta(ctx->base_q_idx, ctx->fhdr->delta_q_v_ac + seg_q_delta);
+      seg_dc_qstep_y = stbi_avif__av1_dc_qlookup_value(ctx->seq->bit_depth, seg_qidx_y_dc);
+      seg_ac_qstep_y = stbi_avif__av1_ac_qlookup_value(ctx->seq->bit_depth, seg_qidx_y_ac);
+      seg_dc_qstep_u = stbi_avif__av1_dc_qlookup_value(ctx->seq->bit_depth, seg_qidx_u_dc);
+      seg_ac_qstep_u = stbi_avif__av1_ac_qlookup_value(ctx->seq->bit_depth, seg_qidx_u_ac);
+      seg_dc_qstep_v = stbi_avif__av1_dc_qlookup_value(ctx->seq->bit_depth, seg_qidx_v_dc);
+      seg_ac_qstep_v = stbi_avif__av1_ac_qlookup_value(ctx->seq->bit_depth, seg_qidx_v_ac);
    }
 
    /* CDEF index: read for first non-skip block in each 64x64 CDEF unit.
@@ -10885,7 +10943,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
                eob = stbi_avif__av1_read_coeffs_after_skip(ctx, 0, tx2dszctx, tx_ctx, tx_type_actual,
                   (int)(tx_w <= 32u ? tx_w : 32u), (int)(tx_h <= 32u ? tx_h : 32u),
-                  coeffs, ctx->dc_qstep_y, ctx->ac_qstep_y,
+                  coeffs, seg_dc_qstep_y, seg_ac_qstep_y,
                   dc_sign_ctx_y, &cul_level);
                /* Update entropy context with cul_level */
                for (ti = 0; ti < tx_w_mi && mi_tx_col + ti < ctx->mi_cols; ti++)
@@ -10921,8 +10979,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          int p;
          for (p = 1; p <= 2; ++p) {
             unsigned short *plane_buf = (p == 1) ? ctx->planes->u : ctx->planes->v;
-            int dc_qstep_plane = (p == 1) ? ctx->dc_qstep_u : ctx->dc_qstep_v;
-            int ac_qstep_plane = (p == 1) ? ctx->ac_qstep_u : ctx->ac_qstep_v;
+            int dc_qstep_plane = (p == 1) ? seg_dc_qstep_u : seg_dc_qstep_v;
+            int ac_qstep_plane = (p == 1) ? seg_ac_qstep_u : seg_ac_qstep_v;
             for (uv_tx_row = 0; uv_tx_row < cph; uv_tx_row += uv_tx_szh) {
                for (uv_tx_col = 0; uv_tx_col < cpw; uv_tx_col += uv_tx_szw) {
                   unsigned int mi_tx_col_uv = (cpx + uv_tx_col) / 4u;
@@ -12953,6 +13011,14 @@ static void stbi_avif__av1_reset_cdfs(stbi_avif__av1_decode_ctx *ctx, int q_ctx)
    memcpy(ctx->lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
    memcpy(ctx->lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
    memcpy(ctx->lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
+
+   /* Segment tree CDF: uniform distribution over 8 segments (per AV1 spec default) */
+   {
+      int si;
+      for (si = 0; si < 8; ++si)
+         ctx->seg_tree_cdf[si] = (unsigned short)(((si + 1) * 32768u) / 8u);
+      ctx->seg_tree_cdf[8] = 0; /* sentinel */
+   }
 
    memcpy(ctx->txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx->txb_skip_cdf));
    memcpy(ctx->dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx->dc_sign_cdf));
