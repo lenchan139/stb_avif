@@ -11012,9 +11012,10 @@ static void stbi_avif__grain_generate_block(int *grain,
                int dy, dx;
                for (dy = -ar_coeff_lag; dy <= 0; ++dy)
                {
-                  int dx_start = (dy < 0) ? -ar_coeff_lag : -ar_coeff_lag;
-                  int dx_end   = (dy < 0) ? ar_coeff_lag  : -1;
-                  for (dx = dx_start; dx <= dx_end; ++dx)
+                  /* AR model scans in raster order: full row for dy<0,
+                   * only pixels left of current for dy==0 */
+                  int dx_end = (dy < 0) ? ar_coeff_lag : -1;
+                  for (dx = -ar_coeff_lag; dx <= dx_end; ++dx)
                   {
                      if (i < num_ar_coeffs)
                      {
@@ -11421,7 +11422,6 @@ static void stbi_avif__lr_selfguided_pass(const unsigned short *src,
    long *A;   /* integral of src values */
    long *B;   /* integral of src^2 values */
    unsigned int iw, ih;
-   int n;
 
    if (pw == 0u || ph == 0u || radius == 0) return;
 
@@ -11448,8 +11448,6 @@ static void stbi_avif__lr_selfguided_pass(const unsigned short *src,
       }
    }
 
-   n = (2 * radius + 1) * (2 * radius + 1);
-
    for (y = 0; y < ph; ++y)
    {
       for (x = 0; x < pw; ++x)
@@ -11474,9 +11472,10 @@ static void stbi_avif__lr_selfguided_pass(const unsigned short *src,
          sum_a = A[y1 * (int)iw + x1] - A[y1 * (int)iw + x0] - A[y0 * (int)iw + x1] + A[y0 * (int)iw + x0];
          sum_b = B[y1 * (int)iw + x1] - B[y1 * (int)iw + x0] - B[y0 * (int)iw + x1] + B[y0 * (int)iw + x0];
 
-         /* mean = sum / area, var = (sum_b - sum_a^2/area) / area */
+         /* mean = sum / area, var = (sum_b - sum_a^2/area) / area
+          * Use two-step division to avoid overflow in area*area */
          mean = (sum_a + area / 2) / area;
-         var = (sum_b * area - sum_a * sum_a + area * area / 2) / (area * area);
+         var = (sum_b - (sum_a * sum_a + area / 2) / area + area / 2) / area;
          if (var < 0) var = 0;
 
          /* z = var / (var + eps) — the shrinkage factor
@@ -11498,7 +11497,6 @@ static void stbi_avif__lr_selfguided_pass(const unsigned short *src,
 
    STBI_AVIF_FREE(A);
    STBI_AVIF_FREE(B);
-   (void)n;
 }
 
 /* Apply Sgrproj filter to a single plane.
