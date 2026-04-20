@@ -106,14 +106,18 @@ typedef struct
    int capacity;
 } stbi_avif__item_assoc;
 
+#define STBI_AVIF_MAX_EXTENTS 16
+
 typedef struct
 {
    unsigned int item_id;
    unsigned int construction_method;
    size_t base_offset;
-   size_t extent_offset;
-   size_t extent_length;
+   size_t extent_offset;    /* kept for backward compat (first extent) */
+   size_t extent_length;    /* kept for backward compat (first extent) */
    int extent_count;
+   size_t extent_offsets[STBI_AVIF_MAX_EXTENTS];
+   size_t extent_lengths[STBI_AVIF_MAX_EXTENTS];
 } stbi_avif__item_location;
 
 typedef struct
@@ -129,6 +133,8 @@ typedef struct
    size_t av1c_size;
    size_t payload_offset;
    size_t payload_size;
+   unsigned char *payload_concat; /* non-NULL when multi-extent data was concatenated */
+   int primary_extent_count;      /* number of extents for primary item */
    stbi_avif__property *properties;
    int property_count;
    int property_capacity;
@@ -12454,6 +12460,7 @@ static int stbi_avif__parse_iloc(const stbi_avif__buffer *buffer, const stbi_avi
 
       for (j = 0; j < extent_count; ++j)
       {
+         size_t ext_off, ext_len;
          if (version == 1 || version == 2)
          {
             if (!stbi_avif__range_check(buffer, payload, index_size))
@@ -12464,10 +12471,18 @@ static int stbi_avif__parse_iloc(const stbi_avif__buffer *buffer, const stbi_avi
          if (!stbi_avif__range_check(buffer, payload, offset_size + length_size))
             return stbi_avif__fail("truncated iloc extent");
 
+         ext_off = stbi_avif__read_be_size(buffer->data + payload, (int)offset_size);
+         ext_len = stbi_avif__read_be_size(buffer->data + payload + offset_size, (int)length_size);
+
          if (j == 0)
          {
-            location.extent_offset = stbi_avif__read_be_size(buffer->data + payload, (int)offset_size);
-            location.extent_length = stbi_avif__read_be_size(buffer->data + payload + offset_size, (int)length_size);
+            location.extent_offset = ext_off;
+            location.extent_length = ext_len;
+         }
+         if (j < STBI_AVIF_MAX_EXTENTS)
+         {
+            location.extent_offsets[j] = ext_off;
+            location.extent_lengths[j] = ext_len;
          }
          payload += offset_size + length_size;
       }
@@ -12818,15 +12833,41 @@ static int stbi_avif__resolve_primary(const stbi_avif__buffer *buffer, stbi_avif
       return stbi_avif__fail("missing iloc entry for primary item");
    if (location->construction_method != 0)
       return stbi_avif__fail("only file-offset iloc construction is supported");
-   if (location->extent_count != 1)
-      return stbi_avif__fail("only single-extent AVIF items are supported");
+   if (location->extent_count < 1)
+      return stbi_avif__fail("primary item has no extents");
+   if (location->extent_count > STBI_AVIF_MAX_EXTENTS)
+      return stbi_avif__fail("too many extents for primary item");
 
-   if (location->base_offset > ((size_t)-1) - location->extent_offset)
-      return stbi_avif__fail("primary item offset overflow");
-   parser->payload_offset = location->base_offset + location->extent_offset;
-   parser->payload_size = location->extent_length;
-   if (!stbi_avif__range_check(buffer, parser->payload_offset, parser->payload_size))
-      return stbi_avif__fail("primary item payload is out of bounds");
+   parser->primary_extent_count = location->extent_count;
+
+   if (location->extent_count == 1)
+   {
+      /* Single extent: point directly into the file buffer */
+      if (location->base_offset > ((size_t)-1) - location->extent_offset)
+         return stbi_avif__fail("primary item offset overflow");
+      parser->payload_offset = location->base_offset + location->extent_offset;
+      parser->payload_size = location->extent_length;
+      if (!stbi_avif__range_check(buffer, parser->payload_offset, parser->payload_size))
+         return stbi_avif__fail("primary item payload is out of bounds");
+   }
+   else
+   {
+      /* Multi-extent: compute total size, concatenation deferred to load time.
+       * Store the first extent's offset for payload_offset (used by info queries),
+       * and the total concatenated size for payload_size. */
+      size_t total = 0;
+      int ei;
+      for (ei = 0; ei < location->extent_count; ++ei)
+      {
+         size_t eoff = location->base_offset + location->extent_offsets[ei];
+         size_t elen = location->extent_lengths[ei];
+         if (!stbi_avif__range_check(buffer, eoff, elen))
+            return stbi_avif__fail("primary item extent is out of bounds");
+         total += elen;
+      }
+      parser->payload_offset = location->base_offset + location->extent_offsets[0];
+      parser->payload_size = total;
+   }
 
    /* Try to resolve the alpha (auxiliary) item, if one was found via iref/auxl */
    if (parser->alpha_item_id != 0u)
@@ -12958,6 +12999,40 @@ int stbi_avif_info_from_memory(const unsigned char *buffer, int len, int *x, int
    return 1;
 }
 
+/* Concatenate multi-extent item data into a single contiguous buffer.
+ * Returns a newly allocated buffer that the caller must STBI_AVIF_FREE.
+ * Sets *out_size to the total concatenated size. */
+static unsigned char *stbi_avif__concat_extents(
+   const unsigned char *file_data,
+   const stbi_avif__parser *parser, unsigned int item_id,
+   size_t *out_size)
+{
+   stbi_avif__item_location *loc;
+   unsigned char *buf;
+   size_t total = 0, cursor = 0;
+   int ei;
+
+   loc = stbi_avif__find_location((stbi_avif__parser *)parser, item_id);
+   if (loc == NULL) return NULL;
+
+   for (ei = 0; ei < loc->extent_count && ei < STBI_AVIF_MAX_EXTENTS; ++ei)
+      total += loc->extent_lengths[ei];
+
+   buf = (unsigned char *)STBI_AVIF_MALLOC(total);
+   if (!buf) return NULL;
+
+   for (ei = 0; ei < loc->extent_count && ei < STBI_AVIF_MAX_EXTENTS; ++ei)
+   {
+      size_t eoff = loc->base_offset + loc->extent_offsets[ei];
+      size_t elen = loc->extent_lengths[ei];
+      memcpy(buf + cursor, file_data + eoff, elen);
+      cursor += elen;
+   }
+
+   *out_size = total;
+   return buf;
+}
+
 unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, int *x, int *y, int *channels_in_file, int desired_channels)
 {
    stbi_avif__parser parser;
@@ -12965,6 +13040,9 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
    stbi_avif__av1_frame_index frame_index;
    stbi_avif__av1_frame_header frame_header;
    stbi_avif__av1_tile_group_header tile_group;
+   const unsigned char *payload_ptr;   /* pointer to primary item payload */
+   unsigned char *concat_buf = NULL;   /* non-NULL if multi-extent data was concatenated */
+   size_t payload_len;
    int ok;
 
    if (desired_channels != 0 && desired_channels != 1 &&
@@ -12984,44 +13062,66 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       *y = (int)parser.height;
    /* channels_in_file is set later after we know if alpha exists */
 
+   /* For multi-extent items, concatenate extents into a contiguous buffer.
+    * For single-extent, just point into the original buffer. */
+   if (parser.primary_extent_count > 1)
+   {
+      concat_buf = stbi_avif__concat_extents(buffer, &parser, parser.primary_item_id, &payload_len);
+      if (!concat_buf)
+      {
+         stbi_avif__parser_free(&parser);
+         return (unsigned char *)stbi_avif__fail_ptr("out of memory (multi-extent concat)");
+      }
+      payload_ptr = concat_buf;
+   }
+   else
+   {
+      payload_ptr = buffer + parser.payload_offset;
+      payload_len = parser.payload_size;
+   }
+
     ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &parser, &headers);
     if (!ok)
     {
+       STBI_AVIF_FREE(concat_buf);
        stbi_avif__parser_free(&parser);
        return NULL;
     }
 
-   ok = stbi_avif__index_av1_frame_obus(buffer + parser.payload_offset, parser.payload_size, &frame_index);
+   ok = stbi_avif__index_av1_frame_obus(payload_ptr, payload_len, &frame_index);
    if (!ok)
    {
+      STBI_AVIF_FREE(concat_buf);
       stbi_avif__parser_free(&parser);
       return NULL;
    }
 
-   ok = stbi_avif__parse_av1_frame_header(buffer + parser.payload_offset + frame_index.frame_header_offset,
+   ok = stbi_avif__parse_av1_frame_header(payload_ptr + frame_index.frame_header_offset,
                                           frame_index.frame_header_size,
                                           &headers.sequence_header,
                                           &frame_header);
    if (!ok)
    {
+      STBI_AVIF_FREE(concat_buf);
       stbi_avif__parser_free(&parser);
       return NULL;
    }
 
-   ok = stbi_avif__parse_av1_tile_group_header(buffer + parser.payload_offset + frame_index.tile_group_offset,
+   ok = stbi_avif__parse_av1_tile_group_header(payload_ptr + frame_index.tile_group_offset,
                                                frame_index.tile_group_size,
                                                frame_index.frame_is_combined_obu ? frame_header.header_bits_consumed : 0u,
                                                &frame_header,
                                                &tile_group);
    if (!ok)
    {
+      STBI_AVIF_FREE(concat_buf);
       stbi_avif__parser_free(&parser);
       return NULL;
    }
 
    /* Full decode: plane allocation + superblock traversal + YUV→RGBA. */
    {
-      const unsigned char *tile_data = buffer + parser.payload_offset + frame_index.tile_group_offset;
+      const unsigned char *tile_data = payload_ptr + frame_index.tile_group_offset;
       size_t               tile_size = frame_index.tile_group_size;
       unsigned char *rgba;
       unsigned short *alpha_plane = NULL;
@@ -13090,6 +13190,8 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       }
 
       stbi_avif__parser_free(&parser);
+      STBI_AVIF_FREE(concat_buf);
+      concat_buf = NULL;
       rgba = stbi_avif__av1_decode(
                 tile_data,
                 tile_size,
