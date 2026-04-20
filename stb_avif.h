@@ -279,6 +279,14 @@ typedef struct
    int cdef_damping;
    int cdef_y_strengths[8];   /* up to 8 CDEF strength values for Y */
    int cdef_uv_strengths[8];  /* up to 8 CDEF strength values for UV */
+   /* Loop filter (deblocking) parameters (AV1 spec section 5.9.11) */
+   int lf_level[2];           /* loop_filter_level[0..1] for luma vertical/horizontal */
+   int lf_level_u;            /* loop_filter_level[2] for chroma U */
+   int lf_level_v;            /* loop_filter_level[3] for chroma V */
+   int lf_sharpness;          /* loop_filter_sharpness (0..7) */
+   int lf_delta_enabled;      /* loop_filter_delta_enabled */
+   int lf_ref_deltas[8];      /* ref_deltas[8] for reference frame types */
+   int lf_mode_deltas[2];     /* mode_deltas[2] for inter prediction modes */
    /* Loop restoration parameters (AV1 spec §5.9.19) */
    int lr_type[3];            /* per-plane: 0=NONE, 1=WIENER, 2=SGRPROJ, 3=SWITCHABLE */
    int lr_unit_shift;         /* restoration unit size shift: unit = 256 >> (2 - shift) ... actually 0..2 */
@@ -1879,15 +1887,35 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       {
          int loop_filter_delta_enabled;
          int loop_filter_delta_update;
-         if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
-         if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+         unsigned long lf0, lf1, lf_sharp;
+         if (!stbi_avif__bit_read_bits(&bits, 6u, &lf0)) return 0;
+         if (!stbi_avif__bit_read_bits(&bits, 6u, &lf1)) return 0;
+         frame->lf_level[0] = (int)lf0;
+         frame->lf_level[1] = (int)lf1;
          if (!seq->monochrome)
          {
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0;
+            unsigned long lf_u, lf_v;
+            if (!stbi_avif__bit_read_bits(&bits, 6u, &lf_u)) return 0;
+            if (!stbi_avif__bit_read_bits(&bits, 6u, &lf_v)) return 0;
+            frame->lf_level_u = (int)lf_u;
+            frame->lf_level_v = (int)lf_v;
          }
-         if (!stbi_avif__bit_read_bits(&bits, 3u, &value)) return 0;
+         if (!stbi_avif__bit_read_bits(&bits, 3u, &lf_sharp)) return 0;
+         frame->lf_sharpness = (int)lf_sharp;
          if (!stbi_avif__bit_read_flag(&bits, &loop_filter_delta_enabled)) return 0;
+         frame->lf_delta_enabled = loop_filter_delta_enabled;
+         /* Default ref_deltas per AV1 spec section 7.8: INTRA_FRAME=1, LAST=0, LAST2=0, LAST3=0,
+          * BWDREF=0, ALTREF2=0, ALTREF=-1, GOLDEN=0 (index 0..7) */
+         frame->lf_ref_deltas[0] = 1;   /* INTRA_FRAME */
+         frame->lf_ref_deltas[1] = 0;   /* LAST_FRAME */
+         frame->lf_ref_deltas[2] = 0;
+         frame->lf_ref_deltas[3] = 0;
+         frame->lf_ref_deltas[4] = 0;
+         frame->lf_ref_deltas[5] = -1;  /* ALTREF2 — spec default */
+         frame->lf_ref_deltas[6] = -1;  /* ALTREF */
+         frame->lf_ref_deltas[7] = 0;
+         frame->lf_mode_deltas[0] = 0;
+         frame->lf_mode_deltas[1] = 0;
          if (loop_filter_delta_enabled)
          {
             if (!stbi_avif__bit_read_flag(&bits, &loop_filter_delta_update)) return 0;
@@ -1896,14 +1924,22 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                for (i = 0u; i < 8u; ++i)
                {
                   int update;
+                  int rd_val = 0;
                   if (!stbi_avif__bit_read_flag(&bits, &update)) return 0;
-                  if (update && !stbi_avif__bit_read_su(&bits, 7u, &delta_q_y_dc)) return 0;
+                  if (update) {
+                     if (!stbi_avif__bit_read_su(&bits, 7u, &rd_val)) return 0;
+                     frame->lf_ref_deltas[i] = rd_val;
+                  }
                }
                for (i = 0u; i < 2u; ++i)
                {
                   int update;
+                  int md_val = 0;
                   if (!stbi_avif__bit_read_flag(&bits, &update)) return 0;
-                  if (update && !stbi_avif__bit_read_su(&bits, 7u, &delta_q_y_dc)) return 0;
+                  if (update) {
+                     if (!stbi_avif__bit_read_su(&bits, 7u, &md_val)) return 0;
+                     frame->lf_mode_deltas[i] = md_val;
+                  }
                }
             }
          }
@@ -11851,6 +11887,205 @@ static void stbi_avif__cdef_filter_block(unsigned short *dst, unsigned int dst_s
    }
 }
 
+/* =========================================================================
+ *  DEBLOCKING (LOOP) FILTER
+ * =========================================================================
+ * Simplified deblocking for intra-only AVIF frames per AV1 spec section 7.14.
+ * Applies low-pass filtering along 4-pixel block edges to reduce blocking
+ * artifacts. For intra-only frames, all blocks reference INTRA_FRAME (index 0).
+ *
+ * Filter level per edge: base_level + ref_delta[INTRA_FRAME]
+ * Sharpness limits the maximum filter level: if sharpness > 0, level is capped.
+ * The filter checks flat regions and applies 4-tap or 2-tap filtering. */
+
+static int stbi_avif__deblock_level(int base, int ref_delta, int sharpness)
+{
+   int level = base + ref_delta;
+   if (level < 0) level = 0;
+   if (level > 63) level = 63;
+   /* Sharpness adjustment per AV1 spec section 7.14.4 */
+   if (sharpness > 0) {
+      int limit = (sharpness > 4) ? 1 : (9 - sharpness);
+      if (level > limit) level = limit;
+   }
+   return level;
+}
+
+/* Clamp to pixel range */
+static int stbi_avif__deblock_clamp(int v, int bd)
+{
+   int maxv = (1 << bd) - 1;
+   if (v < 0) return 0;
+   if (v > maxv) return maxv;
+   return v;
+}
+
+/* Apply 4-tap deblocking filter to a vertical or horizontal edge.
+ * p1, p0 are pixels on one side of the edge, q0, q1 on the other.
+ * Returns filtered p0 and q0 values via pointers. */
+static void stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
+                                        int level, int bd,
+                                        int *out_p0, int *out_q0)
+{
+   int thresh, hev_flag, f, f1, f2;
+   int inner_limit = level >> 1;
+   if (inner_limit < 1) inner_limit = 1;
+
+   /* Check if edge needs filtering */
+   if (abs(p0 - q0) * 2 + (abs(p1 - q1) >> 1) > level + 2 * inner_limit) {
+      *out_p0 = p0;
+      *out_q0 = q0;
+      return;
+   }
+   if (abs(p1 - p0) > inner_limit || abs(q1 - q0) > inner_limit) {
+      *out_p0 = p0;
+      *out_q0 = q0;
+      return;
+   }
+
+   /* High-edge-variance check */
+   thresh = level >> 4;
+   if (thresh < 1) thresh = 1;
+   hev_flag = (abs(p1 - p0) > thresh || abs(q1 - q0) > thresh) ? 1 : 0;
+
+   if (hev_flag) {
+      /* Narrow filter: 3-tap */
+      f = 3 * (q0 - p0);
+      if (f < -128) f = -128;
+      if (f > 127) f = 127;
+      f1 = (f + 4) >> 3;
+      f2 = (f + 3) >> 3;
+      *out_q0 = stbi_avif__deblock_clamp(q0 - f1, bd);
+      *out_p0 = stbi_avif__deblock_clamp(p0 + f2, bd);
+   } else {
+      /* Wider filter */
+      f = 3 * (q0 - p0);
+      if (f < -128) f = -128;
+      if (f > 127) f = 127;
+      f1 = (f + 4) >> 3;
+      f2 = (f + 3) >> 3;
+      *out_q0 = stbi_avif__deblock_clamp(q0 - f1, bd);
+      *out_p0 = stbi_avif__deblock_clamp(p0 + f2, bd);
+   }
+}
+
+static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
+                                           const stbi_avif__av1_frame_header *fhdr,
+                                           const stbi_avif__av1_sequence_header *seq)
+{
+   int bd = (int)seq->bit_depth;
+   int lf_level_y_v = fhdr->lf_level[0];  /* vertical edges */
+   int lf_level_y_h = fhdr->lf_level[1];  /* horizontal edges */
+   int sharpness = fhdr->lf_sharpness;
+   int ref_delta = fhdr->lf_delta_enabled ? fhdr->lf_ref_deltas[0] : 0; /* INTRA_FRAME delta */
+   int level_y_v, level_y_h, level_u, level_v;
+   unsigned int x, y;
+   unsigned int w = planes->width, h = planes->height;
+
+   /* Compute effective filter levels for each plane */
+   level_y_v = stbi_avif__deblock_level(lf_level_y_v, ref_delta, sharpness);
+   level_y_h = stbi_avif__deblock_level(lf_level_y_h, ref_delta, sharpness);
+   level_u = stbi_avif__deblock_level(fhdr->lf_level_u, ref_delta, sharpness);
+   level_v = stbi_avif__deblock_level(fhdr->lf_level_v, ref_delta, sharpness);
+
+   /* Skip if all levels are zero */
+   if (level_y_v == 0 && level_y_h == 0 && level_u == 0 && level_v == 0)
+      return;
+
+   /* Y plane: vertical edges (every 4 pixels along x) */
+   if (level_y_v > 0) {
+      for (y = 0; y < h; ++y) {
+         for (x = 4; x < w; x += 4) {
+            int p1 = planes->y[y * w + x - 2];
+            int p0 = planes->y[y * w + x - 1];
+            int q0 = planes->y[y * w + x];
+            int q1 = planes->y[y * w + x + 1 < w ? x + 1 : x];
+            int fp0, fq0;
+            stbi_avif__deblock_filter4(p1, p0, q0, q1, level_y_v, bd, &fp0, &fq0);
+            planes->y[y * w + x - 1] = (unsigned short)fp0;
+            planes->y[y * w + x]     = (unsigned short)fq0;
+         }
+      }
+   }
+
+   /* Y plane: horizontal edges (every 4 pixels along y) */
+   if (level_y_h > 0) {
+      for (y = 4; y < h; y += 4) {
+         for (x = 0; x < w; ++x) {
+            int p1 = planes->y[(y - 2) * w + x];
+            int p0 = planes->y[(y - 1) * w + x];
+            int q0 = planes->y[y * w + x];
+            int q1 = planes->y[(y + 1 < h ? y + 1 : y) * w + x];
+            int fp0, fq0;
+            stbi_avif__deblock_filter4(p1, p0, q0, q1, level_y_h, bd, &fp0, &fq0);
+            planes->y[(y - 1) * w + x] = (unsigned short)fp0;
+            planes->y[y * w + x]       = (unsigned short)fq0;
+         }
+      }
+   }
+
+   /* Chroma planes */
+   if (!seq->monochrome) {
+      unsigned int cw = planes->cw, ch = planes->ch;
+
+      /* U plane: vertical edges */
+      if (level_u > 0) {
+         for (y = 0; y < ch; ++y) {
+            for (x = 4; x < cw; x += 4) {
+               int p1 = planes->u[y * cw + x - 2];
+               int p0 = planes->u[y * cw + x - 1];
+               int q0 = planes->u[y * cw + x];
+               int q1 = planes->u[y * cw + (x + 1 < cw ? x + 1 : x)];
+               int fp0, fq0;
+               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_u, bd, &fp0, &fq0);
+               planes->u[y * cw + x - 1] = (unsigned short)fp0;
+               planes->u[y * cw + x]     = (unsigned short)fq0;
+            }
+         }
+         for (y = 4; y < ch; y += 4) {
+            for (x = 0; x < cw; ++x) {
+               int p1 = planes->u[(y - 2) * cw + x];
+               int p0 = planes->u[(y - 1) * cw + x];
+               int q0 = planes->u[y * cw + x];
+               int q1 = planes->u[(y + 1 < ch ? y + 1 : y) * cw + x];
+               int fp0, fq0;
+               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_u, bd, &fp0, &fq0);
+               planes->u[(y - 1) * cw + x] = (unsigned short)fp0;
+               planes->u[y * cw + x]       = (unsigned short)fq0;
+            }
+         }
+      }
+
+      /* V plane */
+      if (level_v > 0) {
+         for (y = 0; y < ch; ++y) {
+            for (x = 4; x < cw; x += 4) {
+               int p1 = planes->v[y * cw + x - 2];
+               int p0 = planes->v[y * cw + x - 1];
+               int q0 = planes->v[y * cw + x];
+               int q1 = planes->v[y * cw + (x + 1 < cw ? x + 1 : x)];
+               int fp0, fq0;
+               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_v, bd, &fp0, &fq0);
+               planes->v[y * cw + x - 1] = (unsigned short)fp0;
+               planes->v[y * cw + x]     = (unsigned short)fq0;
+            }
+         }
+         for (y = 4; y < ch; y += 4) {
+            for (x = 0; x < cw; ++x) {
+               int p1 = planes->v[(y - 2) * cw + x];
+               int p0 = planes->v[(y - 1) * cw + x];
+               int q0 = planes->v[y * cw + x];
+               int q1 = planes->v[(y + 1 < ch ? y + 1 : y) * cw + x];
+               int fp0, fq0;
+               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_v, bd, &fp0, &fq0);
+               planes->v[(y - 1) * cw + x] = (unsigned short)fp0;
+               planes->v[y * cw + x]       = (unsigned short)fq0;
+            }
+         }
+      }
+   }
+}
+
 static void stbi_avif__av1_cdef_filter(stbi_avif__av1_planes *planes,
                                         const stbi_avif__av1_frame_header *fhdr,
                                         const stbi_avif__av1_sequence_header *seq,
@@ -13285,6 +13520,9 @@ static unsigned char *stbi_avif__av1_decode(
    STBI_AVIF_FREE(ctx.left_modes);
    STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
 
+   /* Apply deblocking (loop) filter — before CDEF per AV1 spec */
+   stbi_avif__av1_deblock_filter(&planes, fhdr, seq);
+
    /* Apply CDEF filter */
    stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
                                ctx.cdef_grid_cols, ctx.cdef_grid_rows);
@@ -13560,6 +13798,9 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
    STBI_AVIF_FREE(ctx.above_modes);
    STBI_AVIF_FREE(ctx.left_modes);
    STBI_AVIF_FREE(ctx.above_partition_ctx); STBI_AVIF_FREE(ctx.above_skip); STBI_AVIF_FREE(ctx.left_skip); STBI_AVIF_FREE(ctx.above_tx_intra); STBI_AVIF_FREE(ctx.left_tx_intra); STBI_AVIF_FREE(ctx.above_entropy[0]); STBI_AVIF_FREE(ctx.above_entropy[1]); STBI_AVIF_FREE(ctx.above_entropy[2]);
+
+   /* Apply deblocking (loop) filter — before CDEF per AV1 spec */
+   stbi_avif__av1_deblock_filter(&planes, fhdr, seq);
 
    /* Apply CDEF filter */
    stbi_avif__av1_cdef_filter(&planes, fhdr, seq, ctx.cdef_idx,
