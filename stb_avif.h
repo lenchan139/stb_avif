@@ -1904,16 +1904,17 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          frame->lf_sharpness = (int)lf_sharp;
          if (!stbi_avif__bit_read_flag(&bits, &loop_filter_delta_enabled)) return 0;
          frame->lf_delta_enabled = loop_filter_delta_enabled;
-         /* Default ref_deltas per AV1 spec section 7.8: INTRA_FRAME=1, LAST=0, LAST2=0, LAST3=0,
-          * BWDREF=0, ALTREF2=0, ALTREF=-1, GOLDEN=0 (index 0..7) */
+         /* Default ref_deltas per AV1 spec section 7.8:
+          * [0]=INTRA_FRAME=1, [1]=LAST=0, [2]=LAST2=0, [3]=LAST3=0,
+          * [4]=GOLDEN=-1, [5]=BWDREF=-1, [6]=ALTREF2=-1, [7]=ALTREF=-1 */
          frame->lf_ref_deltas[0] = 1;   /* INTRA_FRAME */
          frame->lf_ref_deltas[1] = 0;   /* LAST_FRAME */
-         frame->lf_ref_deltas[2] = 0;
-         frame->lf_ref_deltas[3] = 0;
-         frame->lf_ref_deltas[4] = 0;
-         frame->lf_ref_deltas[5] = -1;  /* ALTREF2 — spec default */
-         frame->lf_ref_deltas[6] = -1;  /* ALTREF */
-         frame->lf_ref_deltas[7] = 0;
+         frame->lf_ref_deltas[2] = 0;   /* LAST2_FRAME */
+         frame->lf_ref_deltas[3] = 0;   /* LAST3_FRAME */
+         frame->lf_ref_deltas[4] = -1;  /* GOLDEN_FRAME */
+         frame->lf_ref_deltas[5] = -1;  /* BWDREF_FRAME */
+         frame->lf_ref_deltas[6] = -1;  /* ALTREF2_FRAME */
+         frame->lf_ref_deltas[7] = -1;  /* ALTREF_FRAME */
          frame->lf_mode_deltas[0] = 0;
          frame->lf_mode_deltas[1] = 0;
          if (loop_filter_delta_enabled)
@@ -15326,8 +15327,8 @@ int stbi_avif_write_png(const char *filename, const unsigned char *pixels, int w
    written = fwrite(buf, 1u, (size_t)buf_len, fp);
    STBI_AVIF_FREE(buf);
 
+   if (written != (size_t)buf_len) { fclose(fp); return 0; }
    if (fclose(fp) != 0) return 0;
-   if (written != (size_t)buf_len) return 0;
    return 1;
 }
 
