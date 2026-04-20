@@ -224,6 +224,9 @@ typedef struct
    int show_frame;
    unsigned int frame_width;
    unsigned int frame_height;
+   int use_superres;                /* 1 if superres is enabled */
+   unsigned int superres_denom;     /* superres denominator (9..16); 8 means no scaling */
+   unsigned int upscaled_width;     /* output width after superres (== frame_width when no superres) */
    unsigned int base_q_idx;
    unsigned int tile_cols;
    unsigned int tile_rows;
@@ -1322,12 +1325,23 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       /* frame_size_override_flag is implicitly 0 for reduced */
       /* setup_frame_size: no frame size bits (override=0) */
       /* setup_superres: read bits only if enable_superres */
+      frame->use_superres = 0;
+      frame->superres_denom = 8u; /* SUPERRES_NUM = 8 */
+      frame->upscaled_width = frame->frame_width;
       if (seq->enable_superres) {
          int use_superres;
          if (!stbi_avif__bit_read_flag(&bits, &use_superres))
             return 0;
          if (use_superres) {
-            if (!stbi_avif__bit_read_bits(&bits, 3u, &value)) return 0; /* SUPERRES_SCALE_BITS=3 */
+            unsigned long coded_denom;
+            if (!stbi_avif__bit_read_bits(&bits, 3u, &coded_denom)) return 0;
+            frame->superres_denom = (unsigned int)coded_denom + 9u; /* SUPERRES_DENOM_MIN=9 */
+            frame->use_superres = 1;
+            /* upscaled_width is the original frame_width before encoding.
+             * coded width = upscaled_width * denom / SUPERRES_NUM (rounded up).
+             * At decode time frame_width is already the coded (smaller) width.
+             * We must store upscaled_width = frame_width * 8 / denom (rounded up). */
+            frame->upscaled_width = (frame->frame_width * 8u + frame->superres_denom - 1u) / frame->superres_denom;
          }
       }
 
@@ -1462,12 +1476,19 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       }
 
       /* superres_params() */
+      frame->use_superres = 0;
+      frame->superres_denom = 8u;
+      frame->upscaled_width = frame->frame_width;
       if (seq->enable_superres) {
          int use_superres;
          if (!stbi_avif__bit_read_flag(&bits, &use_superres))
             return 0;
          if (use_superres) {
-            if (!stbi_avif__bit_read_bits(&bits, 3u, &value)) return 0;
+            unsigned long coded_denom;
+            if (!stbi_avif__bit_read_bits(&bits, 3u, &coded_denom)) return 0;
+            frame->superres_denom = (unsigned int)coded_denom + 9u;
+            frame->use_superres = 1;
+            frame->upscaled_width = (frame->frame_width * 8u + frame->superres_denom - 1u) / frame->superres_denom;
          }
       }
 
@@ -11675,6 +11696,150 @@ static void stbi_avif__av1_lr_filter(stbi_avif__av1_planes *planes,
 
 /*
  * =============================================================================
+ *  SUPERRES UPSCALING  (AV1 spec §7.16)
+ * =============================================================================
+ *
+ * Horizontal-only upscale from coded_width to upscaled_width using AV1's
+ * 8-tap interpolation filters. The step and initial subpixel position are
+ * derived from the superres denominator per spec §7.16.1.
+ *
+ * Filter coefficients are from AV1 spec Table 7-7 (regular 8-tap filter),
+ * indexed by the 4 MSBs of the 14-bit subpixel phase.
+ */
+
+/* AV1 8-tap regular upscale filter (16 phases × 8 taps), from dav1d / AV1 spec */
+static const short stbi_avif__superres_filter[16][8] = {
+   {  0,   0,   0, 128,   0,   0,   0,   0 },
+   {  0,   1,  -3, 128,   4,  -1,   0,   0 },  /* phase 1/16 */
+   {  0,   2,  -6, 127,   8,  -3,   1,   0 },  /* phase 2/16 */
+   {  0,   3,  -9, 125,  13,  -4,   1,   0 },  /* phase 3/16 */
+   { -1,   4, -12, 123,  18,  -6,   2,   1 },  /* phase 4/16 */
+   { -1,   4, -14, 121,  22,  -7,   3,   1 },  /* phase 5/16 */
+   { -1,   5, -15, 117,  27,  -8,   3,   1 },  /* phase 6/16 */
+   { -1,   5, -17, 114,  32, -10,   4,   2 },  /* phase 7/16 */
+   { -1,   5, -18, 111,  37, -11,   4,   2 },  /* phase 8/16 */
+   { -1,   5, -19, 107,  42, -13,   5,   3 },  /* phase 9/16 */
+   { -1,   5, -19, 103,  47, -14,   5,   3 },  /* phase 10/16 */
+   { -1,   5, -19,  99,  52, -15,   6,   2 },  /* phase 11/16 */
+   { -1,   5, -19,  94,  57, -16,   6,   3 },  /* phase 12/16 */
+   { -1,   5, -18,  89,  62, -17,   6,   3 },  /* phase 13/16 */
+   { -1,   5, -18,  84,  67, -17,   7,   2 },  /* phase 14/16 */
+   { -1,   5, -17,  79,  72, -18,   7,   2 }   /* phase 15/16 */
+};
+
+/* Upscale a single plane horizontally from src_w to dst_w.
+ * src: source plane (height rows × src_stride), dst: destination (height × dst_stride).
+ * The superres step is (src_w << 14) / dst_w (fixed-point 14-bit).
+ * Initial phase = (-((dst_w - 1) * step - ((src_w - 1) << 14)) / 2) >> 1,
+ * but we use the simplified AV1 formula: initial_subpel = -(((dst_w-1)*step - ((src_w-1)<<14))/2).
+ */
+static void stbi_avif__superres_upscale_plane(
+   unsigned short *dst, unsigned int dst_w, unsigned int dst_stride,
+   const unsigned short *src, unsigned int src_w, unsigned int src_stride,
+   unsigned int height, unsigned int bit_depth)
+{
+   unsigned int y, x;
+   int maxv = (int)((1u << bit_depth) - 1u);
+   /* Step in 14-bit fixed-point */
+   unsigned int step = ((src_w << 14) + (dst_w >> 1)) / dst_w;
+   /* Initial subpel offset: centers the output */
+   int initial_subpel;
+   {
+      /* Per AV1 spec: x0_qn = extra_offset - ((dst_w - 1) * step - ((src_w - 1) << 14)) / 2 */
+      /* where extra_offset = src_w << 14 >> 1 ... simplified: */
+      long long total_step = (long long)(dst_w - 1u) * (long long)step;
+      long long total_src  = (long long)(src_w - 1u) << 14;
+      initial_subpel = (int)((total_src - total_step) / 2);
+   }
+
+   for (y = 0; y < height; ++y)
+   {
+      const unsigned short *srow = src + y * src_stride;
+      unsigned short *drow = dst + y * dst_stride;
+      int subpel = initial_subpel;
+
+      for (x = 0; x < dst_w; ++x)
+      {
+         int src_x = subpel >> 14;
+         int phase = (subpel >> 10) & 15; /* 4 MSBs of fractional part */
+         const short *filt = stbi_avif__superres_filter[phase];
+         int sum = 0;
+         int t;
+
+         for (t = 0; t < 8; ++t)
+         {
+            int sx = src_x + t - 3; /* filter center is at tap 3 */
+            if (sx < 0) sx = 0;
+            if (sx >= (int)src_w) sx = (int)src_w - 1;
+            sum += filt[t] * (int)srow[sx];
+         }
+         sum = (sum + 64) >> 7; /* filter has 128 total weight */
+         if (sum < 0) sum = 0;
+         if (sum > maxv) sum = maxv;
+         drow[x] = (unsigned short)sum;
+
+         subpel += (int)step;
+      }
+   }
+}
+
+/* Apply superres to all planes. Replaces the coded-resolution planes with
+ * upscaled-resolution planes. */
+static int stbi_avif__av1_apply_superres(stbi_avif__av1_planes *p,
+                                          const stbi_avif__av1_frame_header *fhdr)
+{
+   unsigned int up_w = fhdr->upscaled_width;
+   unsigned int up_cw, new_cw;
+   unsigned short *new_y, *new_u, *new_v;
+
+   if (!fhdr->use_superres || fhdr->superres_denom <= 8u)
+      return 1; /* no superres needed */
+
+   /* Allocate new Y plane at upscaled width */
+   new_y = (unsigned short *)STBI_AVIF_MALLOC((size_t)up_w * p->height * sizeof(unsigned short));
+   if (!new_y)
+      return 0;
+
+   stbi_avif__superres_upscale_plane(new_y, up_w, up_w,
+                                      p->y, p->width, p->width,
+                                      p->height, p->bit_depth);
+   STBI_AVIF_FREE(p->y);
+   p->y = new_y;
+
+   if (!p->monochrome)
+   {
+      /* Chroma upscale: coded chroma width → upscaled chroma width */
+      up_cw = (up_w + (unsigned int)p->subx) >> p->subx;
+      new_cw = up_cw;
+
+      new_u = (unsigned short *)STBI_AVIF_MALLOC((size_t)new_cw * p->ch * sizeof(unsigned short));
+      new_v = (unsigned short *)STBI_AVIF_MALLOC((size_t)new_cw * p->ch * sizeof(unsigned short));
+      if (!new_u || !new_v)
+      {
+         STBI_AVIF_FREE(new_u);
+         STBI_AVIF_FREE(new_v);
+         return 0;
+      }
+
+      stbi_avif__superres_upscale_plane(new_u, new_cw, new_cw,
+                                         p->u, p->cw, p->cw,
+                                         p->ch, p->bit_depth);
+      stbi_avif__superres_upscale_plane(new_v, new_cw, new_cw,
+                                         p->v, p->cw, p->cw,
+                                         p->ch, p->bit_depth);
+      STBI_AVIF_FREE(p->u);
+      STBI_AVIF_FREE(p->v);
+      p->u = new_u;
+      p->v = new_v;
+      p->cw = new_cw;
+   }
+
+   p->width = up_w;
+   return 1;
+}
+
+/*
+ * =============================================================================
  *  TOP-LEVEL DECODE FUNCTION
  * =============================================================================
  */
@@ -11896,8 +12061,16 @@ static unsigned char *stbi_avif__av1_decode(
                                ctx.cdef_grid_cols, ctx.cdef_grid_rows);
    STBI_AVIF_FREE(ctx.cdef_idx);
 
-   /* Apply loop restoration filter (after CDEF, before RGBA conversion) */
+   /* Apply loop restoration filter (after CDEF, before superres) */
    stbi_avif__av1_lr_filter(&planes, fhdr, seq);
+
+   /* Apply superres upscaling (after loop restoration, before film grain) */
+   if (fhdr->use_superres) {
+      if (!stbi_avif__av1_apply_superres(&planes, fhdr)) {
+         stbi_avif__av1_free_planes(&planes);
+         return (unsigned char *)stbi_avif__fail_ptr("out of memory (superres)");
+      }
+   }
 
    /* Apply film grain synthesis (after all in-loop filters) */
    stbi_avif__av1_apply_film_grain(&planes, fhdr, seq);
@@ -12125,6 +12298,15 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
 
    /* Apply loop restoration filter (after CDEF) */
    stbi_avif__av1_lr_filter(&planes, fhdr, seq);
+
+   /* Apply superres upscaling (after loop restoration) */
+   if (fhdr->use_superres) {
+      if (!stbi_avif__av1_apply_superres(&planes, fhdr)) {
+         stbi_avif__av1_free_planes(&planes);
+         stbi_avif__fail("out of memory (superres alpha)");
+         return NULL;
+      }
+   }
 
    /* Copy Y plane out as the alpha channel data */
    plane_size = (size_t)planes.width * (size_t)planes.height;
@@ -13218,9 +13400,9 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
                         &alpha_fhdr,
                         &alpha_tg,
                         &alpha_w, &alpha_h, &alpha_bd);
-                     /* Validate alpha dimensions match primary */
+                     /* Validate alpha dimensions match primary (use upscaled width) */
                      if (alpha_plane != NULL &&
-                         (alpha_w != frame_header.frame_width || alpha_h != frame_header.frame_height))
+                         (alpha_w != frame_header.upscaled_width || alpha_h != frame_header.frame_height))
                      {
                         STBI_AVIF_FREE(alpha_plane);
                         alpha_plane = NULL;
@@ -13257,7 +13439,7 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       if (desired_channels == 3)
       {
          /* Strip alpha: RGBA → RGB */
-         unsigned int w = frame_header.frame_width;
+         unsigned int w = frame_header.upscaled_width;
          unsigned int h = frame_header.frame_height;
          size_t pixel_count = (size_t)w * (size_t)h;
          unsigned char *rgb = (unsigned char *)STBI_AVIF_MALLOC(pixel_count * 3u);
@@ -13282,7 +13464,7 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       else if (desired_channels == 1)
       {
          /* Convert to grayscale: RGBA → Y using luminance weights */
-         unsigned int w = frame_header.frame_width;
+         unsigned int w = frame_header.upscaled_width;
          unsigned int h = frame_header.frame_height;
          size_t pixel_count = (size_t)w * (size_t)h;
          unsigned char *gray = (unsigned char *)STBI_AVIF_MALLOC(pixel_count);
