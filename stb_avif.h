@@ -7706,20 +7706,20 @@ static const unsigned char stbi_avif__bsize_log2h[22] = {
 
 /*
  * Max TX width/height log2 for each block size (Y plane, luma 4:4:4).
- * Indexed: [bs] → (max_txw_log2, max_txh_log2) where 0=4px,1=8px,2=16px,3=32px (capped at 32).
- * Matches dav1d max_txfm_size_for_bs[][0] for 4:4:4 luma.
+ * Indexed: [bs] → (max_txw_log2, max_txh_log2) where 0=4px,1=8px,2=16px,3=32px,4=64px.
+ * Per AV1 spec: blocks ≥64px in a dimension may use 64px transforms.
  */
 static const unsigned char stbi_avif__bsize_max_txw[22] = {
    /* 4x4  4x8  8x4  8x8  8x16 16x8 16x16 16x32 32x16 32x32 32x64 64x32 */
-      0,   0,   1,   1,   1,   2,   2,    2,    3,    3,    3,    3,
+      0,   0,   1,   1,   1,   2,   2,    2,    3,    3,    3,    4,
    /* 64x64 64x128 128x64 128x128   4x16 16x4  8x32  32x8  16x64 64x16 */
-      3,    3,      3,      3,       0,   2,    1,    3,    2,    3
+      4,    4,      4,      4,       0,   2,    1,    3,    2,    4
 };
 static const unsigned char stbi_avif__bsize_max_txh[22] = {
    /* 4x4  4x8  8x4  8x8  8x16 16x8 16x16 16x32 32x16 32x32 32x64 64x32 */
-      0,   1,   0,   1,   2,   1,   2,    3,    2,    3,    3,    3,
+      0,   1,   0,   1,   2,   1,   2,    3,    2,    3,    4,    3,
    /* 64x64 64x128 128x64 128x128   4x16 16x4  8x32  32x8  16x64 64x16 */
-      3,    3,      3,      3,       2,   0,    3,    1,    3,    2
+      4,    4,      4,      4,       2,   0,    3,    1,    4,    2
 };
 
 /* AV1 BLOCK_SIZE enum values (matches AOM) */
@@ -8792,6 +8792,658 @@ static void stbi_avif__av1_idct32(const int *input, int *output)
    output[31] = step[0] - step[31];
 }
 
+/*
+ * AV1 64-point Inverse DCT (AV1 Specification Section 7.13.2.9)
+ *
+ * Implements the 64-point inverse DCT array process using the same
+ * stage-based butterfly decomposition as the existing 4/8/16/32-point
+ * IDCTs in stb_avif.h. Uses the stbi_avif__cospi[64] table and
+ * STBI_AVIF_HALF_BTF macro with COS_BIT=12.
+ *
+ * Reference: AOM av1_idct64_new() / av1_inv_txfm1d.c
+ * Spec: https://aomediacodec.github.io/av1-spec/#inverse-dct-array-process
+ *
+ * 11 stages: input permutation, 9 butterfly stages, final output merge.
+ */
+static void stbi_avif__av1_idct64(const int *input, int *output)
+{
+   const int *c = stbi_avif__cospi;
+   int bf0[64], bf1[64], step[64];
+
+   /* stage 1: input permutation (bit-reverse-like reordering) */
+   bf1[0]=input[0];   bf1[1]=input[32];  bf1[2]=input[16];  bf1[3]=input[48];
+   bf1[4]=input[8];   bf1[5]=input[40];  bf1[6]=input[24];  bf1[7]=input[56];
+   bf1[8]=input[4];   bf1[9]=input[36];  bf1[10]=input[20]; bf1[11]=input[52];
+   bf1[12]=input[12]; bf1[13]=input[44]; bf1[14]=input[28]; bf1[15]=input[60];
+   bf1[16]=input[2];  bf1[17]=input[34]; bf1[18]=input[18]; bf1[19]=input[50];
+   bf1[20]=input[10]; bf1[21]=input[42]; bf1[22]=input[26]; bf1[23]=input[58];
+   bf1[24]=input[6];  bf1[25]=input[38]; bf1[26]=input[22]; bf1[27]=input[54];
+   bf1[28]=input[14]; bf1[29]=input[46]; bf1[30]=input[30]; bf1[31]=input[62];
+   bf1[32]=input[1];  bf1[33]=input[33]; bf1[34]=input[17]; bf1[35]=input[49];
+   bf1[36]=input[9];  bf1[37]=input[41]; bf1[38]=input[25]; bf1[39]=input[57];
+   bf1[40]=input[5];  bf1[41]=input[37]; bf1[42]=input[21]; bf1[43]=input[53];
+   bf1[44]=input[13]; bf1[45]=input[45]; bf1[46]=input[29]; bf1[47]=input[61];
+   bf1[48]=input[3];  bf1[49]=input[35]; bf1[50]=input[19]; bf1[51]=input[51];
+   bf1[52]=input[11]; bf1[53]=input[43]; bf1[54]=input[27]; bf1[55]=input[59];
+   bf1[56]=input[7];  bf1[57]=input[39]; bf1[58]=input[23]; bf1[59]=input[55];
+   bf1[60]=input[15]; bf1[61]=input[47]; bf1[62]=input[31]; bf1[63]=input[63];
+
+   /* stage 2: pass through 0-31; HALF_BTF rotations on 32-63 */
+   step[0]=bf1[0];   step[1]=bf1[1];   step[2]=bf1[2];   step[3]=bf1[3];
+   step[4]=bf1[4];   step[5]=bf1[5];   step[6]=bf1[6];   step[7]=bf1[7];
+   step[8]=bf1[8];   step[9]=bf1[9];   step[10]=bf1[10]; step[11]=bf1[11];
+   step[12]=bf1[12]; step[13]=bf1[13]; step[14]=bf1[14]; step[15]=bf1[15];
+   step[16]=bf1[16]; step[17]=bf1[17]; step[18]=bf1[18]; step[19]=bf1[19];
+   step[20]=bf1[20]; step[21]=bf1[21]; step[22]=bf1[22]; step[23]=bf1[23];
+   step[24]=bf1[24]; step[25]=bf1[25]; step[26]=bf1[26]; step[27]=bf1[27];
+   step[28]=bf1[28]; step[29]=bf1[29]; step[30]=bf1[30]; step[31]=bf1[31];
+   step[32] = STBI_AVIF_HALF_BTF(c[63], bf1[32], -c[1],  bf1[63], COS_BIT);
+   step[33] = STBI_AVIF_HALF_BTF(c[31], bf1[33], -c[33], bf1[62], COS_BIT);
+   step[34] = STBI_AVIF_HALF_BTF(c[47], bf1[34], -c[17], bf1[61], COS_BIT);
+   step[35] = STBI_AVIF_HALF_BTF(c[15], bf1[35], -c[49], bf1[60], COS_BIT);
+   step[36] = STBI_AVIF_HALF_BTF(c[55], bf1[36], -c[9],  bf1[59], COS_BIT);
+   step[37] = STBI_AVIF_HALF_BTF(c[23], bf1[37], -c[41], bf1[58], COS_BIT);
+   step[38] = STBI_AVIF_HALF_BTF(c[39], bf1[38], -c[25], bf1[57], COS_BIT);
+   step[39] = STBI_AVIF_HALF_BTF(c[7],  bf1[39], -c[57], bf1[56], COS_BIT);
+   step[40] = STBI_AVIF_HALF_BTF(c[59], bf1[40], -c[5],  bf1[55], COS_BIT);
+   step[41] = STBI_AVIF_HALF_BTF(c[27], bf1[41], -c[37], bf1[54], COS_BIT);
+   step[42] = STBI_AVIF_HALF_BTF(c[43], bf1[42], -c[21], bf1[53], COS_BIT);
+   step[43] = STBI_AVIF_HALF_BTF(c[11], bf1[43], -c[53], bf1[52], COS_BIT);
+   step[44] = STBI_AVIF_HALF_BTF(c[51], bf1[44], -c[13], bf1[51], COS_BIT);
+   step[45] = STBI_AVIF_HALF_BTF(c[19], bf1[45], -c[45], bf1[50], COS_BIT);
+   step[46] = STBI_AVIF_HALF_BTF(c[35], bf1[46], -c[29], bf1[49], COS_BIT);
+   step[47] = STBI_AVIF_HALF_BTF(c[3],  bf1[47], -c[61], bf1[48], COS_BIT);
+   step[48] = STBI_AVIF_HALF_BTF(c[61], bf1[47],  c[3],  bf1[48], COS_BIT);
+   step[49] = STBI_AVIF_HALF_BTF(c[29], bf1[46],  c[35], bf1[49], COS_BIT);
+   step[50] = STBI_AVIF_HALF_BTF(c[45], bf1[45],  c[19], bf1[50], COS_BIT);
+   step[51] = STBI_AVIF_HALF_BTF(c[13], bf1[44],  c[51], bf1[51], COS_BIT);
+   step[52] = STBI_AVIF_HALF_BTF(c[53], bf1[43],  c[11], bf1[52], COS_BIT);
+   step[53] = STBI_AVIF_HALF_BTF(c[21], bf1[42],  c[43], bf1[53], COS_BIT);
+   step[54] = STBI_AVIF_HALF_BTF(c[37], bf1[41],  c[27], bf1[54], COS_BIT);
+   step[55] = STBI_AVIF_HALF_BTF(c[5],  bf1[40],  c[59], bf1[55], COS_BIT);
+   step[56] = STBI_AVIF_HALF_BTF(c[57], bf1[39],  c[7],  bf1[56], COS_BIT);
+   step[57] = STBI_AVIF_HALF_BTF(c[25], bf1[38],  c[39], bf1[57], COS_BIT);
+   step[58] = STBI_AVIF_HALF_BTF(c[41], bf1[37],  c[23], bf1[58], COS_BIT);
+   step[59] = STBI_AVIF_HALF_BTF(c[9],  bf1[36],  c[55], bf1[59], COS_BIT);
+   step[60] = STBI_AVIF_HALF_BTF(c[49], bf1[35],  c[15], bf1[60], COS_BIT);
+   step[61] = STBI_AVIF_HALF_BTF(c[17], bf1[34],  c[47], bf1[61], COS_BIT);
+   step[62] = STBI_AVIF_HALF_BTF(c[33], bf1[33],  c[31], bf1[62], COS_BIT);
+   step[63] = STBI_AVIF_HALF_BTF(c[1],  bf1[32],  c[63], bf1[63], COS_BIT);
+
+   /* stage 3: init 16-31 (32-pt rotation), add/sub pairs on 32-63, pass 0-15 */
+   bf0[0]=step[0];   bf0[1]=step[1];   bf0[2]=step[2];   bf0[3]=step[3];
+   bf0[4]=step[4];   bf0[5]=step[5];   bf0[6]=step[6];   bf0[7]=step[7];
+   bf0[8]=step[8];   bf0[9]=step[9];   bf0[10]=step[10]; bf0[11]=step[11];
+   bf0[12]=step[12]; bf0[13]=step[13]; bf0[14]=step[14]; bf0[15]=step[15];
+   bf0[16] = STBI_AVIF_HALF_BTF(c[62], step[16], -c[2],  step[31], COS_BIT);
+   bf0[17] = STBI_AVIF_HALF_BTF(c[30], step[17], -c[34], step[30], COS_BIT);
+   bf0[18] = STBI_AVIF_HALF_BTF(c[46], step[18], -c[18], step[29], COS_BIT);
+   bf0[19] = STBI_AVIF_HALF_BTF(c[14], step[19], -c[50], step[28], COS_BIT);
+   bf0[20] = STBI_AVIF_HALF_BTF(c[54], step[20], -c[10], step[27], COS_BIT);
+   bf0[21] = STBI_AVIF_HALF_BTF(c[22], step[21], -c[42], step[26], COS_BIT);
+   bf0[22] = STBI_AVIF_HALF_BTF(c[38], step[22], -c[26], step[25], COS_BIT);
+   bf0[23] = STBI_AVIF_HALF_BTF(c[6],  step[23], -c[58], step[24], COS_BIT);
+   bf0[24] = STBI_AVIF_HALF_BTF(c[58], step[23],  c[6],  step[24], COS_BIT);
+   bf0[25] = STBI_AVIF_HALF_BTF(c[26], step[22],  c[38], step[25], COS_BIT);
+   bf0[26] = STBI_AVIF_HALF_BTF(c[42], step[21],  c[22], step[26], COS_BIT);
+   bf0[27] = STBI_AVIF_HALF_BTF(c[10], step[20],  c[54], step[27], COS_BIT);
+   bf0[28] = STBI_AVIF_HALF_BTF(c[50], step[19],  c[14], step[28], COS_BIT);
+   bf0[29] = STBI_AVIF_HALF_BTF(c[18], step[18],  c[46], step[29], COS_BIT);
+   bf0[30] = STBI_AVIF_HALF_BTF(c[34], step[17],  c[30], step[30], COS_BIT);
+   bf0[31] = STBI_AVIF_HALF_BTF(c[2],  step[16],  c[62], step[31], COS_BIT);
+   bf0[32] = step[32] + step[33];
+   bf0[33] = step[32] - step[33];
+   bf0[34] = -step[34] + step[35];
+   bf0[35] = step[34] + step[35];
+   bf0[36] = step[36] + step[37];
+   bf0[37] = step[36] - step[37];
+   bf0[38] = -step[38] + step[39];
+   bf0[39] = step[38] + step[39];
+   bf0[40] = step[40] + step[41];
+   bf0[41] = step[40] - step[41];
+   bf0[42] = -step[42] + step[43];
+   bf0[43] = step[42] + step[43];
+   bf0[44] = step[44] + step[45];
+   bf0[45] = step[44] - step[45];
+   bf0[46] = -step[46] + step[47];
+   bf0[47] = step[46] + step[47];
+   bf0[48] = step[48] + step[49];
+   bf0[49] = step[48] - step[49];
+   bf0[50] = -step[50] + step[51];
+   bf0[51] = step[50] + step[51];
+   bf0[52] = step[52] + step[53];
+   bf0[53] = step[52] - step[53];
+   bf0[54] = -step[54] + step[55];
+   bf0[55] = step[54] + step[55];
+   bf0[56] = step[56] + step[57];
+   bf0[57] = step[56] - step[57];
+   bf0[58] = -step[58] + step[59];
+   bf0[59] = step[58] + step[59];
+   bf0[60] = step[60] + step[61];
+   bf0[61] = step[60] - step[61];
+   bf0[62] = -step[62] + step[63];
+   bf0[63] = step[62] + step[63];
+
+   /* stage 4: init 8-15 (16-pt rotation), add/sub 16-31, cross-butterfly 32-63, pass 0-7 */
+   step[0]=bf0[0]; step[1]=bf0[1]; step[2]=bf0[2]; step[3]=bf0[3];
+   step[4]=bf0[4]; step[5]=bf0[5]; step[6]=bf0[6]; step[7]=bf0[7];
+   step[8]  = STBI_AVIF_HALF_BTF(c[60], bf0[8],  -c[4],  bf0[15], COS_BIT);
+   step[9]  = STBI_AVIF_HALF_BTF(c[28], bf0[9],  -c[36], bf0[14], COS_BIT);
+   step[10] = STBI_AVIF_HALF_BTF(c[44], bf0[10], -c[20], bf0[13], COS_BIT);
+   step[11] = STBI_AVIF_HALF_BTF(c[12], bf0[11], -c[52], bf0[12], COS_BIT);
+   step[12] = STBI_AVIF_HALF_BTF(c[52], bf0[11],  c[12], bf0[12], COS_BIT);
+   step[13] = STBI_AVIF_HALF_BTF(c[20], bf0[10],  c[44], bf0[13], COS_BIT);
+   step[14] = STBI_AVIF_HALF_BTF(c[36], bf0[9],   c[28], bf0[14], COS_BIT);
+   step[15] = STBI_AVIF_HALF_BTF(c[4],  bf0[8],   c[60], bf0[15], COS_BIT);
+   step[16] = bf0[16] + bf0[17];
+   step[17] = bf0[16] - bf0[17];
+   step[18] = -bf0[18] + bf0[19];
+   step[19] = bf0[18] + bf0[19];
+   step[20] = bf0[20] + bf0[21];
+   step[21] = bf0[20] - bf0[21];
+   step[22] = -bf0[22] + bf0[23];
+   step[23] = bf0[22] + bf0[23];
+   step[24] = bf0[24] + bf0[25];
+   step[25] = bf0[24] - bf0[25];
+   step[26] = -bf0[26] + bf0[27];
+   step[27] = bf0[26] + bf0[27];
+   step[28] = bf0[28] + bf0[29];
+   step[29] = bf0[28] - bf0[29];
+   step[30] = -bf0[30] + bf0[31];
+   step[31] = bf0[30] + bf0[31];
+   step[32] = bf0[32];
+   step[33] = STBI_AVIF_HALF_BTF(-c[4],  bf0[33], c[60], bf0[62], COS_BIT);
+   step[34] = STBI_AVIF_HALF_BTF(-c[60], bf0[34], -c[4], bf0[61], COS_BIT);
+   step[35] = bf0[35];
+   step[36] = bf0[36];
+   step[37] = STBI_AVIF_HALF_BTF(-c[36], bf0[37], c[28], bf0[58], COS_BIT);
+   step[38] = STBI_AVIF_HALF_BTF(-c[28], bf0[38], -c[36], bf0[57], COS_BIT);
+   step[39] = bf0[39];
+   step[40] = bf0[40];
+   step[41] = STBI_AVIF_HALF_BTF(-c[20], bf0[41], c[44], bf0[54], COS_BIT);
+   step[42] = STBI_AVIF_HALF_BTF(-c[44], bf0[42], -c[20], bf0[53], COS_BIT);
+   step[43] = bf0[43];
+   step[44] = bf0[44];
+   step[45] = STBI_AVIF_HALF_BTF(-c[52], bf0[45], c[12], bf0[50], COS_BIT);
+   step[46] = STBI_AVIF_HALF_BTF(-c[12], bf0[46], -c[52], bf0[49], COS_BIT);
+   step[47] = bf0[47];
+   step[48] = bf0[48];
+   step[49] = STBI_AVIF_HALF_BTF(-c[52], bf0[46], c[12], bf0[49], COS_BIT);
+   step[50] = STBI_AVIF_HALF_BTF( c[12], bf0[45], c[52], bf0[50], COS_BIT);
+   step[51] = bf0[51];
+   step[52] = bf0[52];
+   step[53] = STBI_AVIF_HALF_BTF(-c[20], bf0[42], c[44], bf0[53], COS_BIT);
+   step[54] = STBI_AVIF_HALF_BTF( c[44], bf0[41], c[20], bf0[54], COS_BIT);
+   step[55] = bf0[55];
+   step[56] = bf0[56];
+   step[57] = STBI_AVIF_HALF_BTF(-c[36], bf0[38], c[28], bf0[57], COS_BIT);
+   step[58] = STBI_AVIF_HALF_BTF( c[28], bf0[37], c[36], bf0[58], COS_BIT);
+   step[59] = bf0[59];
+   step[60] = bf0[60];
+   step[61] = STBI_AVIF_HALF_BTF(-c[4],  bf0[34], c[60], bf0[61], COS_BIT);
+   step[62] = STBI_AVIF_HALF_BTF( c[60], bf0[33], c[4],  bf0[62], COS_BIT);
+   step[63] = bf0[63];
+
+   /* stage 5: init 4-7 (8-pt rotation), add/sub 8-15, cross-butterfly 16-31, groups-of-4 on 32-63, pass 0-3 */
+   bf0[0]=step[0]; bf0[1]=step[1]; bf0[2]=step[2]; bf0[3]=step[3];
+   bf0[4] = STBI_AVIF_HALF_BTF(c[56], step[4], -c[8],  step[7], COS_BIT);
+   bf0[5] = STBI_AVIF_HALF_BTF(c[24], step[5], -c[40], step[6], COS_BIT);
+   bf0[6] = STBI_AVIF_HALF_BTF(c[40], step[5],  c[24], step[6], COS_BIT);
+   bf0[7] = STBI_AVIF_HALF_BTF(c[8],  step[4],  c[56], step[7], COS_BIT);
+   bf0[8]  = step[8] + step[9];
+   bf0[9]  = step[8] - step[9];
+   bf0[10] = -step[10] + step[11];
+   bf0[11] = step[10] + step[11];
+   bf0[12] = step[12] + step[13];
+   bf0[13] = step[12] - step[13];
+   bf0[14] = -step[14] + step[15];
+   bf0[15] = step[14] + step[15];
+   bf0[16] = step[16];
+   bf0[17] = STBI_AVIF_HALF_BTF(-c[8],  step[17], c[56], step[30], COS_BIT);
+   bf0[18] = STBI_AVIF_HALF_BTF(-c[56], step[18], -c[8], step[29], COS_BIT);
+   bf0[19] = step[19];
+   bf0[20] = step[20];
+   bf0[21] = STBI_AVIF_HALF_BTF(-c[40], step[21], c[24], step[26], COS_BIT);
+   bf0[22] = STBI_AVIF_HALF_BTF(-c[24], step[22], -c[40], step[25], COS_BIT);
+   bf0[23] = step[23];
+   bf0[24] = step[24];
+   bf0[25] = STBI_AVIF_HALF_BTF(-c[40], step[22], c[24], step[25], COS_BIT);
+   bf0[26] = STBI_AVIF_HALF_BTF( c[24], step[21], c[40], step[26], COS_BIT);
+   bf0[27] = step[27];
+   bf0[28] = step[28];
+   bf0[29] = STBI_AVIF_HALF_BTF(-c[8],  step[18], c[56], step[29], COS_BIT);
+   bf0[30] = STBI_AVIF_HALF_BTF( c[56], step[17], c[8],  step[30], COS_BIT);
+   bf0[31] = step[31];
+   bf0[32] = step[32] + step[35];
+   bf0[33] = step[33] + step[34];
+   bf0[34] = step[33] - step[34];
+   bf0[35] = step[32] - step[35];
+   bf0[36] = -step[36] + step[39];
+   bf0[37] = -step[37] + step[38];
+   bf0[38] = step[37] + step[38];
+   bf0[39] = step[36] + step[39];
+   bf0[40] = step[40] + step[43];
+   bf0[41] = step[41] + step[42];
+   bf0[42] = step[41] - step[42];
+   bf0[43] = step[40] - step[43];
+   bf0[44] = -step[44] + step[47];
+   bf0[45] = -step[45] + step[46];
+   bf0[46] = step[45] + step[46];
+   bf0[47] = step[44] + step[47];
+   bf0[48] = step[48] + step[51];
+   bf0[49] = step[49] + step[50];
+   bf0[50] = step[49] - step[50];
+   bf0[51] = step[48] - step[51];
+   bf0[52] = -step[52] + step[55];
+   bf0[53] = -step[53] + step[54];
+   bf0[54] = step[53] + step[54];
+   bf0[55] = step[52] + step[55];
+   bf0[56] = step[56] + step[59];
+   bf0[57] = step[57] + step[58];
+   bf0[58] = step[57] - step[58];
+   bf0[59] = step[56] - step[59];
+   bf0[60] = -step[60] + step[63];
+   bf0[61] = -step[61] + step[62];
+   bf0[62] = step[61] + step[62];
+   bf0[63] = step[60] + step[63];
+
+   /* stage 6: 4-pt core on 0-3, add/sub 4-7, cross-butterfly 8-15, groups-of-4 on 16-31, cross-butterfly 32-63 */
+   step[0] = STBI_AVIF_HALF_BTF(c[32], bf0[0],  c[32], bf0[1], COS_BIT);
+   step[1] = STBI_AVIF_HALF_BTF(c[32], bf0[0], -c[32], bf0[1], COS_BIT);
+   step[2] = STBI_AVIF_HALF_BTF(c[48], bf0[2], -c[16], bf0[3], COS_BIT);
+   step[3] = STBI_AVIF_HALF_BTF(c[16], bf0[2],  c[48], bf0[3], COS_BIT);
+   step[4] = bf0[4] + bf0[5];
+   step[5] = bf0[4] - bf0[5];
+   step[6] = -bf0[6] + bf0[7];
+   step[7] = bf0[6] + bf0[7];
+   step[8]  = bf0[8];
+   step[9]  = STBI_AVIF_HALF_BTF(-c[16], bf0[9],  c[48], bf0[14], COS_BIT);
+   step[10] = STBI_AVIF_HALF_BTF(-c[48], bf0[10], -c[16], bf0[13], COS_BIT);
+   step[11] = bf0[11];
+   step[12] = bf0[12];
+   step[13] = STBI_AVIF_HALF_BTF(-c[16], bf0[10], c[48], bf0[13], COS_BIT);
+   step[14] = STBI_AVIF_HALF_BTF( c[48], bf0[9],  c[16], bf0[14], COS_BIT);
+   step[15] = bf0[15];
+   step[16] = bf0[16] + bf0[19];
+   step[17] = bf0[17] + bf0[18];
+   step[18] = bf0[17] - bf0[18];
+   step[19] = bf0[16] - bf0[19];
+   step[20] = -bf0[20] + bf0[23];
+   step[21] = -bf0[21] + bf0[22];
+   step[22] = bf0[21] + bf0[22];
+   step[23] = bf0[20] + bf0[23];
+   step[24] = bf0[24] + bf0[27];
+   step[25] = bf0[25] + bf0[26];
+   step[26] = bf0[25] - bf0[26];
+   step[27] = bf0[24] - bf0[27];
+   step[28] = -bf0[28] + bf0[31];
+   step[29] = -bf0[29] + bf0[30];
+   step[30] = bf0[29] + bf0[30];
+   step[31] = bf0[28] + bf0[31];
+   step[32] = bf0[32];
+   step[33] = bf0[33];
+   step[34] = STBI_AVIF_HALF_BTF(-c[8],  bf0[34], c[56], bf0[61], COS_BIT);
+   step[35] = STBI_AVIF_HALF_BTF(-c[8],  bf0[35], c[56], bf0[60], COS_BIT);
+   step[36] = STBI_AVIF_HALF_BTF(-c[56], bf0[36], -c[8], bf0[59], COS_BIT);
+   step[37] = STBI_AVIF_HALF_BTF(-c[56], bf0[37], -c[8], bf0[58], COS_BIT);
+   step[38] = bf0[38];
+   step[39] = bf0[39];
+   step[40] = bf0[40];
+   step[41] = bf0[41];
+   step[42] = STBI_AVIF_HALF_BTF(-c[40], bf0[42], c[24], bf0[53], COS_BIT);
+   step[43] = STBI_AVIF_HALF_BTF(-c[40], bf0[43], c[24], bf0[52], COS_BIT);
+   step[44] = STBI_AVIF_HALF_BTF(-c[24], bf0[44], -c[40], bf0[51], COS_BIT);
+   step[45] = STBI_AVIF_HALF_BTF(-c[24], bf0[45], -c[40], bf0[50], COS_BIT);
+   step[46] = bf0[46];
+   step[47] = bf0[47];
+   step[48] = bf0[48];
+   step[49] = bf0[49];
+   step[50] = STBI_AVIF_HALF_BTF(-c[40], bf0[45], c[24], bf0[50], COS_BIT);
+   step[51] = STBI_AVIF_HALF_BTF(-c[40], bf0[44], c[24], bf0[51], COS_BIT);
+   step[52] = STBI_AVIF_HALF_BTF( c[24], bf0[43], c[40], bf0[52], COS_BIT);
+   step[53] = STBI_AVIF_HALF_BTF( c[24], bf0[42], c[40], bf0[53], COS_BIT);
+   step[54] = bf0[54];
+   step[55] = bf0[55];
+   step[56] = bf0[56];
+   step[57] = bf0[57];
+   step[58] = STBI_AVIF_HALF_BTF(-c[8],  bf0[37], c[56], bf0[58], COS_BIT);
+   step[59] = STBI_AVIF_HALF_BTF(-c[8],  bf0[36], c[56], bf0[59], COS_BIT);
+   step[60] = STBI_AVIF_HALF_BTF( c[56], bf0[35], c[8],  bf0[60], COS_BIT);
+   step[61] = STBI_AVIF_HALF_BTF( c[56], bf0[34], c[8],  bf0[61], COS_BIT);
+   step[62] = bf0[62];
+   step[63] = bf0[63];
+
+   /* stage 7: merge 0-7, c[32] butterfly on 5-6, add/sub 8-15, cross-butterfly 16-31, groups-of-8 on 32-63 */
+   bf0[0] = step[0] + step[3];
+   bf0[1] = step[1] + step[2];
+   bf0[2] = step[1] - step[2];
+   bf0[3] = step[0] - step[3];
+   bf0[4] = step[4];
+   bf0[5] = STBI_AVIF_HALF_BTF(-c[32], step[5], c[32], step[6], COS_BIT);
+   bf0[6] = STBI_AVIF_HALF_BTF( c[32], step[5], c[32], step[6], COS_BIT);
+   bf0[7] = step[7];
+   bf0[8]  = step[8] + step[11];
+   bf0[9]  = step[9] + step[10];
+   bf0[10] = step[9] - step[10];
+   bf0[11] = step[8] - step[11];
+   bf0[12] = -step[12] + step[15];
+   bf0[13] = -step[13] + step[14];
+   bf0[14] = step[13] + step[14];
+   bf0[15] = step[12] + step[15];
+   bf0[16] = step[16];
+   bf0[17] = step[17];
+   bf0[18] = STBI_AVIF_HALF_BTF(-c[16], step[18], c[48], step[29], COS_BIT);
+   bf0[19] = STBI_AVIF_HALF_BTF(-c[16], step[19], c[48], step[28], COS_BIT);
+   bf0[20] = STBI_AVIF_HALF_BTF(-c[48], step[20], -c[16], step[27], COS_BIT);
+   bf0[21] = STBI_AVIF_HALF_BTF(-c[48], step[21], -c[16], step[26], COS_BIT);
+   bf0[22] = step[22];
+   bf0[23] = step[23];
+   bf0[24] = step[24];
+   bf0[25] = step[25];
+   bf0[26] = STBI_AVIF_HALF_BTF(-c[16], step[21], c[48], step[26], COS_BIT);
+   bf0[27] = STBI_AVIF_HALF_BTF(-c[16], step[20], c[48], step[27], COS_BIT);
+   bf0[28] = STBI_AVIF_HALF_BTF( c[48], step[19], c[16], step[28], COS_BIT);
+   bf0[29] = STBI_AVIF_HALF_BTF( c[48], step[18], c[16], step[29], COS_BIT);
+   bf0[30] = step[30];
+   bf0[31] = step[31];
+   bf0[32] = step[32] + step[39];
+   bf0[33] = step[33] + step[38];
+   bf0[34] = step[34] + step[37];
+   bf0[35] = step[35] + step[36];
+   bf0[36] = step[35] - step[36];
+   bf0[37] = step[34] - step[37];
+   bf0[38] = step[33] - step[38];
+   bf0[39] = step[32] - step[39];
+   bf0[40] = -step[40] + step[47];
+   bf0[41] = -step[41] + step[46];
+   bf0[42] = -step[42] + step[45];
+   bf0[43] = -step[43] + step[44];
+   bf0[44] = step[43] + step[44];
+   bf0[45] = step[42] + step[45];
+   bf0[46] = step[41] + step[46];
+   bf0[47] = step[40] + step[47];
+   bf0[48] = step[48] + step[55];
+   bf0[49] = step[49] + step[54];
+   bf0[50] = step[50] + step[53];
+   bf0[51] = step[51] + step[52];
+   bf0[52] = step[51] - step[52];
+   bf0[53] = step[50] - step[53];
+   bf0[54] = step[49] - step[54];
+   bf0[55] = step[48] - step[55];
+   bf0[56] = -step[56] + step[63];
+   bf0[57] = -step[57] + step[62];
+   bf0[58] = -step[58] + step[61];
+   bf0[59] = -step[59] + step[60];
+   bf0[60] = step[59] + step[60];
+   bf0[61] = step[58] + step[61];
+   bf0[62] = step[57] + step[62];
+   bf0[63] = step[56] + step[63];
+
+   /* stage 8: merge 0-15, c[32] on 10-13, groups-of-8 on 16-31, cross-butterfly 32-63 (c[16],c[48]) */
+   step[0] = bf0[0] + bf0[7];
+   step[1] = bf0[1] + bf0[6];
+   step[2] = bf0[2] + bf0[5];
+   step[3] = bf0[3] + bf0[4];
+   step[4] = bf0[3] - bf0[4];
+   step[5] = bf0[2] - bf0[5];
+   step[6] = bf0[1] - bf0[6];
+   step[7] = bf0[0] - bf0[7];
+   step[8]  = bf0[8];
+   step[9]  = bf0[9];
+   step[10] = STBI_AVIF_HALF_BTF(-c[32], bf0[10], c[32], bf0[13], COS_BIT);
+   step[11] = STBI_AVIF_HALF_BTF(-c[32], bf0[11], c[32], bf0[12], COS_BIT);
+   step[12] = STBI_AVIF_HALF_BTF( c[32], bf0[11], c[32], bf0[12], COS_BIT);
+   step[13] = STBI_AVIF_HALF_BTF( c[32], bf0[10], c[32], bf0[13], COS_BIT);
+   step[14] = bf0[14];
+   step[15] = bf0[15];
+   step[16] = bf0[16] + bf0[23];
+   step[17] = bf0[17] + bf0[22];
+   step[18] = bf0[18] + bf0[21];
+   step[19] = bf0[19] + bf0[20];
+   step[20] = bf0[19] - bf0[20];
+   step[21] = bf0[18] - bf0[21];
+   step[22] = bf0[17] - bf0[22];
+   step[23] = bf0[16] - bf0[23];
+   step[24] = -bf0[24] + bf0[31];
+   step[25] = -bf0[25] + bf0[30];
+   step[26] = -bf0[26] + bf0[29];
+   step[27] = -bf0[27] + bf0[28];
+   step[28] = bf0[27] + bf0[28];
+   step[29] = bf0[26] + bf0[29];
+   step[30] = bf0[25] + bf0[30];
+   step[31] = bf0[24] + bf0[31];
+   step[32] = bf0[32];
+   step[33] = bf0[33];
+   step[34] = bf0[34];
+   step[35] = bf0[35];
+   step[36] = STBI_AVIF_HALF_BTF(-c[16], bf0[36], c[48], bf0[59], COS_BIT);
+   step[37] = STBI_AVIF_HALF_BTF(-c[16], bf0[37], c[48], bf0[58], COS_BIT);
+   step[38] = STBI_AVIF_HALF_BTF(-c[16], bf0[38], c[48], bf0[57], COS_BIT);
+   step[39] = STBI_AVIF_HALF_BTF(-c[16], bf0[39], c[48], bf0[56], COS_BIT);
+   step[40] = STBI_AVIF_HALF_BTF(-c[48], bf0[40], -c[16], bf0[55], COS_BIT);
+   step[41] = STBI_AVIF_HALF_BTF(-c[48], bf0[41], -c[16], bf0[54], COS_BIT);
+   step[42] = STBI_AVIF_HALF_BTF(-c[48], bf0[42], -c[16], bf0[53], COS_BIT);
+   step[43] = STBI_AVIF_HALF_BTF(-c[48], bf0[43], -c[16], bf0[52], COS_BIT);
+   step[44] = bf0[44];
+   step[45] = bf0[45];
+   step[46] = bf0[46];
+   step[47] = bf0[47];
+   step[48] = bf0[48];
+   step[49] = bf0[49];
+   step[50] = bf0[50];
+   step[51] = bf0[51];
+   step[52] = STBI_AVIF_HALF_BTF(-c[16], bf0[43], c[48], bf0[52], COS_BIT);
+   step[53] = STBI_AVIF_HALF_BTF(-c[16], bf0[42], c[48], bf0[53], COS_BIT);
+   step[54] = STBI_AVIF_HALF_BTF(-c[16], bf0[41], c[48], bf0[54], COS_BIT);
+   step[55] = STBI_AVIF_HALF_BTF(-c[16], bf0[40], c[48], bf0[55], COS_BIT);
+   step[56] = STBI_AVIF_HALF_BTF( c[48], bf0[39], c[16], bf0[56], COS_BIT);
+   step[57] = STBI_AVIF_HALF_BTF( c[48], bf0[38], c[16], bf0[57], COS_BIT);
+   step[58] = STBI_AVIF_HALF_BTF( c[48], bf0[37], c[16], bf0[58], COS_BIT);
+   step[59] = STBI_AVIF_HALF_BTF( c[48], bf0[36], c[16], bf0[59], COS_BIT);
+   step[60] = bf0[60];
+   step[61] = bf0[61];
+   step[62] = bf0[62];
+   step[63] = bf0[63];
+
+   /* stage 9: merge 0-15, c[32] on 20-27, groups-of-16 on 32-63 */
+   bf0[0]  = step[0] + step[15];
+   bf0[1]  = step[1] + step[14];
+   bf0[2]  = step[2] + step[13];
+   bf0[3]  = step[3] + step[12];
+   bf0[4]  = step[4] + step[11];
+   bf0[5]  = step[5] + step[10];
+   bf0[6]  = step[6] + step[9];
+   bf0[7]  = step[7] + step[8];
+   bf0[8]  = step[7] - step[8];
+   bf0[9]  = step[6] - step[9];
+   bf0[10] = step[5] - step[10];
+   bf0[11] = step[4] - step[11];
+   bf0[12] = step[3] - step[12];
+   bf0[13] = step[2] - step[13];
+   bf0[14] = step[1] - step[14];
+   bf0[15] = step[0] - step[15];
+   bf0[16] = step[16];
+   bf0[17] = step[17];
+   bf0[18] = step[18];
+   bf0[19] = step[19];
+   bf0[20] = STBI_AVIF_HALF_BTF(-c[32], step[20], c[32], step[27], COS_BIT);
+   bf0[21] = STBI_AVIF_HALF_BTF(-c[32], step[21], c[32], step[26], COS_BIT);
+   bf0[22] = STBI_AVIF_HALF_BTF(-c[32], step[22], c[32], step[25], COS_BIT);
+   bf0[23] = STBI_AVIF_HALF_BTF(-c[32], step[23], c[32], step[24], COS_BIT);
+   bf0[24] = STBI_AVIF_HALF_BTF( c[32], step[23], c[32], step[24], COS_BIT);
+   bf0[25] = STBI_AVIF_HALF_BTF( c[32], step[22], c[32], step[25], COS_BIT);
+   bf0[26] = STBI_AVIF_HALF_BTF( c[32], step[21], c[32], step[26], COS_BIT);
+   bf0[27] = STBI_AVIF_HALF_BTF( c[32], step[20], c[32], step[27], COS_BIT);
+   bf0[28] = step[28];
+   bf0[29] = step[29];
+   bf0[30] = step[30];
+   bf0[31] = step[31];
+   bf0[32] = step[32] + step[47];
+   bf0[33] = step[33] + step[46];
+   bf0[34] = step[34] + step[45];
+   bf0[35] = step[35] + step[44];
+   bf0[36] = step[36] + step[43];
+   bf0[37] = step[37] + step[42];
+   bf0[38] = step[38] + step[41];
+   bf0[39] = step[39] + step[40];
+   bf0[40] = step[39] - step[40];
+   bf0[41] = step[38] - step[41];
+   bf0[42] = step[37] - step[42];
+   bf0[43] = step[36] - step[43];
+   bf0[44] = step[35] - step[44];
+   bf0[45] = step[34] - step[45];
+   bf0[46] = step[33] - step[46];
+   bf0[47] = step[32] - step[47];
+   bf0[48] = -step[48] + step[63];
+   bf0[49] = -step[49] + step[62];
+   bf0[50] = -step[50] + step[61];
+   bf0[51] = -step[51] + step[60];
+   bf0[52] = -step[52] + step[59];
+   bf0[53] = -step[53] + step[58];
+   bf0[54] = -step[54] + step[57];
+   bf0[55] = -step[55] + step[56];
+   bf0[56] = step[55] + step[56];
+   bf0[57] = step[54] + step[57];
+   bf0[58] = step[53] + step[58];
+   bf0[59] = step[52] + step[59];
+   bf0[60] = step[51] + step[60];
+   bf0[61] = step[50] + step[61];
+   bf0[62] = step[49] + step[62];
+   bf0[63] = step[48] + step[63];
+
+   /* stage 10: merge 0-31, c[32] butterfly on 40-55 for 32-63 group */
+   step[0]  = bf0[0] + bf0[31];
+   step[1]  = bf0[1] + bf0[30];
+   step[2]  = bf0[2] + bf0[29];
+   step[3]  = bf0[3] + bf0[28];
+   step[4]  = bf0[4] + bf0[27];
+   step[5]  = bf0[5] + bf0[26];
+   step[6]  = bf0[6] + bf0[25];
+   step[7]  = bf0[7] + bf0[24];
+   step[8]  = bf0[8] + bf0[23];
+   step[9]  = bf0[9] + bf0[22];
+   step[10] = bf0[10] + bf0[21];
+   step[11] = bf0[11] + bf0[20];
+   step[12] = bf0[12] + bf0[19];
+   step[13] = bf0[13] + bf0[18];
+   step[14] = bf0[14] + bf0[17];
+   step[15] = bf0[15] + bf0[16];
+   step[16] = bf0[15] - bf0[16];
+   step[17] = bf0[14] - bf0[17];
+   step[18] = bf0[13] - bf0[18];
+   step[19] = bf0[12] - bf0[19];
+   step[20] = bf0[11] - bf0[20];
+   step[21] = bf0[10] - bf0[21];
+   step[22] = bf0[9] - bf0[22];
+   step[23] = bf0[8] - bf0[23];
+   step[24] = bf0[7] - bf0[24];
+   step[25] = bf0[6] - bf0[25];
+   step[26] = bf0[5] - bf0[26];
+   step[27] = bf0[4] - bf0[27];
+   step[28] = bf0[3] - bf0[28];
+   step[29] = bf0[2] - bf0[29];
+   step[30] = bf0[1] - bf0[30];
+   step[31] = bf0[0] - bf0[31];
+   step[32] = bf0[32];
+   step[33] = bf0[33];
+   step[34] = bf0[34];
+   step[35] = bf0[35];
+   step[36] = bf0[36];
+   step[37] = bf0[37];
+   step[38] = bf0[38];
+   step[39] = bf0[39];
+   step[40] = STBI_AVIF_HALF_BTF(-c[32], bf0[40], c[32], bf0[55], COS_BIT);
+   step[41] = STBI_AVIF_HALF_BTF(-c[32], bf0[41], c[32], bf0[54], COS_BIT);
+   step[42] = STBI_AVIF_HALF_BTF(-c[32], bf0[42], c[32], bf0[53], COS_BIT);
+   step[43] = STBI_AVIF_HALF_BTF(-c[32], bf0[43], c[32], bf0[52], COS_BIT);
+   step[44] = STBI_AVIF_HALF_BTF(-c[32], bf0[44], c[32], bf0[51], COS_BIT);
+   step[45] = STBI_AVIF_HALF_BTF(-c[32], bf0[45], c[32], bf0[50], COS_BIT);
+   step[46] = STBI_AVIF_HALF_BTF(-c[32], bf0[46], c[32], bf0[49], COS_BIT);
+   step[47] = STBI_AVIF_HALF_BTF(-c[32], bf0[47], c[32], bf0[48], COS_BIT);
+   step[48] = STBI_AVIF_HALF_BTF( c[32], bf0[47], c[32], bf0[48], COS_BIT);
+   step[49] = STBI_AVIF_HALF_BTF( c[32], bf0[46], c[32], bf0[49], COS_BIT);
+   step[50] = STBI_AVIF_HALF_BTF( c[32], bf0[45], c[32], bf0[50], COS_BIT);
+   step[51] = STBI_AVIF_HALF_BTF( c[32], bf0[44], c[32], bf0[51], COS_BIT);
+   step[52] = STBI_AVIF_HALF_BTF( c[32], bf0[43], c[32], bf0[52], COS_BIT);
+   step[53] = STBI_AVIF_HALF_BTF( c[32], bf0[42], c[32], bf0[53], COS_BIT);
+   step[54] = STBI_AVIF_HALF_BTF( c[32], bf0[41], c[32], bf0[54], COS_BIT);
+   step[55] = STBI_AVIF_HALF_BTF( c[32], bf0[40], c[32], bf0[55], COS_BIT);
+   step[56] = bf0[56];
+   step[57] = bf0[57];
+   step[58] = bf0[58];
+   step[59] = bf0[59];
+   step[60] = bf0[60];
+   step[61] = bf0[61];
+   step[62] = bf0[62];
+   step[63] = bf0[63];
+
+   /* stage 11: final output combine */
+   output[0]  = step[0]  + step[63];
+   output[1]  = step[1]  + step[62];
+   output[2]  = step[2]  + step[61];
+   output[3]  = step[3]  + step[60];
+   output[4]  = step[4]  + step[59];
+   output[5]  = step[5]  + step[58];
+   output[6]  = step[6]  + step[57];
+   output[7]  = step[7]  + step[56];
+   output[8]  = step[8]  + step[55];
+   output[9]  = step[9]  + step[54];
+   output[10] = step[10] + step[53];
+   output[11] = step[11] + step[52];
+   output[12] = step[12] + step[51];
+   output[13] = step[13] + step[50];
+   output[14] = step[14] + step[49];
+   output[15] = step[15] + step[48];
+   output[16] = step[16] + step[47];
+   output[17] = step[17] + step[46];
+   output[18] = step[18] + step[45];
+   output[19] = step[19] + step[44];
+   output[20] = step[20] + step[43];
+   output[21] = step[21] + step[42];
+   output[22] = step[22] + step[41];
+   output[23] = step[23] + step[40];
+   output[24] = step[24] + step[39];
+   output[25] = step[25] + step[38];
+   output[26] = step[26] + step[37];
+   output[27] = step[27] + step[36];
+   output[28] = step[28] + step[35];
+   output[29] = step[29] + step[34];
+   output[30] = step[30] + step[33];
+   output[31] = step[31] + step[32];
+   output[32] = step[31] - step[32];
+   output[33] = step[30] - step[33];
+   output[34] = step[29] - step[34];
+   output[35] = step[28] - step[35];
+   output[36] = step[27] - step[36];
+   output[37] = step[26] - step[37];
+   output[38] = step[25] - step[38];
+   output[39] = step[24] - step[39];
+   output[40] = step[23] - step[40];
+   output[41] = step[22] - step[41];
+   output[42] = step[21] - step[42];
+   output[43] = step[20] - step[43];
+   output[44] = step[19] - step[44];
+   output[45] = step[18] - step[45];
+   output[46] = step[17] - step[46];
+   output[47] = step[16] - step[47];
+   output[48] = step[15] - step[48];
+   output[49] = step[14] - step[49];
+   output[50] = step[13] - step[50];
+   output[51] = step[12] - step[51];
+   output[52] = step[11] - step[52];
+   output[53] = step[10] - step[53];
+   output[54] = step[9]  - step[54];
+   output[55] = step[8]  - step[55];
+   output[56] = step[7]  - step[56];
+   output[57] = step[6]  - step[57];
+   output[58] = step[5]  - step[58];
+   output[59] = step[4]  - step[59];
+   output[60] = step[3]  - step[60];
+   output[61] = step[2]  - step[61];
+   output[62] = step[1]  - step[62];
+   output[63] = step[0]  - step[63];
+}
+
 /* ---- IADST (Asymmetric DST) ---- */
 
 static const int stbi_avif__sinpi[5] = { 0, 1321, 2482, 3344, 3803 };
@@ -8975,26 +9627,35 @@ static void stbi_avif__av1_iidentity32(const int *input, int *output)
    int i;
    for (i = 0; i < 32; ++i) output[i] = input[i] * 4;
 }
+static void stbi_avif__av1_iidentity64(const int *input, int *output)
+{
+   int i;
+   for (i = 0; i < 64; ++i)
+      output[i] = (int)(((long)STBI_AVIF_NEW_SQRT2 * 4 * input[i] + (1L << (STBI_AVIF_NEW_SQRT2_BITS-1))) >> STBI_AVIF_NEW_SQRT2_BITS);
+}
 
 /*
  * 2D inverse transform: row transform then column transform.
  * Input: coefficients in scan order (already descanned to 2D).
  * Output: residual block.
  */
-/* Rectangular 2D inverse transform. txw = width in pixels (4,8,16,32),
-   txh = height in pixels (4,8,16,32).
+/* Rectangular 2D inverse transform. txw = width in pixels (4,8,16,32,64),
+   txh = height in pixels (4,8,16,32,64).
    Coefficients are laid out as coeffs[row * txw + col], row in [0,txh), col in [0,txw).
    tx_type selects sub-transforms for rows/columns.
 */
 static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int txh, int tx_type)
 {
-   int buf[32];
-   int temp[32 * 32];
+   int buf[64];
+   int *temp;
    int i, j;
    int row_shift;
    void (*row_fn)(const int *, int *);
    void (*col_fn)(const int *, int *);
    int ud_flip = 0, lr_flip = 0;
+
+   temp = (int *)STBI_AVIF_MALLOC((size_t)(txw * txh) * sizeof(int));
+   if (!temp) return;
 
    /* tx_type: 0=DCT_DCT, 1=ADST_DCT, 2=DCT_ADST, 3=ADST_ADST,
     * 4=FLIPADST_DCT, 5=DCT_FLIPADST, 6=FLIPADST_FLIPADST,
@@ -9005,20 +9666,22 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
          if (txw <= 4)       row_fn = stbi_avif__av1_iadst4;
          else if (txw <= 8)  row_fn = stbi_avif__av1_iadst8;
          else if (txw <= 16) row_fn = stbi_avif__av1_iadst16;
-         else                row_fn = stbi_avif__av1_idct32;
+         else                row_fn = stbi_avif__av1_idct32; /* ADST max 16; fallback */
          if (tx_type == 5 || tx_type == 7) lr_flip = 1;
          break;
       case 9: case 10:
          if (txw <= 4)       row_fn = stbi_avif__av1_iidentity4;
          else if (txw <= 8)  row_fn = stbi_avif__av1_iidentity8;
          else if (txw <= 16) row_fn = stbi_avif__av1_iidentity16;
-         else                row_fn = stbi_avif__av1_iidentity32;
+         else if (txw <= 32) row_fn = stbi_avif__av1_iidentity32;
+         else                row_fn = stbi_avif__av1_iidentity64;
          break;
       default:
          if (txw <= 4)       row_fn = stbi_avif__av1_idct4;
          else if (txw <= 8)  row_fn = stbi_avif__av1_idct8;
          else if (txw <= 16) row_fn = stbi_avif__av1_idct16;
-         else                row_fn = stbi_avif__av1_idct32;
+         else if (txw <= 32) row_fn = stbi_avif__av1_idct32;
+         else                row_fn = stbi_avif__av1_idct64;
          break;
    }
    /* Column transform (vertical, operates on txh-point data) */
@@ -9027,20 +9690,22 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
          if (txh <= 4)       col_fn = stbi_avif__av1_iadst4;
          else if (txh <= 8)  col_fn = stbi_avif__av1_iadst8;
          else if (txh <= 16) col_fn = stbi_avif__av1_iadst16;
-         else                col_fn = stbi_avif__av1_idct32;
+         else                col_fn = stbi_avif__av1_idct32; /* ADST max 16; fallback */
          if (tx_type == 4 || tx_type == 8) ud_flip = 1;
          break;
       case 9: case 11:
          if (txh <= 4)       col_fn = stbi_avif__av1_iidentity4;
          else if (txh <= 8)  col_fn = stbi_avif__av1_iidentity8;
          else if (txh <= 16) col_fn = stbi_avif__av1_iidentity16;
-         else                col_fn = stbi_avif__av1_iidentity32;
+         else if (txh <= 32) col_fn = stbi_avif__av1_iidentity32;
+         else                col_fn = stbi_avif__av1_iidentity64;
          break;
       default:
          if (txh <= 4)       col_fn = stbi_avif__av1_idct4;
          else if (txh <= 8)  col_fn = stbi_avif__av1_idct8;
          else if (txh <= 16) col_fn = stbi_avif__av1_idct16;
-         else                col_fn = stbi_avif__av1_idct32;
+         else if (txh <= 32) col_fn = stbi_avif__av1_idct32;
+         else                col_fn = stbi_avif__av1_idct64;
          break;
    }
 
@@ -9049,7 +9714,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    {
       int lw = 0, lh = 0, t = txw; while (t > 1) { ++lw; t >>= 1; }
       t = txh; while (t > 1) { ++lh; t >>= 1; }
-      /* sum of log2(w)+log2(h): 4→0,5→0,6→1,7→1,8→2,9→1,10→2 */
+      /* sum of log2(w)+log2(h): 4→0,5→0,6→1,7→1,8→2,9→1,10→2,11→1,12→2 */
       switch (lw + lh) {
          case 4: row_shift = 0; break;
          case 5: row_shift = 0; break;
@@ -9066,7 +9731,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
       /* Row transforms: for each row i of the txh×txw coeff block,
          read txw values, apply rect2 scale if needed, then txw-point row transform */
       for (i = 0; i < txh; ++i) {
-         int out[32];
+         int out[64];
          if (is_rect2) {
             for (j = 0; j < txw; ++j) buf[j] = (coeffs[i * txw + j] * 181 + 128) >> 8;
          } else {
@@ -9083,7 +9748,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
 
    /* Column transforms: for each column j (0..txw-1), apply txh-point col transform */
    for (j = 0; j < txw; ++j) {
-      int out[32];
+      int out[64];
       int src_col = lr_flip ? (txw - 1 - j) : j;
       for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
       col_fn(buf, out);
@@ -9093,6 +9758,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
          for (i = 0; i < txh; ++i) coeffs[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[i], 4);
       }
    }
+   STBI_AVIF_FREE(temp);
 }
 
 static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type)
@@ -9458,14 +10124,17 @@ static int stbi_avif__av1_read_coeffs(
 
 /*
  * Reconstruct a transform block: inverse transform + add to prediction plane.
- * txw, txh: actual TX dimensions in pixels (already capped at 32).
+ * txw, txh: actual TX dimensions in pixels (4..64).
+ * coeff_w, coeff_h: dimensions of the coefficient grid (min(txw,32), min(txh,32) per AV1 spec).
+ * For TX_64X64, only the top-left 32×32 coefficients can be non-zero.
  */
 static void stbi_avif__av1_reconstruct_tx_block(
    unsigned short *plane, unsigned int stride,
    unsigned int plane_w, unsigned int plane_h,
    unsigned int bx, unsigned int by,
    unsigned int txw, unsigned int txh,
-   int *coeffs, int tx_type,
+   int *coeffs, unsigned int coeff_w, unsigned int coeff_h,
+   int tx_type,
    unsigned int bit_depth)
 {
    unsigned int x, y;
@@ -9473,18 +10142,35 @@ static void stbi_avif__av1_reconstruct_tx_block(
    if ((unsigned int)w > plane_w - bx) w = (int)(plane_w - bx);
    if ((unsigned int)h > plane_h - by) h = (int)(plane_h - by);
 
-   /* Inverse transform in place */
-   stbi_avif__av1_inverse_transform_2d_rect(coeffs, (int)txw, (int)txh, tx_type);
+   /* If TX dimensions exceed coefficient dimensions (64-pt transforms),
+    * expand coefficients into a full-size buffer with zero-padding. */
+   if (txw > coeff_w || txh > coeff_h) {
+      int *big = (int *)STBI_AVIF_MALLOC((size_t)(txw * txh) * sizeof(int));
+      if (big) {
+         memset(big, 0, (size_t)(txw * txh) * sizeof(int));
+         for (y = 0; y < coeff_h; ++y)
+            memcpy(big + y * txw, coeffs + y * coeff_w, coeff_w * sizeof(int));
+         stbi_avif__av1_inverse_transform_2d_rect(big, (int)txw, (int)txh, tx_type);
+         for (y = 0; y < (unsigned int)h; ++y) {
+            for (x = 0; x < (unsigned int)w; ++x) {
+               int pred = (int)plane[(by + y) * stride + (bx + x)];
+               int res  = big[y * txw + x];
+               plane[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(pred + res, bit_depth);
+            }
+         }
+         STBI_AVIF_FREE(big);
+      }
+   } else {
+      /* Inverse transform in place */
+      stbi_avif__av1_inverse_transform_2d_rect(coeffs, (int)txw, (int)txh, tx_type);
 
-
-   /* Add residual to prediction */
-   for (y = 0; y < (unsigned int)h; ++y)
-   {
-      for (x = 0; x < (unsigned int)w; ++x)
-      {
-         int pred = (int)plane[(by + y) * stride + (bx + x)];
-         int res  = coeffs[y * (int)txw + x];
-         plane[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(pred + res, bit_depth);
+      /* Add residual to prediction */
+      for (y = 0; y < (unsigned int)h; ++y) {
+         for (x = 0; x < (unsigned int)w; ++x) {
+            int pred = (int)plane[(by + y) * stride + (bx + x)];
+            int res  = coeffs[y * (int)txw + x];
+            plane[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(pred + res, bit_depth);
+         }
       }
    }
 }
@@ -9518,8 +10204,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    unsigned int tx_size;      /* square tx index 0..3 (for CDF table index) */
    unsigned int tx_split[2];  /* tx split bitmask depth0/depth1 */
    unsigned int max_tx_log2w = 0, max_tx_log2h = 0; /* max TX dims for block */
-   unsigned int tx_log2w;     /* actual tx width  in log2 pixels: 0=4,1=8,2=16,3=32 */
-   unsigned int tx_log2h;     /* actual tx height in log2 pixels: 0=4,1=8,2=16,3=32 */
+   unsigned int tx_log2w;     /* actual tx width  in log2 pixels: 0=4,1=8,2=16,3=32,4=64 */
+   unsigned int tx_log2h;     /* actual tx height in log2 pixels: 0=4,1=8,2=16,3=32,4=64 */
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_tx_szw, uv_tx_szh, uv_mode_raw;
    int cfl_alpha_u, cfl_alpha_v;
@@ -10188,7 +10874,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   }
                }
                eob = stbi_avif__av1_read_coeffs_after_skip(ctx, 0, tx2dszctx, tx_ctx, tx_type_actual,
-                  (int)tx_w, (int)tx_h, coeffs, ctx->dc_qstep_y, ctx->ac_qstep_y,
+                  (int)(tx_w <= 32u ? tx_w : 32u), (int)(tx_h <= 32u ? tx_h : 32u),
+                  coeffs, ctx->dc_qstep_y, ctx->ac_qstep_y,
                   dc_sign_ctx_y, &cul_level);
                /* Update entropy context with cul_level */
                for (ti = 0; ti < tx_w_mi && mi_tx_col + ti < ctx->mi_cols; ti++)
@@ -10199,6 +10886,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   stbi_avif__av1_reconstruct_tx_block(ctx->planes->y, ctx->planes->width,
                      ctx->planes->width, ctx->planes->height,
                      px + tx_col, py + tx_row, tx_w, tx_h, coeffs,
+                     tx_w <= 32u ? tx_w : 32u, tx_h <= 32u ? tx_h : 32u,
                      tx_type_actual, ctx->planes->bit_depth);
                }
             } else {
@@ -10290,7 +10978,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      stbi_avif__av1_reconstruct_tx_block(plane_buf, ctx->planes->cw,
                         ctx->planes->cw, ctx->planes->ch,
                         cpx + uv_tx_col, cpy + uv_tx_row, uv_tx_szw, uv_tx_szh,
-                        coeffs, 0, ctx->planes->bit_depth);
+                        coeffs, uv_tx_szw, uv_tx_szh,
+                        0, ctx->planes->bit_depth);
                   }
                }
             }
@@ -12221,6 +12910,55 @@ static int stbi_avif__av1_apply_superres(stbi_avif__av1_planes *p,
  * =============================================================================
  */
 
+/*
+ * Reset all CDF tables in the decode context to default values.
+ * Per AV1 spec §7.4.2: each tile starts with default CDFs unless
+ * CDF update is propagated from a previous tile. For the base
+ * implementation, all tiles use default CDFs to ensure correct
+ * multi-tile decoding.
+ */
+static void stbi_avif__av1_reset_cdfs(stbi_avif__av1_decode_ctx *ctx, int q_ctx)
+{
+   memcpy(ctx->partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
+   memcpy(ctx->partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
+   memcpy(ctx->kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
+   memcpy(ctx->uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
+   memcpy(ctx->uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
+   memcpy(ctx->angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
+   memcpy(ctx->intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
+   memcpy(ctx->intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
+   memcpy(ctx->skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
+   memcpy(ctx->txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
+   memcpy(ctx->cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
+   memcpy(ctx->cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
+   memcpy(ctx->tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
+   memcpy(ctx->palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
+   memcpy(ctx->palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
+   memcpy(ctx->palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
+   memcpy(ctx->palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
+   memcpy(ctx->palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
+   memcpy(ctx->palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
+   memcpy(ctx->filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
+   memcpy(ctx->filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
+   memcpy(ctx->lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
+   memcpy(ctx->lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
+   memcpy(ctx->lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
+
+   memcpy(ctx->txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx->txb_skip_cdf));
+   memcpy(ctx->dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx->dc_sign_cdf));
+   memcpy(ctx->eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx->eob_extra_cdf));
+   memcpy(ctx->eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx->eob_multi16_cdf));
+   memcpy(ctx->eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx->eob_multi32_cdf));
+   memcpy(ctx->eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx->eob_multi64_cdf));
+   memcpy(ctx->eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx->eob_multi128_cdf));
+   memcpy(ctx->eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx->eob_multi256_cdf));
+   memcpy(ctx->eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx->eob_multi512_cdf));
+   memcpy(ctx->eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx->eob_multi1024_cdf));
+   memcpy(ctx->coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx->coeff_base_eob_cdf));
+   memcpy(ctx->coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx->coeff_base_cdf));
+   memcpy(ctx->coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx->coeff_br_cdf));
+}
+
 static unsigned char *stbi_avif__av1_decode(
    const unsigned char *tile_group_data, size_t tile_group_size,
    const stbi_avif__av1_sequence_header *seq,
@@ -12259,44 +12997,7 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
    ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
 
-   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
-   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
-   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
-   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
-   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
-   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
-   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
-   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
-   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
-   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
-   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
-   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
-   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
-   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
-   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
-   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
-   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
-   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
-   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
-   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
-   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
-   memcpy(ctx.lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
-   memcpy(ctx.lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
-   memcpy(ctx.lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
-
-   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
-   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
-   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
-   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
-   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
-   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
-   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
-   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
-   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
-   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
-   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
-   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
-   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+   stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
 
    if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
       return NULL;
@@ -12478,6 +13179,14 @@ static unsigned char *stbi_avif__av1_decode(
       memset(ctx.above_tx_intra, -1, ctx.mi_cols);
       memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
 
+      /* Per AV1 spec: reset CDFs to defaults at each tile start */
+      stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
+      memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+      memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+      memset(ctx.above_skip, 0, ctx.mi_cols);
+
       if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
                                       sb_col_start, sb_col_end)) {
          STBI_AVIF_FREE(ctx.above_modes); STBI_AVIF_FREE(ctx.left_modes);
@@ -12572,44 +13281,7 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
    ctx.dc_qstep_v = stbi_avif__av1_dc_qlookup_value(seq->bit_depth, qidx_v_dc);
    ctx.ac_qstep_v = stbi_avif__av1_ac_qlookup_value(seq->bit_depth, qidx_v_ac);
 
-   memcpy(ctx.partition_cdf, stbi_avif__av1_partition_cdf, sizeof(stbi_avif__av1_partition_cdf));
-   memcpy(ctx.partition4_cdf, stbi_avif__av1_partition4_cdf, sizeof(stbi_avif__av1_partition4_cdf));
-   memcpy(ctx.kf_y_mode_cdf, stbi_avif__av1_kf_y_mode_cdf, sizeof(stbi_avif__av1_kf_y_mode_cdf));
-   memcpy(ctx.uv_mode_cdf_no_cfl, stbi_avif__av1_uv_mode_cdf_no_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_no_cfl));
-   memcpy(ctx.uv_mode_cdf_cfl, stbi_avif__av1_uv_mode_cdf_cfl, sizeof(stbi_avif__av1_uv_mode_cdf_cfl));
-   memcpy(ctx.angle_delta_cdf, stbi_avif__av1_angle_delta_cdf, sizeof(stbi_avif__av1_angle_delta_cdf));
-   memcpy(ctx.intra_tx_cdf_set1, stbi_avif__av1_intra_tx_cdf_set1, sizeof(stbi_avif__av1_intra_tx_cdf_set1));
-   memcpy(ctx.intra_tx_cdf_set2, stbi_avif__av1_intra_tx_cdf_set2, sizeof(stbi_avif__av1_intra_tx_cdf_set2));
-   memcpy(ctx.skip_cdf, stbi_avif__av1_skip_cdf, sizeof(stbi_avif__av1_skip_cdf));
-   memcpy(ctx.txfm_partition_cdf, stbi_avif__av1_txfm_partition_cdf, sizeof(stbi_avif__av1_txfm_partition_cdf));
-   memcpy(ctx.cfl_sign_cdf, stbi_avif__av1_cfl_sign_cdf, sizeof(stbi_avif__av1_cfl_sign_cdf));
-   memcpy(ctx.cfl_alpha_cdf, stbi_avif__av1_cfl_alpha_cdf, sizeof(stbi_avif__av1_cfl_alpha_cdf));
-   memcpy(ctx.tx_size_cdf, stbi_avif__av1_tx_size_cdf, sizeof(stbi_avif__av1_tx_size_cdf));
-   memcpy(ctx.palette_y_mode_cdf, stbi_avif__av1_palette_y_mode_cdf, sizeof(stbi_avif__av1_palette_y_mode_cdf));
-   memcpy(ctx.palette_uv_mode_cdf, stbi_avif__av1_palette_uv_mode_cdf, sizeof(stbi_avif__av1_palette_uv_mode_cdf));
-   memcpy(ctx.palette_y_size_cdf, stbi_avif__av1_palette_y_size_cdf, sizeof(stbi_avif__av1_palette_y_size_cdf));
-   memcpy(ctx.palette_uv_size_cdf, stbi_avif__av1_palette_uv_size_cdf, sizeof(stbi_avif__av1_palette_uv_size_cdf));
-   memcpy(ctx.palette_y_color_index_cdf, stbi_avif__av1_palette_y_color_index_cdf, sizeof(stbi_avif__av1_palette_y_color_index_cdf));
-   memcpy(ctx.palette_uv_color_index_cdf, stbi_avif__av1_palette_uv_color_index_cdf, sizeof(stbi_avif__av1_palette_uv_color_index_cdf));
-   memcpy(ctx.filter_intra_cdfs, stbi_avif__av1_filter_intra_cdfs, sizeof(stbi_avif__av1_filter_intra_cdfs));
-   memcpy(ctx.filter_intra_mode_cdf, stbi_avif__av1_filter_intra_mode_cdf, sizeof(stbi_avif__av1_filter_intra_mode_cdf));
-   memcpy(ctx.lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
-   memcpy(ctx.lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
-   memcpy(ctx.lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
-
-   memcpy(ctx.txb_skip_cdf, stbi_avif__av1_txb_skip_cdf[q_ctx], sizeof(ctx.txb_skip_cdf));
-   memcpy(ctx.dc_sign_cdf, stbi_avif__av1_dc_sign_cdf[q_ctx], sizeof(ctx.dc_sign_cdf));
-   memcpy(ctx.eob_extra_cdf, stbi_avif__av1_eob_extra_cdf[q_ctx], sizeof(ctx.eob_extra_cdf));
-   memcpy(ctx.eob_multi16_cdf, stbi_avif__av1_eob_multi16_cdf[q_ctx], sizeof(ctx.eob_multi16_cdf));
-   memcpy(ctx.eob_multi32_cdf, stbi_avif__av1_eob_multi32_cdf[q_ctx], sizeof(ctx.eob_multi32_cdf));
-   memcpy(ctx.eob_multi64_cdf, stbi_avif__av1_eob_multi64_cdf[q_ctx], sizeof(ctx.eob_multi64_cdf));
-   memcpy(ctx.eob_multi128_cdf, stbi_avif__av1_eob_multi128_cdf[q_ctx], sizeof(ctx.eob_multi128_cdf));
-   memcpy(ctx.eob_multi256_cdf, stbi_avif__av1_eob_multi256_cdf[q_ctx], sizeof(ctx.eob_multi256_cdf));
-   memcpy(ctx.eob_multi512_cdf, stbi_avif__av1_eob_multi512_cdf[q_ctx], sizeof(ctx.eob_multi512_cdf));
-   memcpy(ctx.eob_multi1024_cdf, stbi_avif__av1_eob_multi1024_cdf[q_ctx], sizeof(ctx.eob_multi1024_cdf));
-   memcpy(ctx.coeff_base_eob_cdf, stbi_avif__av1_coeff_base_eob_cdf[q_ctx], sizeof(ctx.coeff_base_eob_cdf));
-   memcpy(ctx.coeff_base_cdf, stbi_avif__av1_coeff_base_cdf[q_ctx], sizeof(ctx.coeff_base_cdf));
-   memcpy(ctx.coeff_br_cdf, stbi_avif__av1_coeff_br_cdf[q_ctx], sizeof(ctx.coeff_br_cdf));
+   stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
 
    if (!stbi_avif__av1_alloc_planes(&planes, seq, fhdr))
       return NULL;
@@ -12782,6 +13454,14 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
       memset(ctx.left_modes, 0, ctx.mi_rows);
       memset(ctx.above_tx_intra, -1, ctx.mi_cols);
       memset(ctx.left_tx_intra, -1, ctx.mi_rows * sizeof(*ctx.left_tx_intra));
+
+      /* Per AV1 spec: reset CDFs to defaults at each tile start */
+      stbi_avif__av1_reset_cdfs(&ctx, q_ctx);
+      memset(ctx.above_entropy[0], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[1], 0, ctx.mi_cols);
+      memset(ctx.above_entropy[2], 0, ctx.mi_cols);
+      memset(ctx.above_partition_ctx, 0, ctx.mi_cols);
+      memset(ctx.above_skip, 0, ctx.mi_cols);
 
       if (!stbi_avif__av1_decode_tile(&ctx, sb_row_start, sb_row_end,
                                       sb_col_start, sb_col_end)) {
