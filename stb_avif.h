@@ -173,6 +173,17 @@ typedef struct
    int enable_superres;
    int enable_cdef;
    int enable_restoration;
+   /* Non-reduced header fields */
+   int frame_id_numbers_present;
+   int delta_frame_id_length;           /* delta_frame_id_length_minus_2 + 2 */
+   int additional_frame_id_length;      /* additional_frame_id_length_minus_1 + 1 */
+   int seq_force_screen_content_tools;  /* 0, 1, or 2 (SELECT=2) */
+   int seq_force_integer_mv;            /* 0, 1, or 2 (SELECT=2) */
+   int enable_order_hint;
+   int order_hint_bits;                 /* order_hint_bits_minus_1 + 1 */
+   int decoder_model_info_present;
+   int buffer_delay_length;             /* buffer_delay_length_minus_1 + 1 */
+   int frame_presentation_time_length;  /* frame_presentation_time_length_minus_1 + 1 */
 } stbi_avif__av1_sequence_header;
 
 typedef struct
@@ -553,6 +564,34 @@ static int stbi_avif__bit_read_su(stbi_avif__bit_reader *reader,
    return 1;
 }
 
+/* AV1 uvlc() variable-length code (spec §4.10.3). */
+static int stbi_avif__bit_read_uvlc(stbi_avif__bit_reader *reader, unsigned long *value)
+{
+   unsigned int leading_zeros = 0;
+   unsigned int bit;
+   unsigned long v;
+
+   for (;;) {
+      if (!stbi_avif__bit_read(reader, &bit))
+         return 0;
+      if (bit)
+         break;
+      ++leading_zeros;
+      if (leading_zeros >= 32u) {
+         *value = 0xFFFFFFFFul; /* (1<<32)-1 */
+         return 1;
+      }
+   }
+   if (leading_zeros == 0u) {
+      *value = 0;
+      return 1;
+   }
+   if (!stbi_avif__bit_read_bits(reader, leading_zeros, &v))
+      return 0;
+   *value = v + (1ul << leading_zeros) - 1u;
+   return 1;
+}
+
 static int stbi_avif__av1_read_le_bytes(const unsigned char *data, size_t size,
                                         size_t offset, unsigned int byte_count,
                                         unsigned int *value)
@@ -572,104 +611,42 @@ static int stbi_avif__av1_read_le_bytes(const unsigned char *data, size_t size,
    return 1;
 }
 
-static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_t size, stbi_avif__av1_sequence_header *header)
+/* Parse color_config() shared between reduced and non-reduced paths.
+ * AV1 spec §5.5.2. */
+static int stbi_avif__parse_av1_color_config(stbi_avif__bit_reader *bits, stbi_avif__av1_sequence_header *header)
 {
-   stbi_avif__bit_reader bits;
-   unsigned long value;
-   unsigned long frame_width_bits_minus_1;
-   unsigned long frame_height_bits_minus_1;
    int high_bitdepth;
    int twelve_bit;
    int color_description_present_flag;
-   int flag;
+   unsigned long value;
 
-   memset(header, 0, sizeof(*header));
-   stbi_avif__bit_reader_init(&bits, data, size);
-
-   if (!stbi_avif__bit_read_bits(&bits, 3, &value))
-      return 0;
-   header->seq_profile = (unsigned int)value;
-   if (!stbi_avif__bit_read_flag(&bits, &header->still_picture))
-      return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->reduced_still_picture_header))
-      return 0;
-
-   if (!header->still_picture)
-      return stbi_avif__fail("only AV1 still-picture sequences are supported");
-   if (!header->reduced_still_picture_header)
-      return stbi_avif__fail("only reduced still-picture AV1 headers are supported");
-
-   if (!stbi_avif__bit_read_bits(&bits, 5, &value))
-      return 0;
-
-   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_width_bits_minus_1))
-      return 0;
-   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_height_bits_minus_1))
-      return 0;
-
-   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_width_bits_minus_1 + 1u, &value))
-      return 0;
-   header->max_frame_width = (unsigned int)value + 1u;
-   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_height_bits_minus_1 + 1u, &value))
-      return 0;
-   header->max_frame_height = (unsigned int)value + 1u;
-
-   /*
-    * AV1 spec §5.5.1 (after max_frame_height_minus_1):
-    *
-    * For reduced_still_picture_header = 1:
-    *   use_128x128_superblock         f(1)   ← read and store
-    *   enable_filter_intra            f(1)   ← skip
-    *   enable_intra_edge_filter       f(1)   ← skip
-    *   [if !reduced: inter tools block — ABSENT here]
-    *   enable_superres                f(1)   ← skip
-    *   enable_cdef                    f(1)   ← skip
-    *   enable_restoration             f(1)   ← skip
-    *   color_config() follows with high_bitdepth...
-    */
-   if (!stbi_avif__bit_read_flag(&bits, &header->use_128x128_superblock))
-      return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_filter_intra */
-   header->enable_filter_intra = flag;
-   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_intra_edge_filter */
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_superres)) return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_cdef)) return 0;
-   if (!stbi_avif__bit_read_flag(&bits, &header->enable_restoration)) return 0;
-
-   if (!stbi_avif__bit_read_flag(&bits, &high_bitdepth))
+   if (!stbi_avif__bit_read_flag(bits, &high_bitdepth))
       return 0;
    twelve_bit = 0;
    if (header->seq_profile == 2u && high_bitdepth)
    {
-      if (!stbi_avif__bit_read_flag(&bits, &twelve_bit))
+      if (!stbi_avif__bit_read_flag(bits, &twelve_bit))
          return 0;
    }
    header->bit_depth = twelve_bit ? 12u : (high_bitdepth ? 10u : 8u);
 
    if (header->seq_profile == 1u)
-   {
       header->monochrome = 0;
-   }
    else
    {
-      if (!stbi_avif__bit_read_flag(&bits, &header->monochrome))
+      if (!stbi_avif__bit_read_flag(bits, &header->monochrome))
          return 0;
    }
-   if (header->monochrome)
-      return stbi_avif__fail("monochrome AV1 content is not supported");
 
-   if (!stbi_avif__bit_read_flag(&bits, &color_description_present_flag))
+   if (!stbi_avif__bit_read_flag(bits, &color_description_present_flag))
       return 0;
    if (color_description_present_flag)
    {
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->color_primaries = (unsigned int)value;
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->transfer_characteristics = (unsigned int)value;
-      if (!stbi_avif__bit_read_bits(&bits, 8, &value))
-         return 0;
+      if (!stbi_avif__bit_read_bits(bits, 8, &value)) return 0;
       header->matrix_coefficients = (unsigned int)value;
    }
    else
@@ -677,6 +654,18 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
       header->color_primaries = 2u;
       header->transfer_characteristics = 2u;
       header->matrix_coefficients = 2u;
+   }
+
+   /* Monochrome: read color_range, set subsampling defaults, return early (AV1 spec §5.5.2) */
+   if (header->monochrome)
+   {
+      if (!stbi_avif__bit_read_flag(bits, &header->color_range))
+         return 0;
+      header->subsampling_x = 1;
+      header->subsampling_y = 1;
+      header->chroma_sample_position = 0u;
+      header->separate_uv_delta_q = 0;
+      return 1;
    }
 
    if (color_description_present_flag &&
@@ -691,7 +680,7 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
    }
    else
    {
-      if (!stbi_avif__bit_read_flag(&bits, &header->color_range))
+      if (!stbi_avif__bit_read_flag(bits, &header->color_range))
          return 0;
       if (header->seq_profile == 0u)
       {
@@ -705,29 +694,258 @@ static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_
       }
       else
       {
-         header->subsampling_x = 1;
-         header->subsampling_y = 0;
+         if (header->bit_depth == 12u) {
+            if (!stbi_avif__bit_read_flag(bits, &header->subsampling_x))
+               return 0;
+            if (header->subsampling_x) {
+               if (!stbi_avif__bit_read_flag(bits, &header->subsampling_y))
+                  return 0;
+            } else {
+               header->subsampling_y = 0;
+            }
+         } else {
+            header->subsampling_x = 1;
+            header->subsampling_y = 0;
+         }
       }
 
       if (header->subsampling_x && header->subsampling_y)
       {
-         if (!stbi_avif__bit_read_bits(&bits, 2, &value))
+         if (!stbi_avif__bit_read_bits(bits, 2, &value))
             return 0;
          header->chroma_sample_position = (unsigned int)value;
       }
    }
 
-   if (!stbi_avif__bit_read_flag(&bits, &header->separate_uv_delta_q))
+   if (!stbi_avif__bit_read_flag(bits, &header->separate_uv_delta_q))
       return 0;
+
+   return 1;
+}
+
+static int stbi_avif__parse_av1_sequence_header(const unsigned char *data, size_t size, stbi_avif__av1_sequence_header *header)
+{
+   stbi_avif__bit_reader bits;
+   unsigned long value;
+   unsigned long frame_width_bits_minus_1;
+   unsigned long frame_height_bits_minus_1;
+   int flag;
+
+   memset(header, 0, sizeof(*header));
+   stbi_avif__bit_reader_init(&bits, data, size);
+
+   if (!stbi_avif__bit_read_bits(&bits, 3, &value))
+      return 0;
+   header->seq_profile = (unsigned int)value;
+   if (!stbi_avif__bit_read_flag(&bits, &header->still_picture))
+      return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->reduced_still_picture_header))
+      return 0;
+
+   if (header->reduced_still_picture_header)
+   {
+      /* Reduced still-picture path (original code path).
+       * timing_info_present = 0, operating_points_cnt_minus_1 = 0,
+       * seq_level_idx[0] is the only operating point. */
+      if (!stbi_avif__bit_read_bits(&bits, 5, &value))
+         return 0;
+      /* seq_level_idx[0] — ignored, just consumed */
+
+      header->seq_force_screen_content_tools = 2; /* SELECT */
+      header->seq_force_integer_mv = 2;           /* SELECT */
+      header->decoder_model_info_present = 0;
+      header->frame_id_numbers_present = 0;
+      header->enable_order_hint = 0;
+      header->order_hint_bits = 0;
+   }
+   else
+   {
+      /* Full (non-reduced) sequence header (AV1 spec §5.5.1) */
+      int timing_info_present;
+      int initial_display_delay_present = 0;
+      unsigned long op_cnt_minus_1;
+      unsigned int i;
+
+      if (!stbi_avif__bit_read_flag(&bits, &timing_info_present))
+         return 0;
+      if (timing_info_present)
+      {
+         /* timing_info() */
+         int equal_picture_interval;
+         if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* num_units_in_display_tick */
+         if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* time_scale */
+         if (!stbi_avif__bit_read_flag(&bits, &equal_picture_interval)) return 0;
+         if (equal_picture_interval)
+         {
+            if (!stbi_avif__bit_read_uvlc(&bits, &value)) return 0; /* num_ticks_per_picture_minus_1 */
+         }
+
+         /* decoder_model_info_present_flag */
+         if (!stbi_avif__bit_read_flag(&bits, &header->decoder_model_info_present))
+            return 0;
+         if (header->decoder_model_info_present)
+         {
+            unsigned long bdl, fptl;
+            if (!stbi_avif__bit_read_bits(&bits, 5, &bdl)) return 0;
+            header->buffer_delay_length = (int)bdl + 1;
+            if (!stbi_avif__bit_read_bits(&bits, 32, &value)) return 0; /* num_units_in_decoding_tick */
+            if (!stbi_avif__bit_read_bits(&bits, 5, &value)) return 0;  /* buffer_removal_time_length_minus_1 */
+            if (!stbi_avif__bit_read_bits(&bits, 5, &fptl)) return 0;
+            header->frame_presentation_time_length = (int)fptl + 1;
+         }
+      }
+      else
+      {
+         header->decoder_model_info_present = 0;
+      }
+
+      if (!stbi_avif__bit_read_flag(&bits, &initial_display_delay_present))
+         return 0;
+      if (!stbi_avif__bit_read_bits(&bits, 5, &op_cnt_minus_1))
+         return 0;
+
+      for (i = 0; i <= (unsigned int)op_cnt_minus_1; ++i)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 12, &value)) return 0; /* operating_point_idc */
+         if (!stbi_avif__bit_read_bits(&bits, 5, &value))  return 0; /* seq_level_idx */
+         if ((unsigned int)value > 7u)
+         {
+            if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* seq_tier */
+         }
+         if (header->decoder_model_info_present)
+         {
+            int dmp;
+            if (!stbi_avif__bit_read_flag(&bits, &dmp)) return 0;
+            if (dmp)
+            {
+               unsigned int n = (unsigned int)header->buffer_delay_length;
+               if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* decoder_buffer_delay */
+               if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* encoder_buffer_delay */
+               if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* low_delay_mode_flag */
+            }
+         }
+         if (initial_display_delay_present)
+         {
+            int iddp;
+            if (!stbi_avif__bit_read_flag(&bits, &iddp)) return 0;
+            if (iddp)
+            {
+               if (!stbi_avif__bit_read_bits(&bits, 4, &value)) return 0; /* initial_display_delay_minus_1 */
+            }
+         }
+      }
+   }
+
+   /* Frame width/height bits — shared by reduced and non-reduced paths */
+   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_width_bits_minus_1))
+      return 0;
+   if (!stbi_avif__bit_read_bits(&bits, 4, &frame_height_bits_minus_1))
+      return 0;
+
+   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_width_bits_minus_1 + 1u, &value))
+      return 0;
+   header->max_frame_width = (unsigned int)value + 1u;
+   if (!stbi_avif__bit_read_bits(&bits, (unsigned int)frame_height_bits_minus_1 + 1u, &value))
+      return 0;
+   header->max_frame_height = (unsigned int)value + 1u;
+
+   /* frame_id_numbers_present_flag — only for non-reduced */
+   if (!header->reduced_still_picture_header)
+   {
+      if (!stbi_avif__bit_read_flag(&bits, &header->frame_id_numbers_present))
+         return 0;
+      if (header->frame_id_numbers_present)
+      {
+         unsigned long dfidl, afidl;
+         if (!stbi_avif__bit_read_bits(&bits, 4, &dfidl)) return 0;
+         header->delta_frame_id_length = (int)dfidl + 2;
+         if (!stbi_avif__bit_read_bits(&bits, 3, &afidl)) return 0;
+         header->additional_frame_id_length = (int)afidl + 1;
+      }
+   }
+
+   /* SB / tool flags */
+   if (!stbi_avif__bit_read_flag(&bits, &header->use_128x128_superblock))
+      return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_filter_intra */
+   header->enable_filter_intra = flag;
+   if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_intra_edge_filter */
+
+   /* Inter-frame tools — only present for non-reduced */
+   if (!header->reduced_still_picture_header)
+   {
+      int enable_interintra_compound, enable_masked_compound;
+      int enable_warped_motion, enable_dual_filter;
+
+      if (!stbi_avif__bit_read_flag(&bits, &enable_interintra_compound)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_masked_compound)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_warped_motion)) return 0;
+      if (!stbi_avif__bit_read_flag(&bits, &enable_dual_filter)) return 0;
+
+      if (!stbi_avif__bit_read_flag(&bits, &header->enable_order_hint)) return 0;
+      if (header->enable_order_hint)
+      {
+         if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_jnt_comp */
+         if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0; /* enable_ref_frame_mvs */
+      }
+
+      /* seq_force_screen_content_tools */
+      {
+         int seq_choose_screen;
+         if (!stbi_avif__bit_read_flag(&bits, &seq_choose_screen)) return 0;
+         if (seq_choose_screen)
+            header->seq_force_screen_content_tools = 2; /* SELECT */
+         else
+         {
+            if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0;
+            header->seq_force_screen_content_tools = flag;
+         }
+      }
+
+      /* seq_force_integer_mv */
+      if (header->seq_force_screen_content_tools > 0)
+      {
+         int seq_choose_integer;
+         if (!stbi_avif__bit_read_flag(&bits, &seq_choose_integer)) return 0;
+         if (seq_choose_integer)
+            header->seq_force_integer_mv = 2; /* SELECT */
+         else
+         {
+            if (!stbi_avif__bit_read_flag(&bits, &flag)) return 0;
+            header->seq_force_integer_mv = flag;
+         }
+      }
+      else
+      {
+         header->seq_force_integer_mv = 2; /* SELECT */
+      }
+
+      if (header->enable_order_hint)
+      {
+         unsigned long ohb;
+         if (!stbi_avif__bit_read_bits(&bits, 3, &ohb)) return 0;
+         header->order_hint_bits = (int)ohb + 1;
+      }
+   }
+
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_superres)) return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_cdef)) return 0;
+   if (!stbi_avif__bit_read_flag(&bits, &header->enable_restoration)) return 0;
+
+   /* color_config() */
+   if (!stbi_avif__parse_av1_color_config(&bits, header))
+      return 0;
+
+   /* film_grain_params_present — read AFTER color_config (AV1 spec §5.5.1) */
    if (!stbi_avif__bit_read_flag(&bits, &header->film_grain_params_present))
       return 0;
-   if (header->film_grain_params_present)
-      return stbi_avif__fail("AV1 film grain is not supported");
 
-   if ((header->subsampling_x == 0 && header->subsampling_y == 1) ||
-       (header->subsampling_x != 0 && header->subsampling_x != 1) ||
-       (header->subsampling_y != 0 && header->subsampling_y != 1))
-      return stbi_avif__fail("unsupported AV1 chroma subsampling");
+   if (!header->monochrome) {
+      if ((header->subsampling_x == 0 && header->subsampling_y == 1) ||
+          (header->subsampling_x != 0 && header->subsampling_x != 1) ||
+          (header->subsampling_y != 0 && header->subsampling_y != 1))
+         return stbi_avif__fail("unsupported AV1 chroma subsampling");
+   }
 
    return 1;
 }
@@ -1015,6 +1233,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
    stbi_avif__bit_reader_init(&bits, data, size);
 
+   delta_q_u_dc = 0;
+   delta_q_u_ac = 0;
+   delta_q_v_dc = 0;
+   delta_q_v_ac = 0;
+
    if (seq->reduced_still_picture_header)
    {
       int disable_cdf_update;
@@ -1071,13 +1294,161 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       }
       frame->allow_intrabc = allow_intrabc;
       frame->allow_screen_content_tools = allow_screen_content_tools;
+   }
+   else
+   {
+      /* Non-reduced frame header (AV1 spec §5.9.2 uncompressed_header) */
+      int show_existing_frame;
+      int disable_cdf_update;
+      int allow_screen_content_tools;
+      int force_integer_mv_flag;
+      int frame_size_override;
 
-      /* tile_info() */
-      sb_size = seq->use_128x128_superblock ? 128u : 64u;
-      sb_cols = (frame->frame_width  + sb_size - 1u) / sb_size;
-      sb_rows = (frame->frame_height + sb_size - 1u) / sb_size;
-      max_tile_width_sb = 4096u / sb_size;
-      max_tile_area_sb  = (4096u * 2304u) / (sb_size * sb_size);
+      if (!stbi_avif__bit_read_flag(&bits, &show_existing_frame))
+         return 0;
+      if (show_existing_frame)
+         return stbi_avif__fail("show_existing_frame is not supported for AVIF");
+
+      if (!stbi_avif__bit_read_bits(&bits, 2, &value)) return 0;
+      frame->frame_type = (unsigned int)value;
+      /* For AVIF we require KEY_FRAME(0) or INTRA_ONLY(2) */
+      if (frame->frame_type != 0u && frame->frame_type != 2u)
+         return stbi_avif__fail("only KEY_FRAME and INTRA_ONLY frames are supported");
+
+      if (!stbi_avif__bit_read_flag(&bits, &frame->show_frame))
+         return 0;
+
+      /* temporal_point_info() — only if show_frame && decoder_model present */
+      if (frame->show_frame && seq->decoder_model_info_present)
+      {
+         unsigned int n = (unsigned int)seq->frame_presentation_time_length;
+         if (!stbi_avif__bit_read_bits(&bits, n, &value)) return 0; /* frame_presentation_time */
+      }
+
+      if (!frame->show_frame)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* showable_frame */
+      }
+
+      /* error_resilient_mode: implicit 1 for KEY_FRAME with show_frame, or SWITCH */
+      if (frame->frame_type == 0u && frame->show_frame)
+      {
+         /* error_resilient_mode = 1 implicitly */
+      }
+      else
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 1, &value)) return 0; /* error_resilient_mode */
+      }
+
+      /* disable_cdf_update */
+      if (!stbi_avif__bit_read_flag(&bits, &disable_cdf_update))
+         return 0;
+
+      /* allow_screen_content_tools */
+      if (seq->seq_force_screen_content_tools == 2) {
+         if (!stbi_avif__bit_read_flag(&bits, &allow_screen_content_tools))
+            return 0;
+      } else {
+         allow_screen_content_tools = seq->seq_force_screen_content_tools;
+      }
+
+      /* force_integer_mv */
+      force_integer_mv_flag = 0;
+      if (allow_screen_content_tools) {
+         if (seq->seq_force_integer_mv == 2) {
+            if (!stbi_avif__bit_read_flag(&bits, &force_integer_mv_flag))
+               return 0;
+         } else {
+            force_integer_mv_flag = seq->seq_force_integer_mv;
+         }
+      }
+
+      /* current_frame_id */
+      if (seq->frame_id_numbers_present)
+      {
+         unsigned int id_len = (unsigned int)(seq->delta_frame_id_length + seq->additional_frame_id_length);
+         if (!stbi_avif__bit_read_bits(&bits, id_len, &value)) return 0;
+      }
+
+      /* frame_size_override_flag */
+      if (frame->frame_type == 0u) {
+         /* KEY_FRAME: always read frame_size_override_flag */
+         if (!stbi_avif__bit_read_flag(&bits, &frame_size_override))
+            return 0;
+      } else {
+         frame_size_override = 0;
+         if (!stbi_avif__bit_read_flag(&bits, &frame_size_override))
+            return 0;
+      }
+
+      /* frame_size() */
+      if (frame_size_override)
+      {
+         unsigned long fw_bits = 0, fh_bits = 0;
+         /* Need frame_width_bits and frame_height_bits from seq header.
+          * These are derived from max_frame_width/height. Use ceil_log2. */
+         {
+            unsigned int mw = seq->max_frame_width;
+            unsigned int mh = seq->max_frame_height;
+            unsigned int wbits = 1, hbits = 1;
+            while ((1u << wbits) < mw) ++wbits;
+            while ((1u << hbits) < mh) ++hbits;
+            if (wbits > 16u) wbits = 16u;
+            if (hbits > 16u) hbits = 16u;
+            if (!stbi_avif__bit_read_bits(&bits, wbits, &fw_bits)) return 0;
+            frame->frame_width = (unsigned int)fw_bits + 1u;
+            if (!stbi_avif__bit_read_bits(&bits, hbits, &fh_bits)) return 0;
+            frame->frame_height = (unsigned int)fh_bits + 1u;
+         }
+      }
+      else
+      {
+         frame->frame_width = seq->max_frame_width;
+         frame->frame_height = seq->max_frame_height;
+      }
+
+      /* superres_params() */
+      if (seq->enable_superres) {
+         int use_superres;
+         if (!stbi_avif__bit_read_flag(&bits, &use_superres))
+            return 0;
+         if (use_superres) {
+            if (!stbi_avif__bit_read_bits(&bits, 3u, &value)) return 0;
+         }
+      }
+
+      /* render_size() */
+      if (!stbi_avif__bit_read_flag(&bits, &render_and_frame_size_different))
+         return 0;
+      if (render_and_frame_size_different)
+      {
+         if (!stbi_avif__bit_read_bits(&bits, 16, &value)) return 0;
+         if (!stbi_avif__bit_read_bits(&bits, 16, &value)) return 0;
+      }
+
+      /* For INTRA_ONLY: refresh_frame_flags */
+      if (frame->frame_type == 2u) {
+         if (!stbi_avif__bit_read_bits(&bits, 8, &value)) return 0; /* refresh_frame_flags */
+      }
+
+      /* allow_intrabc */
+      allow_intrabc = 0;
+      if (allow_screen_content_tools) {
+         if (!stbi_avif__bit_read_flag(&bits, &allow_intrabc))
+            return 0;
+      }
+      frame->allow_intrabc = allow_intrabc;
+      frame->allow_screen_content_tools = allow_screen_content_tools;
+   }
+
+   /* ====== Common path: tile_info() through film_grain (shared by reduced and non-reduced) ====== */
+
+   /* tile_info() */
+   sb_size = seq->use_128x128_superblock ? 128u : 64u;
+   sb_cols = (frame->frame_width  + sb_size - 1u) / sb_size;
+   sb_rows = (frame->frame_height + sb_size - 1u) / sb_size;
+   max_tile_width_sb = 4096u / sb_size;
+   max_tile_area_sb  = (4096u * 2304u) / (sb_size * sb_size);
 
       tile_cols = 0u;
       tile_rows = 0u;
@@ -1255,18 +1626,20 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
          STBI_AVIF__READ_DELTA_Q(&bits, delta_q_y_dc);
 
-         /* num_planes > 1 */
-         if (seq->separate_uv_delta_q) {
-            if (!stbi_avif__bit_read_flag(&bits, &diff_uv_delta)) return 0;
-         }
-         STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_dc);
-         STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_ac);
-         if (diff_uv_delta) {
-            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_dc);
-            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_ac);
-         } else {
-            delta_q_v_dc = delta_q_u_dc;
-            delta_q_v_ac = delta_q_u_ac;
+         /* UV delta Q only present when num_planes > 1 (not monochrome) */
+         if (!seq->monochrome) {
+            if (seq->separate_uv_delta_q) {
+               if (!stbi_avif__bit_read_flag(&bits, &diff_uv_delta)) return 0;
+            }
+            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_dc);
+            STBI_AVIF__READ_DELTA_Q(&bits, delta_q_u_ac);
+            if (diff_uv_delta) {
+               STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_dc);
+               STBI_AVIF__READ_DELTA_Q(&bits, delta_q_v_ac);
+            } else {
+               delta_q_v_dc = delta_q_u_dc;
+               delta_q_v_ac = delta_q_u_ac;
+            }
          }
 
          #undef STBI_AVIF__READ_DELTA_Q
@@ -1286,7 +1659,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          unsigned long qm_y_val, qm_u_val, qm_v_val;
          if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_y_val)) return 0;
          if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_u_val)) return 0;
-         if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_v_val)) return 0;
+         if (seq->separate_uv_delta_q) {
+            if (!stbi_avif__bit_read_bits(&bits, 4u, &qm_v_val)) return 0;
+         } else {
+            qm_v_val = qm_u_val;
+         }
          frame->qm_y = (int)qm_y_val;
          frame->qm_u = (int)qm_u_val;
          frame->qm_v = (int)qm_v_val;
@@ -1443,14 +1820,16 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          nb_cdef_strengths = 1 << frame->cdef_bits;
          for (ci = 0; ci < nb_cdef_strengths; ++ci) {
             if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* Y strength */
-            if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* UV strength */
+            if (!seq->monochrome) {
+               if (!stbi_avif__bit_read_bits(&bits, 6u, &value)) return 0; /* UV strength */
+            }
          }
       }
       if (seq->enable_restoration && !allow_intrabc)
       {
          /* lr_params() - parse restoration filter parameters (AV1 spec §5.9.19)
           * We parse but do not apply loop restoration (not required for still-picture AVIF). */
-         int num_planes = 3; /* Y, U, V */
+         int num_planes = seq->monochrome ? 1 : 3;
          int uses_lr = 0;
          int uses_chroma_lr = 0;
          int i;
@@ -1509,11 +1888,8 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
             return stbi_avif__fail("AV1 film grain is not supported yet");
       }
 
-      frame->header_bits_consumed = bits.bit_offset;
-      return 1;
-   }
-
-   return stbi_avif__fail("non-reduced AV1 frame headers are not supported yet");
+   frame->header_bits_consumed = bits.bit_offset;
+   return 1;
 }
 
 static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, size_t size,
@@ -6938,6 +7314,7 @@ typedef struct
    int             subx;    /* horizontal chroma subsampling flag (0 or 1) */
    int             suby;    /* vertical   chroma subsampling flag (0 or 1) */
    unsigned int    bit_depth;
+   int             monochrome;
 } stbi_avif__av1_planes;
 
 static int stbi_avif__av1_alloc_planes(stbi_avif__av1_planes *planes,
@@ -6946,13 +7323,26 @@ static int stbi_avif__av1_alloc_planes(stbi_avif__av1_planes *planes,
 {
    unsigned int w  = fhdr->frame_width;
    unsigned int h  = fhdr->frame_height;
-   unsigned int cw = seq->subsampling_x ? ((w + 1u) >> 1) : w;
-   unsigned int ch = seq->subsampling_y ? ((h + 1u) >> 1) : h;
+   unsigned int cw, ch;
    size_t y_count, c_count;
 
    memset(planes, 0, sizeof(*planes));
    if (w == 0u || h == 0u)
       return stbi_avif__fail("zero frame dimensions");
+
+   planes->monochrome = seq->monochrome;
+   if (seq->monochrome)
+   {
+      /* Monochrome: no chroma planes needed. Allocate minimal 1-pixel buffers
+       * filled with mid-gray to avoid null dereferences in shared code paths. */
+      cw = 1u;
+      ch = 1u;
+   }
+   else
+   {
+      cw = seq->subsampling_x ? ((w + 1u) >> 1) : w;
+      ch = seq->subsampling_y ? ((h + 1u) >> 1) : h;
+   }
 
    y_count = (size_t)w  * (size_t)h;
    c_count = (size_t)cw * (size_t)ch;
@@ -7104,6 +7494,7 @@ typedef struct
    int                           cdef_bits;
    unsigned int                  sb_size_mi;
    int                           cdef_transmitted[4];
+   int                           monochrome;
 
    /* Adaptive CDF state */
    unsigned short  partition_cdf[5][4][11];
@@ -8926,9 +9317,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          ctx->angle_delta_cdf[y_mode - 1u], 7);
    }
 
-   /* UV mode (must be read before residual per AV1 spec) */
+   /* UV mode (must be read before residual per AV1 spec) — skip for monochrome */
    uv_mode = 0u;
-   {
+   uv_mode_raw = 0u;
+   if (!ctx->monochrome) {
       int cfl_allowed = (pw <= 32u && ph <= 32u); /* CFL only for blocks ≤ 32x32 */
       if (cpw >= 4u && cph >= 4u) {
          if (cfl_allowed)
@@ -8938,34 +9330,34 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->uv_mode_cdf_no_cfl[y_mode < 13 ? y_mode : 0], 13);
       }
-   }
 
-   /* UV angle delta */
-   if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
-      stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
+      /* UV angle delta */
+      if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
+         stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
 
-   /* CFL_PRED */
-   uv_mode_raw = uv_mode;
-   if (uv_mode == 13u) {
-      unsigned int cfl_sign_sym;
-      unsigned int sign_u;
-      unsigned int sign_v;
-      cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
-      sign_u = cfl_sign_sym / 3u;
-      sign_v = cfl_sign_sym - sign_u * 3u;
-      if (sign_u > 0u) {
-         unsigned int alpha_ctx_u = (sign_u == 2u) ? 3u + sign_v : sign_v;
-         unsigned int cfl_alpha_u_mag =
-            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16) + 1u;
-         cfl_alpha_u = (sign_u == 1u) ? -(int)cfl_alpha_u_mag : (int)cfl_alpha_u_mag;
+      /* CFL_PRED */
+      uv_mode_raw = uv_mode;
+      if (uv_mode == 13u) {
+         unsigned int cfl_sign_sym;
+         unsigned int sign_u;
+         unsigned int sign_v;
+         cfl_sign_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_sign_cdf, 8) + 1u;
+         sign_u = cfl_sign_sym / 3u;
+         sign_v = cfl_sign_sym - sign_u * 3u;
+         if (sign_u > 0u) {
+            unsigned int alpha_ctx_u = (sign_u == 2u) ? 3u + sign_v : sign_v;
+            unsigned int cfl_alpha_u_mag =
+               stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_u], 16) + 1u;
+            cfl_alpha_u = (sign_u == 1u) ? -(int)cfl_alpha_u_mag : (int)cfl_alpha_u_mag;
+         }
+         if (sign_v > 0u) {
+            unsigned int alpha_ctx_v = (sign_v == 2u) ? 3u + sign_u : sign_u;
+            unsigned int cfl_alpha_v_mag =
+               stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16) + 1u;
+            cfl_alpha_v = (sign_v == 1u) ? -(int)cfl_alpha_v_mag : (int)cfl_alpha_v_mag;
+         }
+         uv_mode = 0u; /* CFL uses DC_PRED as base for prediction */
       }
-      if (sign_v > 0u) {
-         unsigned int alpha_ctx_v = (sign_v == 2u) ? 3u + sign_u : sign_u;
-         unsigned int cfl_alpha_v_mag =
-            stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->cfl_alpha_cdf[alpha_ctx_v], 16) + 1u;
-         cfl_alpha_v = (sign_v == 1u) ? -(int)cfl_alpha_v_mag : (int)cfl_alpha_v_mag;
-      }
-      uv_mode = 0u; /* CFL uses DC_PRED as base for prediction */
    }
 
    /* Palette mode info (AV1 spec: read between CFL and TX size) */
@@ -9086,7 +9478,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
             }
          }
-         if (uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
+         if (!ctx->monochrome && uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
             unsigned int pal_uv_ctx = palette_y_size > 0 ? 1u : 0u;
             unsigned int pal_uv_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->palette_uv_mode_cdf[pal_uv_ctx], 2);
@@ -9347,8 +9739,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          px, py, pw, ph, ctx->planes->bit_depth, y_mode);
    }
 
-   /* Predict UV */
-   if (cpw > 0u && cph > 0u) {
+   /* Predict UV — skip for monochrome */
+   if (!ctx->monochrome && cpw > 0u && cph > 0u) {
       if (palette_uv_size > 0) {
          /* Fill UV from palette color map */
          unsigned int mi_r, mi_c;
@@ -9507,10 +9899,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
 
-      /* U and V residual (skip if palette or if chroma block too small for a TX).
+      /* U and V residual (skip for monochrome, palette, or if chroma block too small for a TX).
        * In 4:2:0, a 4x4 luma block maps to a 2x2 chroma block which is below
        * the minimum 4x4 TX size; those blocks are never chroma references. */
-      if (cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
+      if (!ctx->monochrome && cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_szw / 4u;
          unsigned int uv_h_mi = uv_tx_szh / 4u;
@@ -9877,6 +10269,29 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
       return NULL;
    }
 
+   /* Monochrome: R=G=B=Y, A=255 */
+   if (p->monochrome)
+   {
+      for (iy = 0; iy < h; ++iy)
+      {
+         const unsigned short *yrow = p->y + iy * w;
+         unsigned char *drow = out + iy * w * 4u;
+         for (ix = 0; ix < w; ++ix)
+         {
+            int Y;
+            if (p->bit_depth > 8u)
+               Y = (int)(yrow[ix] >> 2);
+            else
+               Y = (int)yrow[ix];
+            drow[ix * 4u + 0u] = stbi_avif__clamp_u8(Y);
+            drow[ix * 4u + 1u] = stbi_avif__clamp_u8(Y);
+            drow[ix * 4u + 2u] = stbi_avif__clamp_u8(Y);
+            drow[ix * 4u + 3u] = 255u;
+         }
+      }
+      return out;
+   }
+
    for (iy = 0; iy < h; ++iy)
    {
       const unsigned short *yrow = p->y + iy * w;
@@ -10075,6 +10490,7 @@ static unsigned char *stbi_avif__av1_decode(
    ctx.allow_screen_content_tools = fhdr->allow_screen_content_tools;
    ctx.cdef_bits = fhdr->cdef_bits;
    ctx.sb_size_mi = seq->use_128x128_superblock ? 32u : 16u;
+   ctx.monochrome = seq->monochrome;
 
    ctx.above_modes = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_cols);
    ctx.left_modes  = (unsigned char *)STBI_AVIF_MALLOC(ctx.mi_rows);
@@ -10934,7 +11350,10 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
    stbi_avif__av1_tile_group_header tile_group;
    int ok;
 
-   (void)desired_channels;
+   if (desired_channels != 0 && desired_channels != 1 &&
+       desired_channels != 3 && desired_channels != 4)
+      desired_channels = 0; /* default: native (RGBA) */
+
    if (buffer == NULL || len <= 0)
       return (unsigned char *)stbi_avif__fail_ptr("invalid AVIF buffer");
 
@@ -10996,6 +11415,64 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
                 &headers.sequence_header,
                 &frame_header,
                 &tile_group);
+      if (rgba == NULL)
+         return NULL;
+
+      /* Post-process: convert RGBA to desired channel count */
+      if (desired_channels == 3)
+      {
+         /* Strip alpha: RGBA → RGB */
+         unsigned int w = frame_header.frame_width;
+         unsigned int h = frame_header.frame_height;
+         size_t pixel_count = (size_t)w * (size_t)h;
+         unsigned char *rgb = (unsigned char *)STBI_AVIF_MALLOC(pixel_count * 3u);
+         if (!rgb)
+         {
+            STBI_AVIF_FREE(rgba);
+            stbi_avif__fail("out of memory (RGB conversion)");
+            return NULL;
+         }
+         {
+            size_t i;
+            for (i = 0; i < pixel_count; ++i)
+            {
+               rgb[i * 3u + 0u] = rgba[i * 4u + 0u];
+               rgb[i * 3u + 1u] = rgba[i * 4u + 1u];
+               rgb[i * 3u + 2u] = rgba[i * 4u + 2u];
+            }
+         }
+         STBI_AVIF_FREE(rgba);
+         return rgb;
+      }
+      else if (desired_channels == 1)
+      {
+         /* Convert to grayscale: RGBA → Y using luminance weights */
+         unsigned int w = frame_header.frame_width;
+         unsigned int h = frame_header.frame_height;
+         size_t pixel_count = (size_t)w * (size_t)h;
+         unsigned char *gray = (unsigned char *)STBI_AVIF_MALLOC(pixel_count);
+         if (!gray)
+         {
+            STBI_AVIF_FREE(rgba);
+            stbi_avif__fail("out of memory (grayscale conversion)");
+            return NULL;
+         }
+         {
+            size_t i;
+            for (i = 0; i < pixel_count; ++i)
+            {
+               /* ITU-R BT.601 luminance: Y = 0.299R + 0.587G + 0.114B */
+               int r = rgba[i * 4u + 0u];
+               int g = rgba[i * 4u + 1u];
+               int b = rgba[i * 4u + 2u];
+               gray[i] = (unsigned char)((r * 77 + g * 150 + b * 29 + 128) >> 8);
+            }
+         }
+         STBI_AVIF_FREE(rgba);
+         return gray;
+      }
+
+      /* desired_channels == 0 or 4: return RGBA as-is */
       return rgba;
    }
 }
