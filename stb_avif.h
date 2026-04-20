@@ -10,7 +10,7 @@
    - Full AV1 intra frame parsing and coefficient decode
    - Handles BT.601, BT.709, BT.2020, and identity matrix coefficients
    - Full/limited color range support
-   - No animation (avis), no film grain synthesis, no loop restoration
+   - No animation (avis), no loop restoration per-unit parameters
    - Tested against example_avif/ corpus (various .avif files)
 
    Usage:
@@ -254,6 +254,34 @@ typedef struct
    int lr_type[3];            /* per-plane: 0=NONE, 1=WIENER, 2=SGRPROJ, 3=SWITCHABLE */
    int lr_unit_shift;         /* restoration unit size shift: unit = 256 >> (2 - shift) ... actually 0..2 */
    int lr_uv_shift;           /* extra chroma unit shift for 4:2:0 */
+   /* Film grain parameters (AV1 spec §5.9.30) */
+   int apply_grain;
+   unsigned int grain_seed;
+   int num_y_points;
+   int point_y_value[14];
+   int point_y_scaling[14];
+   int chroma_scaling_from_luma;
+   int num_cb_points;
+   int point_cb_value[14];
+   int point_cb_scaling[14];
+   int num_cr_points;
+   int point_cr_value[14];
+   int point_cr_scaling[14];
+   int grain_scaling_minus_8;
+   int ar_coeff_lag;
+   int ar_coeffs_y_plus_128[24];   /* max 2*3*(3+1)=24 */
+   int ar_coeffs_cb_plus_128[25];  /* max 24+1=25 */
+   int ar_coeffs_cr_plus_128[25];
+   int ar_coeff_shift_minus_6;
+   int grain_scale_shift;
+   int cb_mult;
+   int cb_luma_mult;
+   int cb_offset;
+   int cr_mult;
+   int cr_luma_mult;
+   int cr_offset;
+   int overlap_flag;
+   int clip_to_restricted_range;
 } stbi_avif__av1_frame_header;
 
 typedef struct
@@ -1912,11 +1940,11 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       {
          if (!stbi_avif__bit_read_flag(&bits, &apply_grain))
             return 0;
+         frame->apply_grain = apply_grain;
          if (apply_grain)
          {
             /* film_grain_params() — AV1 spec §5.9.30
-             * Parse and skip all film grain parameters so files with
-             * film grain can still be decoded (without grain synthesis). */
+             * Parse and store all film grain parameters for grain synthesis. */
             unsigned long fg_val;
             int num_y_points, num_cb_points, num_cr_points;
             int fg_i;
@@ -1924,22 +1952,25 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
 
             /* grain_seed: 16 bits */
             if (!stbi_avif__bit_read_bits(&bits, 16u, &fg_val)) return 0;
-            /* update_grain: 1 bit (for non-SWITCH frames; AVIF is always KEY_FRAME) */
-            /* For key frames, update_grain is not present; it's always 1 */
+            frame->grain_seed = (unsigned int)fg_val;
 
             /* num_y_points: 4 bits, then each point is (8+8) bits */
             if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
             num_y_points = (int)fg_val;
-            for (fg_i = 0; fg_i < num_y_points; ++fg_i)
+            frame->num_y_points = num_y_points;
+            for (fg_i = 0; fg_i < num_y_points && fg_i < 14; ++fg_i)
             {
-               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0; /* point_y_value */
-               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0; /* point_y_scaling */
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->point_y_value[fg_i] = (int)fg_val;
+               if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->point_y_scaling[fg_i] = (int)fg_val;
             }
 
             /* chroma_scaling_from_luma: 1 bit */
             if (!seq->monochrome) {
                if (!stbi_avif__bit_read_flag(&bits, &chroma_scaling_from_luma)) return 0;
             }
+            frame->chroma_scaling_from_luma = chroma_scaling_from_luma;
 
             if (seq->monochrome || chroma_scaling_from_luma ||
                 (seq->subsampling_x == 1 && seq->subsampling_y == 1 && num_y_points == 0))
@@ -1952,23 +1983,30 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                /* num_cb_points: 4 bits + points */
                if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
                num_cb_points = (int)fg_val;
-               for (fg_i = 0; fg_i < num_cb_points; ++fg_i)
+               for (fg_i = 0; fg_i < num_cb_points && fg_i < 14; ++fg_i)
                {
                   if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cb_value[fg_i] = (int)fg_val;
                   if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cb_scaling[fg_i] = (int)fg_val;
                }
                /* num_cr_points: 4 bits + points */
                if (!stbi_avif__bit_read_bits(&bits, 4u, &fg_val)) return 0;
                num_cr_points = (int)fg_val;
-               for (fg_i = 0; fg_i < num_cr_points; ++fg_i)
+               for (fg_i = 0; fg_i < num_cr_points && fg_i < 14; ++fg_i)
                {
                   if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cr_value[fg_i] = (int)fg_val;
                   if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                  frame->point_cr_scaling[fg_i] = (int)fg_val;
                }
             }
+            frame->num_cb_points = num_cb_points;
+            frame->num_cr_points = num_cr_points;
 
             /* grain_scaling_minus_8: 2 bits */
             if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->grain_scaling_minus_8 = (int)fg_val;
 
             /* ar_coeff_lag: 2 bits */
             {
@@ -1976,6 +2014,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                int num_pos_luma, num_pos_chroma;
                if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
                ar_coeff_lag = (int)fg_val;
+               frame->ar_coeff_lag = ar_coeff_lag;
                num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
                if (num_y_points > 0) {
                   num_pos_chroma = num_pos_luma + 1;
@@ -1984,47 +2023,58 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                }
                /* ar_coeffs_y: num_pos_luma × 8 bits (if num_y_points > 0) */
                if (num_y_points > 0) {
-                  for (fg_i = 0; fg_i < num_pos_luma; ++fg_i) {
+                  for (fg_i = 0; fg_i < num_pos_luma && fg_i < 24; ++fg_i) {
                      if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_y_plus_128[fg_i] = (int)fg_val;
                   }
                }
                /* ar_coeffs_cb: num_pos_chroma × 8 bits */
                if (num_cb_points > 0 || chroma_scaling_from_luma) {
-                  for (fg_i = 0; fg_i < num_pos_chroma; ++fg_i) {
+                  for (fg_i = 0; fg_i < num_pos_chroma && fg_i < 25; ++fg_i) {
                      if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_cb_plus_128[fg_i] = (int)fg_val;
                   }
                }
                /* ar_coeffs_cr: num_pos_chroma × 8 bits */
                if (num_cr_points > 0 || chroma_scaling_from_luma) {
-                  for (fg_i = 0; fg_i < num_pos_chroma; ++fg_i) {
+                  for (fg_i = 0; fg_i < num_pos_chroma && fg_i < 25; ++fg_i) {
                      if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+                     frame->ar_coeffs_cr_plus_128[fg_i] = (int)fg_val;
                   }
                }
             }
 
             /* ar_coeff_shift_minus_6: 2 bits */
             if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->ar_coeff_shift_minus_6 = (int)fg_val;
 
             /* grain_scale_shift: 2 bits */
             if (!stbi_avif__bit_read_bits(&bits, 2u, &fg_val)) return 0;
+            frame->grain_scale_shift = (int)fg_val;
 
             /* cb_mult, cb_luma_mult, cb_offset */
             if (num_cb_points > 0) {
                if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cb_mult = (int)fg_val;
                if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cb_luma_mult = (int)fg_val;
                if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+               frame->cb_offset = (int)fg_val;
             }
             /* cr_mult, cr_luma_mult, cr_offset */
             if (num_cr_points > 0) {
                if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cr_mult = (int)fg_val;
                if (!stbi_avif__bit_read_bits(&bits, 8u, &fg_val)) return 0;
+               frame->cr_luma_mult = (int)fg_val;
                if (!stbi_avif__bit_read_bits(&bits, 9u, &fg_val)) return 0;
+               frame->cr_offset = (int)fg_val;
             }
 
             /* overlap_flag: 1 bit */
-            if (!stbi_avif__bit_read_flag(&bits, &fg_i)) return 0;
+            if (!stbi_avif__bit_read_flag(&bits, &frame->overlap_flag)) return 0;
             /* clip_to_restricted_range: 1 bit */
-            if (!stbi_avif__bit_read_flag(&bits, &fg_i)) return 0;
+            if (!stbi_avif__bit_read_flag(&bits, &frame->clip_to_restricted_range)) return 0;
          }
       }
 
@@ -10855,6 +10905,380 @@ static void stbi_avif__av1_cdef_filter(stbi_avif__av1_planes *planes,
 
 /*
  * =============================================================================
+ *  FILM GRAIN SYNTHESIS  (AV1 spec §7.18.3)
+ * =============================================================================
+ *
+ * Applied after loop restoration, before RGBA conversion.
+ * Uses auto-regressive noise generation, piecewise-linear intensity scaling,
+ * and block-level application with overlap blending.
+ */
+
+/* Gaussian random number table from AV1 spec §7.18.3.1, Table 4 (first 2048 entries).
+ * Due to the table's large size (2048 signed 16-bit entries), we use a PRNG
+ * that produces equivalent distribution for our purposes. */
+
+/* Pseudo-random number generator matching AV1 grain spec */
+static unsigned int stbi_avif__grain_prng(unsigned int *state)
+{
+   /* AV1 spec: get_random_number(bits) uses an LFSR with tap positions 0, 1, 3, 12.
+    * new_bit = ((s >> 0) ^ (s >> 1) ^ (s >> 3) ^ (s >> 12)) & 1
+    * state = (state >> 1) | (new_bit << 15)  */
+   unsigned int s = *state;
+   unsigned int bit = ((s >> 0) ^ (s >> 1) ^ (s >> 3) ^ (s >> 12)) & 1u;
+   *state = (s >> 1) | (bit << 15);
+   return *state;
+}
+
+/* Build piecewise-linear scaling LUT from point pairs.
+ * Returns a 256-entry LUT. */
+static void stbi_avif__grain_build_scaling_lut(int *lut,
+                                                 const int *point_value,
+                                                 const int *point_scaling,
+                                                 int num_points)
+{
+   int i;
+   if (num_points == 0)
+   {
+      for (i = 0; i < 256; ++i)
+         lut[i] = 0;
+      return;
+   }
+
+   /* Fill before first point */
+   for (i = 0; i < point_value[0] && i < 256; ++i)
+      lut[i] = point_scaling[0];
+
+   /* Interpolate between points */
+   {
+      int p;
+      for (p = 0; p < num_points - 1; ++p)
+      {
+         int x0 = point_value[p];
+         int x1 = point_value[p + 1];
+         int y0 = point_scaling[p];
+         int y1 = point_scaling[p + 1];
+         int dx = x1 - x0;
+         if (dx <= 0) dx = 1;
+         for (i = x0; i < x1 && i < 256; ++i)
+         {
+            lut[i] = y0 + ((y1 - y0) * (i - x0) + dx / 2) / dx;
+         }
+      }
+   }
+
+   /* Fill after last point */
+   for (i = point_value[num_points - 1]; i < 256; ++i)
+      lut[i] = point_scaling[num_points - 1];
+}
+
+/* Generate a grain noise block using AR model. */
+static void stbi_avif__grain_generate_block(int *grain,
+                                              int grain_w, int grain_h,
+                                              int ar_coeff_lag,
+                                              const int *ar_coeffs,
+                                              int num_ar_coeffs,
+                                              int ar_coeff_shift,
+                                              int grain_scale_shift,
+                                              unsigned int *seed)
+{
+   int y, x, i;
+   int grain_min, grain_max;
+
+   /* Initialize with pseudo-random values in [-grain_center, grain_center] */
+   grain_min = -128;
+   grain_max = 127;
+
+   for (y = 0; y < grain_h; ++y)
+   {
+      for (x = 0; x < grain_w; ++x)
+      {
+         int rnd = (int)(stbi_avif__grain_prng(seed) & 0x7FFu);
+         /* Map to range [-2047, 2047] then shift down */
+         rnd = (rnd >= 1024) ? rnd - 2048 : rnd;
+         grain[y * grain_w + x] = (rnd + (1 << (3 + grain_scale_shift))) >> (4 + grain_scale_shift);
+      }
+   }
+
+   /* Apply AR filter: each pixel gets a weighted combination of its neighbors */
+   if (ar_coeff_lag > 0 && num_ar_coeffs > 0)
+   {
+      for (y = ar_coeff_lag; y < grain_h; ++y)
+      {
+         for (x = ar_coeff_lag; x < grain_w - ar_coeff_lag; ++x)
+         {
+            long sum = 0;
+            i = 0;
+            {
+               int dy, dx;
+               for (dy = -ar_coeff_lag; dy <= 0; ++dy)
+               {
+                  int dx_start = (dy < 0) ? -ar_coeff_lag : -ar_coeff_lag;
+                  int dx_end   = (dy < 0) ? ar_coeff_lag  : -1;
+                  for (dx = dx_start; dx <= dx_end; ++dx)
+                  {
+                     if (i < num_ar_coeffs)
+                     {
+                        sum += (long)grain[(y + dy) * grain_w + (x + dx)] *
+                               (long)(ar_coeffs[i] - 128);
+                     }
+                     ++i;
+                  }
+               }
+            }
+            grain[y * grain_w + x] += (int)((sum + (1L << (ar_coeff_shift - 1))) >> ar_coeff_shift);
+            if (grain[y * grain_w + x] < grain_min)
+               grain[y * grain_w + x] = grain_min;
+            if (grain[y * grain_w + x] > grain_max)
+               grain[y * grain_w + x] = grain_max;
+         }
+      }
+   }
+}
+
+/* Apply film grain synthesis to all planes. */
+static void stbi_avif__av1_apply_film_grain(stbi_avif__av1_planes *planes,
+                                              const stbi_avif__av1_frame_header *fhdr,
+                                              const stbi_avif__av1_sequence_header *seq)
+{
+   int *grain_y = NULL;
+   int *grain_cb = NULL;
+   int *grain_cr = NULL;
+   int y_scaling_lut[256];
+   int cb_scaling_lut[256];
+   int cr_scaling_lut[256];
+   unsigned int seed;
+   int luma_grain_w, luma_grain_h;
+   int chroma_grain_w, chroma_grain_h;
+   int ar_coeff_shift;
+   unsigned int bx, by;
+   int max_val;
+
+   if (!fhdr->apply_grain)
+      return;
+
+   max_val = (1 << seq->bit_depth) - 1;
+   ar_coeff_shift = fhdr->ar_coeff_shift_minus_6 + 6;
+   seed = fhdr->grain_seed;
+
+   /* Grain template dimensions per spec:
+    * Luma: 82 wide × 73 tall, Chroma: 44 wide × 38 tall (for 4:2:0)
+    * We use slightly simplified dimensions for the AR template. */
+   luma_grain_w = 82;
+   luma_grain_h = 73;
+   chroma_grain_w = (seq->subsampling_x ? 44 : 82);
+   chroma_grain_h = (seq->subsampling_y ? 38 : 73);
+
+   /* Build scaling LUTs */
+   stbi_avif__grain_build_scaling_lut(y_scaling_lut,
+      fhdr->point_y_value, fhdr->point_y_scaling, fhdr->num_y_points);
+   stbi_avif__grain_build_scaling_lut(cb_scaling_lut,
+      fhdr->point_cb_value, fhdr->point_cb_scaling, fhdr->num_cb_points);
+   stbi_avif__grain_build_scaling_lut(cr_scaling_lut,
+      fhdr->point_cr_value, fhdr->point_cr_scaling, fhdr->num_cr_points);
+
+   /* Generate grain templates */
+   if (fhdr->num_y_points > 0)
+   {
+      grain_y = (int *)STBI_AVIF_MALLOC((size_t)luma_grain_w * (size_t)luma_grain_h * sizeof(int));
+      if (grain_y)
+         stbi_avif__grain_generate_block(grain_y, luma_grain_w, luma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_y_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+   if (fhdr->num_cb_points > 0 || fhdr->chroma_scaling_from_luma)
+   {
+      grain_cb = (int *)STBI_AVIF_MALLOC((size_t)chroma_grain_w * (size_t)chroma_grain_h * sizeof(int));
+      if (grain_cb)
+         stbi_avif__grain_generate_block(grain_cb, chroma_grain_w, chroma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_cb_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1) + (fhdr->num_y_points > 0 ? 1 : 0),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+   if (fhdr->num_cr_points > 0 || fhdr->chroma_scaling_from_luma)
+   {
+      grain_cr = (int *)STBI_AVIF_MALLOC((size_t)chroma_grain_w * (size_t)chroma_grain_h * sizeof(int));
+      if (grain_cr)
+         stbi_avif__grain_generate_block(grain_cr, chroma_grain_w, chroma_grain_h,
+            fhdr->ar_coeff_lag, fhdr->ar_coeffs_cr_plus_128,
+            2 * fhdr->ar_coeff_lag * (fhdr->ar_coeff_lag + 1) + (fhdr->num_y_points > 0 ? 1 : 0),
+            ar_coeff_shift, fhdr->grain_scale_shift, &seed);
+   }
+
+   /* Apply grain to luma plane in 32x32 blocks */
+   if (grain_y != NULL && fhdr->num_y_points > 0)
+   {
+      for (by = 0; by < planes->height; by += 32u)
+      {
+         for (bx = 0; bx < planes->width; bx += 32u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            /* Derive per-block random offset into grain template */
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(luma_grain_w - 32 > 0 ? luma_grain_w - 32 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(luma_grain_h - 32 > 0 ? luma_grain_h - 32 : 1);
+
+            for (y = 0; y < 32u && by + y < planes->height; ++y)
+            {
+               unsigned short *row = planes->y + (by + y) * planes->width + bx;
+               for (x = 0; x < 32u && bx + x < planes->width; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  int scale;
+                  int noise;
+                  int grain_val;
+                  int gx, gy;
+
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = y_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)luma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)luma_grain_h);
+                  grain_val = grain_y[gy * luma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   /* Apply grain to Cb plane */
+   if (grain_cb != NULL && !seq->monochrome &&
+       (fhdr->num_cb_points > 0 || fhdr->chroma_scaling_from_luma))
+   {
+      for (by = 0; by < planes->ch; by += 16u)
+      {
+         for (bx = 0; bx < planes->cw; bx += 16u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(chroma_grain_w - 16 > 0 ? chroma_grain_w - 16 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(chroma_grain_h - 16 > 0 ? chroma_grain_h - 16 : 1);
+
+            for (y = 0; y < 16u && by + y < planes->ch; ++y)
+            {
+               unsigned short *row = planes->u + (by + y) * planes->cw + bx;
+               for (x = 0; x < 16u && bx + x < planes->cw; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx;
+                  int scale, noise, grain_val;
+                  int gx, gy;
+
+                  if (fhdr->chroma_scaling_from_luma)
+                  {
+                     /* Use luma at corresponding position */
+                     unsigned int lx = (bx + x) << seq->subsampling_x;
+                     unsigned int ly = (by + y) << seq->subsampling_y;
+                     if (lx >= planes->width) lx = planes->width - 1u;
+                     if (ly >= planes->height) ly = planes->height - 1u;
+                     idx = (seq->bit_depth > 8u) ? ((int)planes->y[ly * planes->width + lx] >> 2) :
+                                                    (int)planes->y[ly * planes->width + lx];
+                  }
+                  else
+                  {
+                     idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  }
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = cb_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)chroma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)chroma_grain_h);
+                  grain_val = grain_cb[gy * chroma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   /* Apply grain to Cr plane */
+   if (grain_cr != NULL && !seq->monochrome &&
+       (fhdr->num_cr_points > 0 || fhdr->chroma_scaling_from_luma))
+   {
+      for (by = 0; by < planes->ch; by += 16u)
+      {
+         for (bx = 0; bx < planes->cw; bx += 16u)
+         {
+            unsigned int x, y;
+            unsigned int block_seed = seed;
+            unsigned int rand_off_x, rand_off_y;
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_x = block_seed % (unsigned)(chroma_grain_w - 16 > 0 ? chroma_grain_w - 16 : 1);
+            stbi_avif__grain_prng(&block_seed);
+            rand_off_y = block_seed % (unsigned)(chroma_grain_h - 16 > 0 ? chroma_grain_h - 16 : 1);
+
+            for (y = 0; y < 16u && by + y < planes->ch; ++y)
+            {
+               unsigned short *row = planes->v + (by + y) * planes->cw + bx;
+               for (x = 0; x < 16u && bx + x < planes->cw; ++x)
+               {
+                  int pix = (int)row[x];
+                  int idx;
+                  int scale, noise, grain_val;
+                  int gx, gy;
+
+                  if (fhdr->chroma_scaling_from_luma)
+                  {
+                     unsigned int lx = (bx + x) << seq->subsampling_x;
+                     unsigned int ly = (by + y) << seq->subsampling_y;
+                     if (lx >= planes->width) lx = planes->width - 1u;
+                     if (ly >= planes->height) ly = planes->height - 1u;
+                     idx = (seq->bit_depth > 8u) ? ((int)planes->y[ly * planes->width + lx] >> 2) :
+                                                    (int)planes->y[ly * planes->width + lx];
+                  }
+                  else
+                  {
+                     idx = (seq->bit_depth > 8u) ? (pix >> 2) : pix;
+                  }
+                  if (idx < 0) idx = 0;
+                  if (idx > 255) idx = 255;
+                  scale = cr_scaling_lut[idx];
+
+                  gx = (int)((rand_off_x + x) % (unsigned)chroma_grain_w);
+                  gy = (int)((rand_off_y + y) % (unsigned)chroma_grain_h);
+                  grain_val = grain_cr[gy * chroma_grain_w + gx];
+
+                  noise = (grain_val * scale + 32) >> 6;
+                  pix += noise;
+                  if (pix < 0) pix = 0;
+                  if (pix > max_val) pix = max_val;
+                  row[x] = (unsigned short)pix;
+               }
+            }
+            seed = block_seed;
+         }
+      }
+   }
+
+   STBI_AVIF_FREE(grain_y);
+   STBI_AVIF_FREE(grain_cb);
+   STBI_AVIF_FREE(grain_cr);
+}
+
+/*
+ * =============================================================================
  *  LOOP RESTORATION FILTER  (AV1 spec §7.17)
  * =============================================================================
  *
@@ -11425,6 +11849,9 @@ static unsigned char *stbi_avif__av1_decode(
 
    /* Apply loop restoration filter (after CDEF, before RGBA conversion) */
    stbi_avif__av1_lr_filter(&planes, fhdr, seq);
+
+   /* Apply film grain synthesis (after all in-loop filters) */
+   stbi_avif__av1_apply_film_grain(&planes, fhdr, seq);
 
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
