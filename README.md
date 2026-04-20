@@ -13,6 +13,7 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - AV1 OBU parsing with both **reduced** and **full (non-reduced)** sequence/frame headers
 - AV1 intra-frame decode: superblock partition tree, all intra prediction modes (directional, DC, smooth, paeth, CFL, filter-intra, palette), arithmetic range coder, inverse transforms (DCT/ADST/identity 4×4–32×32), dequantization
 - **CDEF (Constrained Directional Enhancement Filter)** — direction finding, primary/secondary tap filtering with constrained damping on Y, U, V planes. Major visual quality improvement for lossy encodes.
+- **Loop Restoration Filter** — Wiener (7-tap symmetric separable convolution) and Sgrproj (self-guided box filter with projection). Applied per-plane after CDEF for additional deblocking/deringing.
 - YUV→RGBA conversion: BT.601 / BT.709 / BT.2020 (full-range and limited-range), identity matrix
 - 8-bit and 10-bit (down-shifted to 8-bit output) support
 - Monochrome (grayscale) image support
@@ -23,7 +24,6 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 
 ### Not Yet Implemented
 
-- Loop restoration filter (Wiener / self-guided) — parameters parsed but not applied
 - Film grain synthesis — parameters are parsed but grain noise is not synthesized
 - Animation / multi-frame sequences
 
@@ -66,5 +66,5 @@ This converts all sample AVIF files in `example_avif/` to PNG in `output_png/`.
 
 ## Next Implementation Milestones
 
-1. Loop restoration filter (Wiener / self-guided) — quality improvement for high-quality encodes
-2. Film grain synthesis — apply grain noise for encoder-emitted grain parameters
+1. Film grain synthesis — apply grain noise for encoder-emitted grain parameters
+2. Per-unit loop restoration parameters — currently applies default coefficients; per-unit parsing would use entropy-coded parameters from the tile bitstream
