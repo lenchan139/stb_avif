@@ -8336,7 +8336,6 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 8u: /* D67 */
                val = (3 * (int)top[tix] + (int)left[tiy]) / 4 + (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
                break;
-            }
             case 9u: /* SMOOTH */
                {
                   /* AV1 spec: pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom
@@ -10380,7 +10379,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_tx_szw, uv_tx_szh, uv_mode_raw;
    int cfl_alpha_u, cfl_alpha_v;
-   int y_angle_delta, uv_angle_delta;
+   int y_angle_delta = 0, uv_angle_delta = 0;
    int palette_y_size, palette_uv_size;
    unsigned short palette_y_colors[8];
    unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
@@ -10524,9 +10523,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    }
 
    /* Angle delta for directional Y modes (1-8) on blocks >= BLOCK_8X8 */
+   y_angle_delta = 0;
    if (y_mode >= 1u && y_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8) {
-      stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-         ctx->angle_delta_cdf[y_mode - 1u], 7);
+      y_angle_delta = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+         ctx->angle_delta_cdf[y_mode - 1u], 7) - 3;
    }
 
    /* UV mode (must be read before residual per AV1 spec) — skip for monochrome */
@@ -10544,8 +10544,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       }
 
       /* UV angle delta */
+      uv_angle_delta = 0;
       if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
-         stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7);
+         uv_angle_delta = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->angle_delta_cdf[uv_mode - 1u], 7) - 3;
 
       /* CFL_PRED */
       uv_mode_raw = uv_mode;
@@ -10948,7 +10949,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    } else {
       stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
          ctx->planes->width, ctx->planes->height,
-         px, py, pw, ph, ctx->planes->bit_depth, y_mode);
+         px, py, pw, ph, ctx->planes->bit_depth, y_mode, y_angle_delta);
    }
 
    /* Predict UV — skip for monochrome */
@@ -10974,10 +10975,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       } else {
          stbi_avif__av1_predict_block(ctx->planes->u, ctx->planes->cw,
             ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
-            ctx->planes->bit_depth, uv_mode);
+            ctx->planes->bit_depth, uv_mode, uv_angle_delta);
          stbi_avif__av1_predict_block(ctx->planes->v, ctx->planes->cw,
             ctx->planes->cw, ctx->planes->ch, cpx, cpy, cpw, cph,
-            ctx->planes->bit_depth, uv_mode);
+            ctx->planes->bit_depth, uv_mode, uv_angle_delta);
          if (uv_mode_raw == 13u) {
             stbi_avif__av1_apply_cfl_plane(ctx->planes, ctx->planes->u, ctx->planes->cw,
                cpx, cpy, cpw, cph, px, py, pw, ph, cfl_alpha_u);
