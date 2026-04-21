@@ -10379,7 +10379,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    int coeffs[32 * 32];
    unsigned int cpx, cpy, cpw, cph, uv_tx_size, uv_tx_sz, uv_tx_szw, uv_tx_szh, uv_mode_raw;
    int cfl_alpha_u, cfl_alpha_v;
-   int y_angle_delta, uv_angle_delta;
+   int y_angle_delta, uv_angle_delta; /* directional intra deltas in [-3, 3] */
    int palette_y_size, palette_uv_size;
    unsigned short palette_y_colors[8];
    unsigned short palette_uv_u_colors[8], palette_uv_v_colors[8];
