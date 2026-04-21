@@ -362,8 +362,8 @@ done
 
 ## 9. Quick Wins Checklist
 
-- [ ] Remove gradient from V_PRED: `val = (int)top[x]`
-- [ ] Remove gradient from H_PRED: `val = (int)left[y]`
+- [x] Remove gradient from V_PRED: `val = (int)top[x]`
+- [x] Remove gradient from H_PRED: `val = (int)left[y]`
 - [ ] Store and use angle_delta in prediction (currently read but discarded)
 - [ ] Fix DC rounding to use `(sum + (count >> 1)) >> log2(count)`
 - [ ] Verify SMOOTH weights table indices are correct for non-square blocks
