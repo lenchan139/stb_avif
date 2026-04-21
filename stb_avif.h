@@ -11826,29 +11826,81 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
    for (iy = 0; iy < h; ++iy)
    {
       const unsigned short *yrow = p->y + iy * w;
-      const unsigned short *urow = p->u + (iy >> p->suby) * p->cw;
-      const unsigned short *vrow = p->v + (iy >> p->suby) * p->cw;
+      unsigned int cy = iy >> p->suby;
+      const unsigned short *urow0 = p->u + cy * p->cw;
+      const unsigned short *vrow0 = p->v + cy * p->cw;
+      const unsigned short *urow1 = urow0;
+      const unsigned short *vrow1 = vrow0;
       unsigned char *drow = out + iy * w * 4u;
+
+      if (p->suby && cy + 1u < p->ch)
+      {
+         urow1 = urow0 + p->cw;
+         vrow1 = vrow0 + p->cw;
+      }
 
       for (ix = 0; ix < w; ++ix)
       {
          int Y, U, V;
          int R, G, B;
-         unsigned int cx = ix >> p->subx;
+         unsigned int cx0 = ix >> p->subx;
+         unsigned int cx1 = cx0;
+         unsigned int fx = 0u;
+         unsigned int fy = 0u;
+         int u16, v16;
+
+         if (cx0 >= p->cw)
+            cx0 = p->cw - 1u;
+         cx1 = cx0;
+         if (p->subx)
+         {
+            fx = ix & 1u;
+            if (cx1 + 1u < p->cw)
+               cx1++;
+            else
+               cx1 = cx0;
+         }
+         if (p->suby)
+            fy = iy & 1u;
+
+         if (!p->subx && !p->suby)
+         {
+            u16 = (int)urow0[cx0];
+            v16 = (int)vrow0[cx0];
+         }
+         else if (p->subx && !p->suby)
+         {
+            u16 = (((2 - (int)fx) * (int)urow0[cx0]) + ((int)fx * (int)urow0[cx1]) + 1) >> 1;
+            v16 = (((2 - (int)fx) * (int)vrow0[cx0]) + ((int)fx * (int)vrow0[cx1]) + 1) >> 1;
+         }
+         else if (!p->subx && p->suby)
+         {
+            u16 = (((2 - (int)fy) * (int)urow0[cx0]) + ((int)fy * (int)urow1[cx0]) + 1) >> 1;
+            v16 = (((2 - (int)fy) * (int)vrow0[cx0]) + ((int)fy * (int)vrow1[cx0]) + 1) >> 1;
+         }
+         else
+         {
+            int u_top = (((2 - (int)fx) * (int)urow0[cx0]) + ((int)fx * (int)urow0[cx1]) + 1) >> 1;
+            int u_bot = (((2 - (int)fx) * (int)urow1[cx0]) + ((int)fx * (int)urow1[cx1]) + 1) >> 1;
+            int v_top = (((2 - (int)fx) * (int)vrow0[cx0]) + ((int)fx * (int)vrow0[cx1]) + 1) >> 1;
+            int v_bot = (((2 - (int)fx) * (int)vrow1[cx0]) + ((int)fx * (int)vrow1[cx1]) + 1) >> 1;
+            u16 = (((2 - (int)fy) * u_top) + ((int)fy * u_bot) + 1) >> 1;
+            v16 = (((2 - (int)fy) * v_top) + ((int)fy * v_bot) + 1) >> 1;
+         }
 
          if (p->bit_depth > 8u)
          {
             /* 10/12-bit: shift to 8-bit by dropping LSBs */
             unsigned int shift = p->bit_depth - 8u;
             Y = (int)(yrow[ix] >> shift);
-            U = (int)(urow[cx] >> shift);
-            V = (int)(vrow[cx] >> shift);
+            U = u16 >> shift;
+            V = v16 >> shift;
          }
          else
          {
             Y = (int)yrow[ix];
-            U = (int)urow[cx];
-            V = (int)vrow[cx];
+            U = u16;
+            V = v16;
          }
 
          if (matrix_coefficients == STBI_AVIF_AV1_MC_IDENTITY)
