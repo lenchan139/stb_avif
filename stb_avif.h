@@ -6,11 +6,15 @@
 
    Current status:
    - Pure C89, single-header, libc only (no libavif, no dav1d, no libaom)
-   - Decodes 8-bit YUV420/422/444 still images to RGBA
-   - Full AV1 intra frame parsing and coefficient decode
-   - Handles BT.601, BT.709, BT.2020, and identity matrix coefficients
-   - Full/limited color range support
-   - No animation (avis), no loop restoration per-unit parameters
+   - Decodes 8-bit, 10-bit, and 12-bit YUV420/422/444 + monochrome still images
+   - Full AV1 intra-frame decode: all prediction modes, 4×4–64×64 transforms,
+     CDEF, deblocking, loop restoration (Wiener + Sgrproj, per-unit params),
+     superres, film grain synthesis, segmentation
+   - Alpha plane via iref/auxl auxiliary items
+   - Handles BT.601, BT.709, BT.2020, identity matrix; full/limited range
+   - nclx colr box overrides bitstream color metadata for YUV→RGB conversion
+   - Optional PNG writer (STB_AVIF_WRITE_PNG): grayscale/RGB/RGBA output
+   - No animation (avis) or inter-frame prediction
    - Tested against example_avif/ corpus (various .avif files)
 
    Usage:
@@ -54,6 +58,7 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 
 #ifndef STBI_AVIF_MALLOC
 #define STBI_AVIF_MALLOC(sz) malloc(sz)
@@ -14104,7 +14109,21 @@ static int stbi_avif__parse_box_header(const stbi_avif__buffer *buffer, size_t o
    {
       if (limit - offset < 16)
          return stbi_avif__fail("truncated large box header");
-      total_size = stbi_avif__read_be_size(buffer->data + offset + 8, 8);
+      /* Read the 8-byte extended box size.  On 32-bit platforms where
+       * sizeof(size_t) == 4 the high 32 bits must be zero, otherwise the
+       * size cannot be represented and we reject the box rather than
+       * silently truncating and reading the wrong amount of data. */
+      if (sizeof(size_t) < 8u)
+      {
+         unsigned long high4 = stbi_avif__read_be32(buffer->data + offset + 8);
+         if (high4 != 0u)
+            return stbi_avif__fail("large box size exceeds address space");
+         total_size = stbi_avif__read_be_size(buffer->data + offset + 12, 4);
+      }
+      else
+      {
+         total_size = stbi_avif__read_be_size(buffer->data + offset + 8, 8);
+      }
       header_size = 16;
    }
    else if (small_size == 0)
@@ -14874,6 +14893,8 @@ static int stbi_avif__resolve_primary(const stbi_avif__buffer *buffer, stbi_avif
          size_t elen = location->extent_lengths[ei];
          if (!stbi_avif__range_check(buffer, eoff, elen))
             return stbi_avif__fail("primary item extent is out of bounds");
+         if (elen > ((size_t)-1) - total)
+            return stbi_avif__fail("primary item extent size overflow");
          total += elen;
       }
       parser->payload_offset = location->base_offset + location->extent_offsets[0];
@@ -15027,7 +15048,12 @@ static unsigned char *stbi_avif__concat_extents(
    if (loc == NULL) return NULL;
 
    for (ei = 0; ei < loc->extent_count && ei < STBI_AVIF_MAX_EXTENTS; ++ei)
+   {
+      /* Guard against wrapping in the accumulated total before malloc. */
+      if (loc->extent_lengths[ei] > ((size_t)-1) - total)
+         return (unsigned char *)stbi_avif__fail_ptr("multi-extent total size overflow");
       total += loc->extent_lengths[ei];
+   }
 
    buf = (unsigned char *)STBI_AVIF_MALLOC(total);
    if (!buf) return NULL;
@@ -15315,6 +15341,17 @@ static int stbi_avif__read_file(const char *filename, unsigned char **out_data, 
       fclose(fp);
       return stbi_avif__fail("could not determine file size");
    }
+   if (length == 0)
+   {
+      fclose(fp);
+      return stbi_avif__fail("file is empty");
+   }
+   /* Guard: size_t cast of file length must fit in int for the from_memory API */
+   if ((unsigned long)length > (unsigned long)INT_MAX)
+   {
+      fclose(fp);
+      return stbi_avif__fail("file too large");
+   }
 
    if (fseek(fp, 0, SEEK_SET) != 0)
    {
@@ -15451,7 +15488,13 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
       pixel_bytes = 4;
    }
 
-   row_bytes = (size_t)width * (size_t)pixel_bytes + 1u; /* +1 for filter byte */
+   /* Guard against overflow in raw_size = (width * pixel_bytes + 1) * height.
+    * Also ensure png_size stays within int range for *out_len. */
+   if ((size_t)width > ((size_t)-1 - 1u) / (size_t)pixel_bytes)
+      return NULL;  /* width * pixel_bytes + 1 would overflow */
+   row_bytes = (size_t)width * (size_t)pixel_bytes + 1u;
+   if (row_bytes > ((size_t)-1) / (size_t)height)
+      return NULL;  /* row_bytes * height would overflow */
    raw_size = row_bytes * (size_t)height;
 
    raw = (unsigned char *)STBI_AVIF_MALLOC(raw_size);
@@ -15503,8 +15546,13 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
    zpos += 4u;
 
    /* Compute total PNG file size:
-    * 8 (signature) + 25 (IHDR chunk) + 12+zpos (IDAT chunk) + 12 (IEND chunk) */
+    * 8 (signature) + 25 (IHDR chunk) + 12+zpos (IDAT chunk) + 12 (IEND chunk)
+    * Guard: (12 + zpos) must not overflow, and total must fit in int for *out_len. */
+   if (zpos > ((size_t)-1) - 12u - 8u - 25u - 12u)
+   { STBI_AVIF_FREE(zlib); return NULL; }
    png_size = 8u + 25u + (12u + zpos) + 12u;
+   if (png_size > (size_t)INT_MAX)
+   { STBI_AVIF_FREE(zlib); return NULL; }
    png_buf = (unsigned char *)STBI_AVIF_MALLOC(png_size);
    if (png_buf == NULL) { STBI_AVIF_FREE(zlib); return NULL; }
 
