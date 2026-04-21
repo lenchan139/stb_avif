@@ -8322,30 +8322,83 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 15u: /* LEFT_DC_PRED: left only */
                val = dc;  /* dc was computed using left[] only */
                break;
-            case 1u: /* V */
-               val = (int)top[tix];
+            case 1u: case 2u: case 3u: case 4u:
+            case 5u: case 6u: case 7u: case 8u:
+            {
+               int pp, b, frac, r0, r1, base_x, base_y;
+               int py2;
+               (void)base_y; (void)py2;
+               pp = 0; b = 0; frac = 0; r0 = 0; r1 = 0; base_x = 0; base_y = 0; py2 = 0;
+               if (angle > 0 && angle < 90) {
+                  /* Zone 1: top reference only */
+                  pp = ((int)x << 8) - ((int)y + 1) * dx;
+                  b = pp >> 8;
+                  frac = pp & 0xFF;
+                  if (b < -1)
+                     val = (int)top_left;
+                  else if (b >= (int)ref_count - 1)
+                     val = (int)top[ref_count - 1u];
+                  else if (frac == 0)
+                     val = (b < 0) ? (int)top_left : (int)top[b];
+                  else {
+                     r0 = (b < 0) ? (int)top_left : (int)top[b];
+                     r1 = (b + 1 < 0) ? (int)top_left : ((b + 1 < (int)ref_count) ? (int)top[b + 1] : (int)top[ref_count - 1u]);
+                     val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                  }
+               } else if (angle > 180 && angle < 270) {
+                  /* Zone 3: left reference only */
+                  pp = ((int)y << 8) - ((int)x + 1) * dy;
+                  b = pp >> 8;
+                  frac = pp & 0xFF;
+                  if (b < -1)
+                     val = (int)top_left;
+                  else if (b >= (int)ref_count - 1)
+                     val = (int)left[ref_count - 1u];
+                  else if (frac == 0)
+                     val = (b < 0) ? (int)top_left : (int)left[b];
+                  else {
+                     r0 = (b < 0) ? (int)top_left : (int)left[b];
+                     r1 = (b + 1 < 0) ? (int)top_left : ((b + 1 < (int)ref_count) ? (int)left[b + 1] : (int)left[ref_count - 1u]);
+                     val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                  }
+               } else if (angle > 90 && angle < 180) {
+                  /* Zone 2: both top and left */
+                  pp = ((int)x << 8) - ((int)y + 1) * dx;
+                  base_x = pp >> 8;
+                  if (base_x >= -1) {
+                     frac = pp & 0xFF;
+                     if (frac == 0)
+                        val = (base_x < 0) ? (int)top_left : (int)top[base_x];
+                     else {
+                        r0 = (base_x < 0) ? (int)top_left : (int)top[base_x];
+                        r1 = (base_x + 1 < 0) ? (int)top_left : ((base_x + 1 < (int)ref_count) ? (int)top[base_x + 1] : (int)top[ref_count - 1u]);
+                        val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                     }
+                  } else {
+                     py2 = ((int)y << 8) - ((int)x + 1) * dy;
+                     base_y = py2 >> 8;
+                     frac = py2 & 0xFF;
+                     if (base_y < -1)
+                        val = (int)top_left;
+                     else if (base_y >= (int)ref_count - 1)
+                        val = (int)left[ref_count - 1u];
+                     else if (frac == 0)
+                        val = (base_y < 0) ? (int)top_left : (int)left[base_y];
+                     else {
+                        r0 = (base_y < 0) ? (int)top_left : (int)left[base_y];
+                        r1 = (base_y + 1 < 0) ? (int)top_left : ((base_y + 1 < (int)ref_count) ? (int)left[base_y + 1] : (int)left[ref_count - 1u]);
+                        val = (r0 * (256 - frac) + r1 * frac + 128) >> 8;
+                     }
+                  }
+               } else if (angle == 90) {
+                  val = (int)top[tix]; /* pure vertical */
+               } else if (angle == 180) {
+                  val = (int)left[tiy]; /* pure horizontal */
+               } else {
+                  val = dc; /* fallback */
+               }
                break;
-            case 2u: /* H */
-               val = (int)left[tiy];
-               break;
-            case 3u: /* D45 */
-               val = (int)top[dix] + ((int)di * amp) / (int)((bw + bh) ? (bw + bh) : 1u) - amp / 2;
-               break;
-            case 4u: /* D135 */
-               val = ((int)top[tix] + (int)left[tiy] + (int)top_left) / 3 + (((int)y - (int)x) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 5u: /* D113 */
-               val = (2 * (int)top[tix] + (int)top[dix] + (int)left[tiy]) / 4;
-               break;
-            case 6u: /* D157 */
-               val = (2 * (int)left[tiy] + (int)left[dix] + (int)top[tix]) / 4;
-               break;
-            case 7u: /* D203 */
-               val = (3 * (int)left[tiy] + (int)top[tix]) / 4 - (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 8u: /* D67 */
-               val = (3 * (int)top[tix] + (int)left[tiy]) / 4 + (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
+            }
             case 9u: /* SMOOTH */
                {
                   /* AV1 spec: pred = (w_ver[y]*top[x] + (256-w_ver[y])*bottom
