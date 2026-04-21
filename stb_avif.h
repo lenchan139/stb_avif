@@ -8233,9 +8233,30 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    else
       top_left = (unsigned short)base;
 
+   /* Compute actual angle for directional modes (must be done before edge
+    * filter, whose condition depends on the angle). */
+   angle = 0;
+   dx = 0;
+   dy = 0;
+   if (mode >= 1u && mode <= 8u) {
+      angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
+      if (angle > 0 && angle < 90) {
+         dx = stbi_avif__dr_intra_derivative[angle];
+      } else if (angle > 90 && angle < 180) {
+         dx = stbi_avif__dr_intra_derivative[180 - angle];
+         dy = stbi_avif__dr_intra_derivative[angle - 90];
+      } else if (angle > 180 && angle < 270) {
+         dy = stbi_avif__dr_intra_derivative[270 - angle];
+      }
+   }
+
    /* AV1 intra edge filtering: apply 3-tap [1,2,1]/4 smoothing filter
-    * on reference samples for directional modes when both edges available. */
-   if (have_top && have_left && mode >= 1u && mode <= 8u) {
+    * on reference samples for non-cardinal directional modes only.
+    * Pure V (angle=90) and pure H (angle=180) must NOT be filtered — the
+    * AV1 spec filter strength at cardinal angles is 0, so filtering would
+    * incorrectly blur the reference samples used by V_PRED and H_PRED. */
+   if (have_top && have_left && mode >= 1u && mode <= 8u &&
+       angle != 90 && angle != 180) {
       unsigned short ftop[512], fleft[512];
       unsigned short ftl;
       ftl = (unsigned short)(((int)left[0] + 2 * (int)top_left + (int)top[0] + 2) >> 2);
@@ -8251,22 +8272,6 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          fleft[ref_count - 1u] = left[ref_count - 1u];
       for (i = 0u; i < ref_count; ++i) { top[i] = ftop[i]; left[i] = fleft[i]; }
       top_left = ftl;
-   }
-
-   /* Compute actual angle for directional modes */
-   angle = 0;
-   dx = 0;
-   dy = 0;
-   if (mode >= 1u && mode <= 8u) {
-      angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
-      if (angle > 0 && angle < 90) {
-         dx = stbi_avif__dr_intra_derivative[angle];
-      } else if (angle > 90 && angle < 180) {
-         dx = stbi_avif__dr_intra_derivative[180 - angle];
-         dy = stbi_avif__dr_intra_derivative[angle - 90];
-      } else if (angle > 180 && angle < 270) {
-         dy = stbi_avif__dr_intra_derivative[270 - angle];
-      }
    }
 
    /* Mode conversion for DC and PAETH when references unavailable (per AV1 spec) */
@@ -11777,11 +11782,18 @@ static unsigned char stbi_avif__clamp_u8(int v)
    return (unsigned char)v;
 }
 
+static int stbi_avif__sample_or_avg(int a, int b, unsigned int use_avg)
+{
+   if (use_avg)
+      return (a + b + 1) >> 1;
+   return a;
+}
+
 static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes *p,
-                                                      int matrix_coefficients,
-                                                      int color_range,
-                                                      const unsigned short *alpha_plane,
-                                                      unsigned int alpha_bit_depth)
+                                                       int matrix_coefficients,
+                                                       int color_range,
+                                                       const unsigned short *alpha_plane,
+                                                       unsigned int alpha_bit_depth)
 {
    unsigned int w  = p->width;
    unsigned int h  = p->height;
@@ -11826,29 +11838,80 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
    for (iy = 0; iy < h; ++iy)
    {
       const unsigned short *yrow = p->y + iy * w;
-      const unsigned short *urow = p->u + (iy >> p->suby) * p->cw;
-      const unsigned short *vrow = p->v + (iy >> p->suby) * p->cw;
+      unsigned int cy = iy >> p->suby;
+      const unsigned short *urow0 = p->u + cy * p->cw;
+      const unsigned short *vrow0 = p->v + cy * p->cw;
+      const unsigned short *urow1 = urow0;
+      const unsigned short *vrow1 = vrow0;
       unsigned char *drow = out + iy * w * 4u;
+
+      if (p->suby && cy + 1u < p->ch)
+      {
+         urow1 = urow0 + p->cw;
+         vrow1 = vrow0 + p->cw;
+      }
 
       for (ix = 0; ix < w; ++ix)
       {
          int Y, U, V;
          int R, G, B;
-         unsigned int cx = ix >> p->subx;
+         unsigned int cx0 = ix >> p->subx;
+         unsigned int cx1 = cx0;
+         unsigned int fx = 0u;
+         unsigned int fy = 0u;
+         int u16, v16;
+
+         if (cx0 >= p->cw)
+            /* Guard against odd edge rounding when luma width is not an exact
+             * multiple of chroma width in subsampled formats. */
+            cx0 = p->cw - 1u;
+         if (p->subx)
+         {
+            fx = ix & 1u;
+            if (cx0 + 1u < p->cw) cx1 = cx0 + 1u;
+            else                  cx1 = cx0;
+         }
+         if (p->suby)
+            fy = iy & 1u;
+
+         if (!p->subx && !p->suby)
+         {
+            u16 = (int)urow0[cx0];
+            v16 = (int)vrow0[cx0];
+         }
+         else if (p->subx && !p->suby)
+         {
+            u16 = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow0[cx1], fx);
+            v16 = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow0[cx1], fx);
+         }
+         else if (!p->subx && p->suby)
+         {
+            u16 = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow1[cx0], fy);
+            v16 = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow1[cx0], fy);
+         }
+         else
+         {
+            int u_top = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow0[cx1], fx);
+            int u_bot = stbi_avif__sample_or_avg((int)urow1[cx0], (int)urow1[cx1], fx);
+            int v_top = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow0[cx1], fx);
+            int v_bot = stbi_avif__sample_or_avg((int)vrow1[cx0], (int)vrow1[cx1], fx);
+            u16 = stbi_avif__sample_or_avg(u_top, u_bot, fy);
+            v16 = stbi_avif__sample_or_avg(v_top, v_bot, fy);
+         }
 
          if (p->bit_depth > 8u)
          {
             /* 10/12-bit: shift to 8-bit by dropping LSBs */
             unsigned int shift = p->bit_depth - 8u;
             Y = (int)(yrow[ix] >> shift);
-            U = (int)(urow[cx] >> shift);
-            V = (int)(vrow[cx] >> shift);
+            U = u16 >> shift;
+            V = v16 >> shift;
          }
          else
          {
             Y = (int)yrow[ix];
-            U = (int)urow[cx];
-            V = (int)vrow[cx];
+            U = u16;
+            V = v16;
          }
 
          if (matrix_coefficients == STBI_AVIF_AV1_MC_IDENTITY)
@@ -15252,9 +15315,19 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       if (rgba == NULL)
          return NULL;
 
-      /* Report actual channel count: 4 if alpha present, 3 if not */
+      /* Report actual channel count:
+       *   4 if alpha present
+       *   1 if monochrome (only one luma plane, no chroma)
+       *   3 otherwise (YCbCr color) */
       if (channels_in_file != NULL)
-         *channels_in_file = file_has_alpha ? 4 : 3;
+      {
+         if (file_has_alpha)
+            *channels_in_file = 4;
+         else if (headers.sequence_header.monochrome)
+            *channels_in_file = 1;
+         else
+            *channels_in_file = 3;
+      }
 
       /* Post-process: convert RGBA to desired channel count */
       if (desired_channels == 3)
