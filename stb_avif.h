@@ -8233,9 +8233,30 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    else
       top_left = (unsigned short)base;
 
+   /* Compute actual angle for directional modes (must be done before edge
+    * filter, whose condition depends on the angle). */
+   angle = 0;
+   dx = 0;
+   dy = 0;
+   if (mode >= 1u && mode <= 8u) {
+      angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
+      if (angle > 0 && angle < 90) {
+         dx = stbi_avif__dr_intra_derivative[angle];
+      } else if (angle > 90 && angle < 180) {
+         dx = stbi_avif__dr_intra_derivative[180 - angle];
+         dy = stbi_avif__dr_intra_derivative[angle - 90];
+      } else if (angle > 180 && angle < 270) {
+         dy = stbi_avif__dr_intra_derivative[270 - angle];
+      }
+   }
+
    /* AV1 intra edge filtering: apply 3-tap [1,2,1]/4 smoothing filter
-    * on reference samples for directional modes when both edges available. */
-   if (have_top && have_left && mode >= 1u && mode <= 8u) {
+    * on reference samples for non-cardinal directional modes only.
+    * Pure V (angle=90) and pure H (angle=180) must NOT be filtered — the
+    * AV1 spec filter strength at cardinal angles is 0, so filtering would
+    * incorrectly blur the reference samples used by V_PRED and H_PRED. */
+   if (have_top && have_left && mode >= 1u && mode <= 8u &&
+       angle != 90 && angle != 180) {
       unsigned short ftop[512], fleft[512];
       unsigned short ftl;
       ftl = (unsigned short)(((int)left[0] + 2 * (int)top_left + (int)top[0] + 2) >> 2);
@@ -8251,22 +8272,6 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          fleft[ref_count - 1u] = left[ref_count - 1u];
       for (i = 0u; i < ref_count; ++i) { top[i] = ftop[i]; left[i] = fleft[i]; }
       top_left = ftl;
-   }
-
-   /* Compute actual angle for directional modes */
-   angle = 0;
-   dx = 0;
-   dy = 0;
-   if (mode >= 1u && mode <= 8u) {
-      angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
-      if (angle > 0 && angle < 90) {
-         dx = stbi_avif__dr_intra_derivative[angle];
-      } else if (angle > 90 && angle < 180) {
-         dx = stbi_avif__dr_intra_derivative[180 - angle];
-         dy = stbi_avif__dr_intra_derivative[angle - 90];
-      } else if (angle > 180 && angle < 270) {
-         dy = stbi_avif__dr_intra_derivative[270 - angle];
-      }
    }
 
    /* Mode conversion for DC and PAETH when references unavailable (per AV1 spec) */
@@ -15310,9 +15315,19 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       if (rgba == NULL)
          return NULL;
 
-      /* Report actual channel count: 4 if alpha present, 3 if not */
+      /* Report actual channel count:
+       *   4 if alpha present
+       *   1 if monochrome (only one luma plane, no chroma)
+       *   3 otherwise (YCbCr color) */
       if (channels_in_file != NULL)
-         *channels_in_file = file_has_alpha ? 4 : 3;
+      {
+         if (file_has_alpha)
+            *channels_in_file = 4;
+         else if (headers.sequence_header.monochrome)
+            *channels_in_file = 1;
+         else
+            *channels_in_file = 3;
+      }
 
       /* Post-process: convert RGBA to desired channel count */
       if (desired_channels == 3)

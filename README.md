@@ -18,8 +18,9 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - **CDEF (Constrained Directional Enhancement Filter)** — direction finding, primary/secondary tap filtering with constrained damping on Y, U, V planes.
 - **Loop Restoration Filter** — Wiener (7-tap symmetric separable convolution) and Sgrproj (self-guided box filter with projection). Applied per-plane after CDEF with per-unit parameters from the tile bitstream.
 - YUV→RGBA conversion: BT.601 / BT.709 / BT.2020 (full-range and limited-range), identity matrix
+- **Interpolated chroma upsampling** — bilinear averaging of adjacent chroma samples during YUV→RGBA conversion for 4:2:0 and 4:2:2 content (replaces nearest-neighbor fetch)
 - 8-bit, 10-bit, and 12-bit AV1 support (output is 8-bit per channel)
-- Monochrome (grayscale) image support
+- Monochrome (grayscale) image support; `channels_in_file` reports 1 for monochrome AVIFs
 - `desired_channels` parameter: request 1 (grayscale), 3 (RGB), or 4 (RGBA) channel output
 - YUV 4:2:0 and 4:2:2 chroma subsampling
 - Alpha plane support (via `iref`/`auxl` auxiliary items — decoded as separate monochrome AV1 frame)
