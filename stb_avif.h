@@ -8140,20 +8140,20 @@ static const unsigned char stbi_avif__sm_weights[128] = {
 };
 
 /* AV1 directional intra prediction derivative table.
- * dr_intra_derivative[a] = round(256 / tan(a * PI / 180)) for a = 1..89.
- * Used to compute sub-pixel shifts in Z1/Z2/Z3 directional prediction.
+ * dr_intra_derivative[a] = round(64 / tan(a * PI / 180)) for a = 1..89.
+ * Units: sub-pixel steps (in 1/64ths of a pixel) per row/column.
  * Index 0 is unused (angle=0 is undefined). */
 static const int stbi_avif__dr_intra_derivative[90] = {
    0,
-   14666, 7331, 4885, 3661, 2926, 2436, 2085, 1822, 1616, 1452,
-    1317, 1204, 1109, 1027,  955,  893,  837,  788,  743,  703,
-     667,  634,  603,  575,  549,  525,  502,  481,  462,  443,
-     426,  410,  394,  380,  366,  352,  340,  328,  316,  305,
-     294,  284,  275,  265,  256,  247,  239,  231,  223,  215,
-     207,  200,  193,  186,  179,  173,  166,  160,  154,  148,
-     142,  136,  130,  125,  119,  114,  109,  103,   98,   93,
-      88,   83,   78,   73,   69,   64,   59,   54,   50,   45,
-      41,   36,   31,   27,   22,   18,   13,    9,    4
+    3667,  1833,  1221,   915,   732,   609,   521,   455,   404,   363,
+     329,   301,   277,   257,   239,   223,   209,   197,   186,   176,
+     167,   158,   151,   144,   137,   131,   126,   120,   115,   111,
+     107,   102,    99,    95,    91,    88,    85,    82,    79,    76,
+      74,    71,    69,    66,    64,    62,    60,    58,    56,    54,
+      52,    50,    48,    46,    45,    43,    42,    40,    38,    37,
+      35,    34,    33,    31,    30,    28,    27,    26,    25,    23,
+      22,    21,    20,    18,    17,    16,    15,    14,    12,    11,
+      10,     9,     8,     7,     6,     4,     3,     2,     1
 };
 
 /* AV1 nominal angle for each intra mode (1-8). Index 0 unused. */
@@ -8298,15 +8298,85 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          dc = (sum + (int)(count >> 1u)) / (int)count;
    }
 
+   /* Directional angular modes: Z1/Z2/Z3 per AV1 spec §7.11.2.4-6 */
+   if (mode >= 3u && mode <= 8u) {
+      unsigned int max_bx = (bw + bh < ref_count ? bw + bh : ref_count) - 1u;
+      if (angle > 0 && angle < 90) {
+         /* Z1: sample horizontally from top[] with sub-pixel dx per row */
+         for (y = 0u; y < bh; ++y) {
+            int xpos = (int)(y + 1u) * dx;
+            int frac = xpos & 0x3E;
+            int bx0 = xpos >> 6;
+            for (x = 0u; x < bw; ++x) {
+               int b = bx0 + (int)x;
+               int val;
+               if (b >= 0 && (unsigned int)(b + 1) < ref_count)
+                  val = ((int)top[b] * (64 - frac) + (int)top[b + 1] * frac + 32) >> 6;
+               else
+                  val = (int)top[max_bx];
+               p[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(val, bit_depth);
+            }
+         }
+         return;
+      } else if (angle > 180 && angle < 270) {
+         /* Z3: sample vertically from left[] with sub-pixel dy per column */
+         unsigned int max_by = (bw + bh < ref_count ? bw + bh : ref_count) - 1u;
+         for (x = 0u; x < bw; ++x) {
+            int ypos = (int)(x + 1u) * dy;
+            int frac = ypos & 0x3E;
+            int by0 = ypos >> 6;
+            for (y = 0u; y < bh; ++y) {
+               int b = by0 + (int)y;
+               int val;
+               if (b >= 0 && (unsigned int)(b + 1) < ref_count)
+                  val = ((int)left[b] * (64 - frac) + (int)left[b + 1] * frac + 32) >> 6;
+               else
+                  val = (int)left[max_by];
+               p[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(val, bit_depth);
+            }
+         }
+         return;
+      } else if (angle > 90 && angle < 180) {
+         /* Z2: blend top[] (when base_x>=0) and left[] (when base_x<0) */
+         for (y = 0u; y < bh; ++y) {
+            int xpos0 = 64 - (int)(y + 1u) * dx;  /* signed: sub-pixel offset at col 0 */
+            int frac_x = xpos0 & 0x3E;
+            int bx0 = xpos0 >> 6;  /* may be negative */
+            for (x = 0u; x < bw; ++x) {
+               int base_x = bx0 + (int)x;
+               int val;
+               if (base_x >= 0) {
+                  /* Use top reference */
+                  unsigned int b0 = (unsigned int)base_x < ref_count ? (unsigned int)base_x : ref_count - 1u;
+                  unsigned int b1 = (unsigned int)(base_x + 1) < ref_count ? (unsigned int)(base_x + 1) : ref_count - 1u;
+                  val = ((int)top[b0] * (64 - frac_x) + (int)top[b1] * frac_x + 32) >> 6;
+               } else {
+                  /* Use left reference: ypos = y*64 - (x+1)*dy */
+                  int ypos = (int)y * 64 - (int)(x + 1u) * dy;
+                  if (ypos >= 0) {
+                     unsigned int b0 = (unsigned int)(ypos >> 6) < ref_count ? (unsigned int)(ypos >> 6) : ref_count - 1u;
+                     unsigned int b1 = b0 + 1u < ref_count ? b0 + 1u : ref_count - 1u;
+                     int frac_y = ypos & 0x3E;
+                     val = ((int)left[b0] * (64 - frac_y) + (int)left[b1] * frac_y + 32) >> 6;
+                  } else {
+                     val = (int)top_left;  /* corner pixel */
+                  }
+               }
+               p[(by + y) * stride + (bx + x)] = stbi_avif__av1_clip_sample(val, bit_depth);
+            }
+         }
+         return;
+      }
+      /* angle == 90 or 180: handled below as V/H */
+   }
+
    for (y = 0u; y < bh; ++y)
    {
       for (x = 0u; x < bw; ++x)
       {
          int val;
-         unsigned int di = x + y;
          unsigned int tix = x < ref_count ? x : (ref_count - 1u);
          unsigned int tiy = y < ref_count ? y : (ref_count - 1u);
-         unsigned int dix = di < ref_count ? di : (ref_count - 1u);
 
          switch (mode)
          {
@@ -8328,23 +8398,13 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
             case 2u: /* H */
                val = (int)left[tiy];
                break;
-            case 3u: /* D45 */
-               val = (int)top[dix] + ((int)di * amp) / (int)((bw + bh) ? (bw + bh) : 1u) - amp / 2;
-               break;
-            case 4u: /* D135 */
-               val = ((int)top[tix] + (int)left[tiy] + (int)top_left) / 3 + (((int)y - (int)x) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 5u: /* D113 */
-               val = (2 * (int)top[tix] + (int)top[dix] + (int)left[tiy]) / 4;
-               break;
-            case 6u: /* D157 */
-               val = (2 * (int)left[tiy] + (int)left[dix] + (int)top[tix]) / 4;
-               break;
-            case 7u: /* D203 */
-               val = (3 * (int)left[tiy] + (int)top[tix]) / 4 - (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
-               break;
-            case 8u: /* D67 */
-               val = (3 * (int)top[tix] + (int)left[tiy]) / 4 + (((int)x - (int)y) * amp) / (int)((bw + bh) ? (bw + bh) : 1u);
+            case 3u: /* D45 - handled by Z1 above */
+            case 4u: /* D135 - handled by Z2 above */
+            case 5u: /* D113 - handled by Z2 above */
+            case 6u: /* D157 - handled by Z2 above */
+            case 7u: /* D203 - handled by Z3 above */
+            case 8u: /* D67 - handled by Z1 above */
+               val = dc;
                break;
             case 9u: /* SMOOTH */
                {
