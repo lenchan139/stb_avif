@@ -14,9 +14,11 @@
  */
 
 #define STB_AVIF_IMPLEMENTATION
+#define STB_AVIF_WRITE_PNG
 #include "../stb_avif.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* --------------------------------------------------------------------- */
@@ -227,6 +229,216 @@ int main(void)
       {
          printf("PASS [no_such_file]: %s\n", stbi_avif_failure_reason());
       }
+   }
+
+   /* --- Empty file ---------------------------------------------------- */
+   {
+      FILE *fp;
+      int w = 0, h = 0, ch = 0;
+      unsigned char *out;
+      const char *tmp = "/tmp/stb_avif_test_empty.avif";
+
+      fp = fopen(tmp, "wb");
+      if (fp) fclose(fp);  /* create zero-byte file */
+
+      out = stbi_avif_load(tmp, &w, &h, &ch, 0);
+      if (out != NULL)
+      {
+         printf("FAIL [empty_file]: expected NULL\n");
+         stbi_avif_image_free(out);
+         ++failures;
+      }
+      else
+      {
+         printf("PASS [empty_file]: %s\n", stbi_avif_failure_reason());
+      }
+      remove(tmp);
+   }
+
+   /* --- PNG writer: invalid arguments --------------------------------- */
+   {
+      unsigned char px[4];
+      int png_len = 0;
+      unsigned char *png;
+
+      memset(px, 128, sizeof(px));
+
+      /* NULL pixels */
+      png = stbi_avif_write_png_to_memory(NULL, 1, 1, 4, &png_len);
+      if (png != NULL)
+      {
+         printf("FAIL [png_null_pixels]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_null_pixels]\n");
+
+      /* zero width */
+      png = stbi_avif_write_png_to_memory(px, 0, 1, 4, &png_len);
+      if (png != NULL)
+      {
+         printf("FAIL [png_zero_width]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_zero_width]\n");
+
+      /* zero height */
+      png = stbi_avif_write_png_to_memory(px, 1, 0, 4, &png_len);
+      if (png != NULL)
+      {
+         printf("FAIL [png_zero_height]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_zero_height]\n");
+
+      /* negative width */
+      png = stbi_avif_write_png_to_memory(px, -1, 1, 4, &png_len);
+      if (png != NULL)
+      {
+         printf("FAIL [png_neg_width]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_neg_width]\n");
+
+      /* bad channel count */
+      png = stbi_avif_write_png_to_memory(px, 1, 1, 2, &png_len);
+      if (png != NULL)
+      {
+         printf("FAIL [png_bad_channels]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_bad_channels]\n");
+
+      /* NULL out_len */
+      png = stbi_avif_write_png_to_memory(px, 1, 1, 4, NULL);
+      if (png != NULL)
+      {
+         printf("FAIL [png_null_outlen]: expected NULL\n");
+         stbi_avif_image_free(png);
+         ++failures;
+      }
+      else
+         printf("PASS [png_null_outlen]\n");
+   }
+
+   /* --- PNG writer: successful round-trip (1x1 pixel) ---------------- */
+   {
+      unsigned char px_rgba[4];
+      unsigned char px_rgb[3];
+      unsigned char px_gray[1];
+      int png_len = 0;
+      unsigned char *png;
+
+      px_rgba[0] = 255u; px_rgba[1] = 128u; px_rgba[2] = 0u; px_rgba[3] = 200u;
+      px_rgb[0]  = 64u;  px_rgb[1]  = 32u;  px_rgb[2]  = 16u;
+      px_gray[0] = 77u;
+
+      /* RGBA */
+      png = stbi_avif_write_png_to_memory(px_rgba, 1, 1, 4, &png_len);
+      if (png == NULL || png_len < 67)  /* minimum valid PNG is ~67 bytes */
+      {
+         printf("FAIL [png_roundtrip_rgba]: got NULL or too small (%d bytes)\n", png_len);
+         ++failures;
+      }
+      else
+      {
+         /* Check PNG signature */
+         if (png[0] == 137u && png[1] == 80u && png[2] == 78u && png[3] == 71u)
+            printf("PASS [png_roundtrip_rgba]: %d bytes\n", png_len);
+         else
+         {
+            printf("FAIL [png_roundtrip_rgba]: bad signature\n");
+            ++failures;
+         }
+         stbi_avif_image_free(png);
+      }
+
+      /* RGB */
+      png = stbi_avif_write_png_to_memory(px_rgb, 1, 1, 3, &png_len);
+      if (png == NULL || png[0] != 137u)
+      {
+         printf("FAIL [png_roundtrip_rgb]: got NULL or bad signature\n");
+         ++failures;
+      }
+      else
+      {
+         printf("PASS [png_roundtrip_rgb]: %d bytes\n", png_len);
+         stbi_avif_image_free(png);
+      }
+
+      /* Grayscale */
+      png = stbi_avif_write_png_to_memory(px_gray, 1, 1, 1, &png_len);
+      if (png == NULL || png[0] != 137u)
+      {
+         printf("FAIL [png_roundtrip_gray]: got NULL or bad signature\n");
+         ++failures;
+      }
+      else
+      {
+         printf("PASS [png_roundtrip_gray]: %d bytes\n", png_len);
+         stbi_avif_image_free(png);
+      }
+   }
+
+   /* --- PNG writer: write to file ------------------------------------- */
+   {
+      unsigned char px[4];
+      const char *tmp = "/tmp/stb_avif_test_out.png";
+      int ok_write;
+
+      memset(px, 100, sizeof(px));
+      ok_write = stbi_avif_write_png(tmp, px, 1, 1, 4);
+      if (!ok_write)
+      {
+         printf("FAIL [png_write_file]: write returned 0\n");
+         ++failures;
+      }
+      else
+      {
+         /* Verify file exists and has PNG signature */
+         FILE *fp2 = fopen(tmp, "rb");
+         if (fp2 == NULL)
+         {
+            printf("FAIL [png_write_file]: could not re-open written file\n");
+            ++failures;
+         }
+         else
+         {
+            unsigned char sig[4];
+            size_t nr = fread(sig, 1, 4, fp2);
+            fclose(fp2);
+            remove(tmp);
+            if (nr == 4u && sig[0] == 137u && sig[1] == 80u)
+               printf("PASS [png_write_file]\n");
+            else
+            {
+               printf("FAIL [png_write_file]: bad signature bytes\n");
+               ++failures;
+            }
+         }
+      }
+   }
+
+   /* --- PNG write to NULL filename ------------------------------------ */
+   {
+      unsigned char px[4];
+      memset(px, 0, sizeof(px));
+      if (stbi_avif_write_png(NULL, px, 1, 1, 4) != 0)
+      {
+         printf("FAIL [png_write_null_filename]: expected 0\n");
+         ++failures;
+      }
+      else
+         printf("PASS [png_write_null_filename]\n");
    }
 
    printf("\n");

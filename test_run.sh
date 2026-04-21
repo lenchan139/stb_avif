@@ -11,6 +11,12 @@ CLI_BIN="$SCRIPT_DIR/avif2png_run"
 INPUT_DIR="$SCRIPT_DIR/example_avif"
 OUTPUT_DIR="$SCRIPT_DIR/output_png"
 
+# Strict C89 compile checks (warnings only — do not run)
+echo "==> Strict C89 compile check: test_decode..."
+cc -std=c89 -Wall -Wextra -pedantic -o /dev/null "$SRC" -lm 2>&1 | grep -v "^$" || true
+echo "==> Strict C89 compile check: test_negative..."
+cc -std=c89 -Wall -Wextra -pedantic -o /dev/null "$NEG_SRC" -lm 2>&1 | grep -v "^$" || true
+
 # Compile main decode harness
 echo "==> Compiling test_decode..."
 cc -O2 -o "$BIN" "$SRC" -lm
