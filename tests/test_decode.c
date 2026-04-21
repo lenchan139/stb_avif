@@ -380,11 +380,11 @@ static int write_image(const char *filename, const unsigned char *pixels, int wi
    }
 
    if (has_ext(filename, ".ppm"))
-      return write_ppm_rgb(filename, out_pixels, width, height, channels);
+      return write_ppm_rgb(filename, out_pixels, width, height, 3);
    if (has_ext(filename, ".bmp"))
-      return write_bmp_rgb(filename, out_pixels, width, height, channels);
+      return write_bmp_rgb(filename, out_pixels, width, height, 3);
    if (has_ext(filename, ".png"))
-      return write_png_rgba(filename, pixels, width, height, desired_channels);
+      return write_png_rgba(filename, pixels, width, height, out_channels);
    return 0;
 }
 
