@@ -359,12 +359,32 @@ static int write_image(const char *filename, const unsigned char *pixels, int wi
    if (desired_channels == 1 || desired_channels == 3 || desired_channels == 4)
       out_channels = desired_channels;
 
+   if(desired_channels == 4 && channels == 3) {
+      /* Strip alpha: RGBA → RGB */
+      size_t pixel_count = (size_t)width * (size_t)height;
+      unsigned char *rgb = (unsigned char *)malloc(pixel_count * 3u);
+      if (!rgb)
+      {
+         return 0;
+      }
+      {
+         size_t i;
+         for (i = 0; i < pixel_count; ++i)
+         {
+            rgb[i * 3u + 0u] = pixels[i * 4u + 0u];
+            rgb[i * 3u + 1u] = pixels[i * 4u + 1u];
+            rgb[i * 3u + 2u] = pixels[i * 4u + 2u];
+         }
+      }
+         out_pixels = rgb;
+   }
+
    if (has_ext(filename, ".ppm"))
-      return write_ppm_rgb(filename, out_pixels, width, height, out_channels);
+      return write_ppm_rgb(filename, out_pixels, width, height, channels);
    if (has_ext(filename, ".bmp"))
-      return write_bmp_rgb(filename, out_pixels, width, height, out_channels);
+      return write_bmp_rgb(filename, out_pixels, width, height, channels);
    if (has_ext(filename, ".png"))
-      return write_png_rgba(filename, out_pixels, width, height, out_channels);
+      return write_png_rgba(filename, pixels, width, height, desired_channels);
    return 0;
 }
 
