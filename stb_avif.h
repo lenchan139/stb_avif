@@ -15091,18 +15091,29 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       payload_len = parser.payload_size;
    }
 
-    ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &parser, &headers);
+     ok = stbi_avif__parse_av1_headers(buffer, (size_t)len, &parser, &headers);
+     if (!ok)
+     {
+        STBI_AVIF_FREE(concat_buf);
+        stbi_avif__parser_free(&parser);
+        return NULL;
+     }
+
+     /* AVIF container color metadata (colr/nclx) applies to the item and may
+      * provide authoritative matrix/range values when bitstream defaults are
+      * generic/unspecified. Honor it for YUV->RGB conversion. */
+     if (parser.has_nclx)
+     {
+        headers.sequence_header.color_primaries = parser.nclx_colour_primaries;
+        headers.sequence_header.transfer_characteristics = parser.nclx_transfer_characteristics;
+        headers.sequence_header.matrix_coefficients = parser.nclx_matrix_coefficients;
+        headers.sequence_header.color_range = parser.nclx_full_range ? 1u : 0u;
+     }
+
+    ok = stbi_avif__index_av1_frame_obus(payload_ptr, payload_len, &frame_index);
     if (!ok)
     {
        STBI_AVIF_FREE(concat_buf);
-       stbi_avif__parser_free(&parser);
-       return NULL;
-    }
-
-   ok = stbi_avif__index_av1_frame_obus(payload_ptr, payload_len, &frame_index);
-   if (!ok)
-   {
-      STBI_AVIF_FREE(concat_buf);
       stbi_avif__parser_free(&parser);
       return NULL;
    }
