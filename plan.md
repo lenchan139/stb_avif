@@ -364,10 +364,10 @@ done
 
 - [x] Remove gradient from V_PRED: `val = (int)top[x]`
 - [x] Remove gradient from H_PRED: `val = (int)left[y]`
-- [ ] Store and use angle_delta in prediction (currently read but discarded)
-- [ ] Fix DC rounding to use `(sum + (count >> 1)) >> log2(count)`
-- [ ] Verify SMOOTH weights table indices are correct for non-square blocks
-- [ ] Check ref_count limit (currently `bw + bh + 2`, should be `2 * max(bw, bh)`)
+- [x] Store and use angle_delta in prediction (currently read but discarded)
+- [x] Fix DC rounding to use `(sum + (count >> 1)) >> log2(count)`
+- [x] Verify SMOOTH weights table indices are correct for non-square blocks
+- [x] Check ref_count limit (currently `bw + bh + 2`, should be `2 * max(bw, bh)`)
 
 ---
 

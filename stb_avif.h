@@ -8195,7 +8195,8 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    base = (int)(1u << (bit_depth - 1u));
    amp = (bit_depth > 8u) ? (8 << (bit_depth - 8u)) : 8;
 
-   ref_count = 2u * (bw + bh) + 1u;
+   /* AV1 spec: extended reference array is 2*max(bw,bh) samples per side. */
+   ref_count = 2u * (bw > bh ? bw : bh);
    if (ref_count > 512u)
       ref_count = 512u;
 
