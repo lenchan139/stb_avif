@@ -26,6 +26,8 @@ A pure C89, libc-only AVIF decoder in stb-style single-header form.
 - **Film Grain Synthesis** — auto-regressive grain template generation, piecewise-linear intensity scaling, per-block application on Y/Cb/Cr planes
 - **Superres upscaling** — AV1 8-tap interpolation filter for horizontal upscaling per spec
 - **Optional PNG Writer** — `stbi_avif_write_png()` and `stbi_avif_write_png_to_memory()` APIs behind `STB_AVIF_WRITE_PNG`. Supports grayscale (color_type=0), RGB (color_type=2), and RGBA (color_type=6) output.
+- **`avif2png` CLI converter** — `tools/avif2png.c`, a minimal command-line tool built on the public API (no dependencies beyond `stb_avif.h`).
+- **Hardened container parser** — overflow guards on multi-extent size accumulation and 8-byte extended box sizes on 32-bit platforms; malformed/truncated AVIF inputs produce clean error messages via `stbi_avif_failure_reason()`.
 
 ### Not Yet Implemented
 
@@ -71,19 +73,45 @@ if (rgba) {
 
 ## Build and Test
 
-Compile the test harness:
+Compile the test harness (strict C89):
 
 ```sh
-cc -std=c89 -Wall -Wextra -pedantic tests/test_decode.c -o tests/test_decode
+cc -std=c89 -Wall -Wextra -pedantic tests/test_decode.c -o tests/test_decode -lm
 ```
 
-Run the conversion test suite:
+Compile the negative / robustness test suite (strict C89):
+
+```sh
+cc -std=c89 -Wall -Wextra -pedantic tests/test_negative.c -o tests/test_negative -lm
+```
+
+Run the full test suite (conversion regression + negative tests + CLI smoke test):
 
 ```sh
 bash test_run.sh
 ```
 
-This converts all sample AVIF files in `example_avif/` to PNG in `output_png/`.
+This compiles three binaries, converts all sample AVIF files in `example_avif/` to PNG
+in `output_png/`, runs the negative tests, and smoke-tests the `avif2png` CLI tool.
+
+## `avif2png` CLI Converter
+
+A minimal, self-contained command-line converter is provided in `tools/avif2png.c`.
+It uses only the public `stb_avif.h` API — no logic is duplicated from the test harness.
+
+Build:
+
+```sh
+cc -O2 tools/avif2png.c -o avif2png -lm
+```
+
+Usage:
+
+```sh
+avif2png input.avif output.png
+```
+
+Exit codes: `0` success, `1` wrong usage, `2` decode error, `3` write error.
 
 ## Post-Processing Pipeline Order
 

@@ -14104,7 +14104,21 @@ static int stbi_avif__parse_box_header(const stbi_avif__buffer *buffer, size_t o
    {
       if (limit - offset < 16)
          return stbi_avif__fail("truncated large box header");
-      total_size = stbi_avif__read_be_size(buffer->data + offset + 8, 8);
+      /* Read the 8-byte extended box size.  On 32-bit platforms where
+       * sizeof(size_t) == 4 the high 32 bits must be zero, otherwise the
+       * size cannot be represented and we reject the box rather than
+       * silently truncating and reading the wrong amount of data. */
+      if (sizeof(size_t) < 8u)
+      {
+         unsigned long high4 = stbi_avif__read_be32(buffer->data + offset + 8);
+         if (high4 != 0u)
+            return stbi_avif__fail("large box size exceeds address space");
+         total_size = stbi_avif__read_be_size(buffer->data + offset + 12, 4);
+      }
+      else
+      {
+         total_size = stbi_avif__read_be_size(buffer->data + offset + 8, 8);
+      }
       header_size = 16;
    }
    else if (small_size == 0)
@@ -15027,7 +15041,12 @@ static unsigned char *stbi_avif__concat_extents(
    if (loc == NULL) return NULL;
 
    for (ei = 0; ei < loc->extent_count && ei < STBI_AVIF_MAX_EXTENTS; ++ei)
+   {
+      /* Guard against wrapping in the accumulated total before malloc. */
+      if (loc->extent_lengths[ei] > ((size_t)-1) - total)
+         return (unsigned char *)stbi_avif__fail_ptr("multi-extent total size overflow");
       total += loc->extent_lengths[ei];
+   }
 
    buf = (unsigned char *)STBI_AVIF_MALLOC(total);
    if (!buf) return NULL;
