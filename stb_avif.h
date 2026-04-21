@@ -11777,11 +11777,18 @@ static unsigned char stbi_avif__clamp_u8(int v)
    return (unsigned char)v;
 }
 
+static int stbi_avif__lerp_half(int a, int b, unsigned int t)
+{
+   if (t)
+      return (a + b + 1) >> 1;
+   return a;
+}
+
 static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes *p,
-                                                      int matrix_coefficients,
-                                                      int color_range,
-                                                      const unsigned short *alpha_plane,
-                                                      unsigned int alpha_bit_depth)
+                                                       int matrix_coefficients,
+                                                       int color_range,
+                                                       const unsigned short *alpha_plane,
+                                                       unsigned int alpha_bit_depth)
 {
    unsigned int w  = p->width;
    unsigned int h  = p->height;
@@ -11851,14 +11858,11 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
 
          if (cx0 >= p->cw)
             cx0 = p->cw - 1u;
-         cx1 = cx0;
          if (p->subx)
          {
             fx = ix & 1u;
-            if (cx1 + 1u < p->cw)
-               cx1++;
-            else
-               cx1 = cx0;
+            if (cx0 + 1u < p->cw) cx1 = cx0 + 1u;
+            else                  cx1 = cx0;
          }
          if (p->suby)
             fy = iy & 1u;
@@ -11870,22 +11874,22 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          }
          else if (p->subx && !p->suby)
          {
-            u16 = (((2 - (int)fx) * (int)urow0[cx0]) + ((int)fx * (int)urow0[cx1]) + 1) >> 1;
-            v16 = (((2 - (int)fx) * (int)vrow0[cx0]) + ((int)fx * (int)vrow0[cx1]) + 1) >> 1;
+            u16 = stbi_avif__lerp_half((int)urow0[cx0], (int)urow0[cx1], fx);
+            v16 = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow0[cx1], fx);
          }
          else if (!p->subx && p->suby)
          {
-            u16 = (((2 - (int)fy) * (int)urow0[cx0]) + ((int)fy * (int)urow1[cx0]) + 1) >> 1;
-            v16 = (((2 - (int)fy) * (int)vrow0[cx0]) + ((int)fy * (int)vrow1[cx0]) + 1) >> 1;
+            u16 = stbi_avif__lerp_half((int)urow0[cx0], (int)urow1[cx0], fy);
+            v16 = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow1[cx0], fy);
          }
          else
          {
-            int u_top = (((2 - (int)fx) * (int)urow0[cx0]) + ((int)fx * (int)urow0[cx1]) + 1) >> 1;
-            int u_bot = (((2 - (int)fx) * (int)urow1[cx0]) + ((int)fx * (int)urow1[cx1]) + 1) >> 1;
-            int v_top = (((2 - (int)fx) * (int)vrow0[cx0]) + ((int)fx * (int)vrow0[cx1]) + 1) >> 1;
-            int v_bot = (((2 - (int)fx) * (int)vrow1[cx0]) + ((int)fx * (int)vrow1[cx1]) + 1) >> 1;
-            u16 = (((2 - (int)fy) * u_top) + ((int)fy * u_bot) + 1) >> 1;
-            v16 = (((2 - (int)fy) * v_top) + ((int)fy * v_bot) + 1) >> 1;
+            int u_top = stbi_avif__lerp_half((int)urow0[cx0], (int)urow0[cx1], fx);
+            int u_bot = stbi_avif__lerp_half((int)urow1[cx0], (int)urow1[cx1], fx);
+            int v_top = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow0[cx1], fx);
+            int v_bot = stbi_avif__lerp_half((int)vrow1[cx0], (int)vrow1[cx1], fx);
+            u16 = stbi_avif__lerp_half(u_top, u_bot, fy);
+            v16 = stbi_avif__lerp_half(v_top, v_bot, fy);
          }
 
          if (p->bit_depth > 8u)
