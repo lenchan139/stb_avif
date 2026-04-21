@@ -11777,9 +11777,9 @@ static unsigned char stbi_avif__clamp_u8(int v)
    return (unsigned char)v;
 }
 
-static int stbi_avif__lerp_half(int a, int b, unsigned int t)
+static int stbi_avif__sample_or_avg(int a, int b, unsigned int use_avg)
 {
-   if (t)
+   if (use_avg)
       return (a + b + 1) >> 1;
    return a;
 }
@@ -11857,6 +11857,8 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          int u16, v16;
 
          if (cx0 >= p->cw)
+            /* Guard against odd edge rounding when luma width is not an exact
+             * multiple of chroma width in subsampled formats. */
             cx0 = p->cw - 1u;
          if (p->subx)
          {
@@ -11874,22 +11876,22 @@ static unsigned char *stbi_avif__av1_planes_to_rgba(const stbi_avif__av1_planes 
          }
          else if (p->subx && !p->suby)
          {
-            u16 = stbi_avif__lerp_half((int)urow0[cx0], (int)urow0[cx1], fx);
-            v16 = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow0[cx1], fx);
+            u16 = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow0[cx1], fx);
+            v16 = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow0[cx1], fx);
          }
          else if (!p->subx && p->suby)
          {
-            u16 = stbi_avif__lerp_half((int)urow0[cx0], (int)urow1[cx0], fy);
-            v16 = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow1[cx0], fy);
+            u16 = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow1[cx0], fy);
+            v16 = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow1[cx0], fy);
          }
          else
          {
-            int u_top = stbi_avif__lerp_half((int)urow0[cx0], (int)urow0[cx1], fx);
-            int u_bot = stbi_avif__lerp_half((int)urow1[cx0], (int)urow1[cx1], fx);
-            int v_top = stbi_avif__lerp_half((int)vrow0[cx0], (int)vrow0[cx1], fx);
-            int v_bot = stbi_avif__lerp_half((int)vrow1[cx0], (int)vrow1[cx1], fx);
-            u16 = stbi_avif__lerp_half(u_top, u_bot, fy);
-            v16 = stbi_avif__lerp_half(v_top, v_bot, fy);
+            int u_top = stbi_avif__sample_or_avg((int)urow0[cx0], (int)urow0[cx1], fx);
+            int u_bot = stbi_avif__sample_or_avg((int)urow1[cx0], (int)urow1[cx1], fx);
+            int v_top = stbi_avif__sample_or_avg((int)vrow0[cx0], (int)vrow0[cx1], fx);
+            int v_bot = stbi_avif__sample_or_avg((int)vrow1[cx0], (int)vrow1[cx1], fx);
+            u16 = stbi_avif__sample_or_avg(u_top, u_bot, fy);
+            v16 = stbi_avif__sample_or_avg(v_top, v_bot, fy);
          }
 
          if (p->bit_depth > 8u)
