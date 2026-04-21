@@ -393,18 +393,30 @@ int main(int argc, char **argv)
    int width;
    int height;
    int channels;
+   int desired_channels;
    unsigned char *pixels;
    const char *output_path;
 
    if (argc < 2)
    {
-      printf("usage: %s image.avif [output.ppm|output.png|output.bmp]\n", argv[0]);
+      printf("usage: %s image.avif [output.ppm|output.png|output.bmp] [3|4]\n", argv[0]);
       return 0;
    }
 
    output_path = NULL;
    if (argc >= 3)
       output_path = argv[2];
+   desired_channels = 3;
+   if (argc >= 4)
+   {
+      if (strcmp(argv[3], "4") == 0)
+         desired_channels = 4;
+      else if (strcmp(argv[3], "3") != 0)
+      {
+         printf("invalid channels: %s (use 3 or 4)\n", argv[3]);
+         return 1;
+      }
+   }
 
    if (!stbi_avif_info(argv[1], &width, &height, &channels))
    {
@@ -414,7 +426,7 @@ int main(int argc, char **argv)
 
    printf("container parsed: %d x %d, channels=%d\n", width, height, channels);
 
-   pixels = stbi_avif_load(argv[1], &width, &height, &channels, 4);
+   pixels = stbi_avif_load(argv[1], &width, &height, &channels, desired_channels);
    if (pixels == NULL)
    {
       printf("decode failed: %s\n", stbi_avif_failure_reason());
@@ -447,7 +459,7 @@ int main(int argc, char **argv)
             printf("warning: first 1024 pixels are all the same color - possible decode error\n");
       }
       printf("decode info: %d x %d, channels=%d\n", width, height, channels);
-      if (!write_image(output_path, pixels, width, height, channels, 4))
+       if (!write_image(output_path, pixels, width, height, channels, desired_channels))
       {
          stbi_avif_image_free(pixels);
          printf("convert failed: could not write %s (supported: .ppm, .png, .bmp)\n", output_path);
