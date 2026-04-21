@@ -70,6 +70,16 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
 #define STBI_AVIF_CHANNELS 4
 #define STBI_AVIF_MAX_ASSOCIATIONS 32
 
+#ifdef _MSC_VER
+#define STBI_AVIF_LONGLONG __int64
+#define STBI_AVIF_LL(x) x ## i64
+#define STBI_AVIF_ULL(x) x ## ui64
+#else
+#define STBI_AVIF_LONGLONG long long
+#define STBI_AVIF_LL(x) x ## LL
+#define STBI_AVIF_ULL(x) x ## ULL
+#endif
+
 #define STBI_AVIF_FOURCC(a,b,c,d) \
    ((((unsigned long)(a)) << 24) | (((unsigned long)(b)) << 16) | (((unsigned long)(c)) << 8) | ((unsigned long)(d)))
 
@@ -337,7 +347,7 @@ typedef struct
    const unsigned char *buf;       /* start of payload */
    const unsigned char *end;       /* end of payload */
    const unsigned char *bptr;      /* current read pointer */
-   unsigned long long dif;    /* bit window (top 16 bits hold comparison value) */
+   unsigned STBI_AVIF_LONGLONG dif;    /* bit window (top 16 bits hold comparison value) */
    unsigned int         rng;       /* current range  (always >= 0x8000 after renorm) */
    int                  cnt;       /* number of unconsumed bits buffered */
    int                  initialized;
@@ -2266,7 +2276,7 @@ static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, siz
 static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
 {
    int c;
-   unsigned long long dif;
+   unsigned STBI_AVIF_LONGLONG dif;
    const unsigned char *bptr;
    const unsigned char *end;
    dif   = rd->dif;
@@ -2276,10 +2286,10 @@ static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
    do {
       if (bptr >= end) {
          /* fill remaining bits with 1s (complement of 0x00 stream) */
-         dif |= ~(~(unsigned long long)0xFFu << c);
+         dif |= ~(~(unsigned STBI_AVIF_LONGLONG)0xFFu << c);
          break;
       }
-      dif |= (unsigned long long)((unsigned int)bptr[0] ^ 0xFFu) << c;
+      dif |= (unsigned STBI_AVIF_LONGLONG)((unsigned int)bptr[0] ^ 0xFFu) << c;
       bptr++;
       c -= 8;
    } while (c >= 0);
@@ -2308,7 +2318,7 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    decoder->buf  = data + byte_start;
    decoder->end  = data + size;
    decoder->bptr = decoder->buf;
-   decoder->dif  = 0ULL;
+   decoder->dif  = STBI_AVIF_ULL(0);
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
@@ -2321,7 +2331,7 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
  * Matches AOM od_ec_dec_normalize. Returns ret (the decoded symbol).
  */
 static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd,
-                                                 unsigned long long dif, unsigned int rng,
+                                                 unsigned STBI_AVIF_LONGLONG dif, unsigned int rng,
                                                  unsigned int ret)
 {
    int d;
@@ -2349,7 +2359,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
                                                 const unsigned short *cdf, int nsyms)
 {
    unsigned int r, c, u, v, ret;
-   unsigned long long dif;
+   unsigned STBI_AVIF_LONGLONG dif;
    int sym;
 
    r   = rd->rng;
@@ -2373,7 +2383,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    } while (c < v);
 
    r   = u - v;
-   dif -= (unsigned long long)v << 48;
+   dif -= (unsigned STBI_AVIF_LONGLONG)v << 48;
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
    return ret;
 }
@@ -8403,7 +8413,7 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
    unsigned int x, y;
    unsigned int subsample_x_factor = 1u << (unsigned int)planes->subx;
    unsigned int subsample_y_factor = 1u << (unsigned int)planes->suby;
-   unsigned long long y_sum = 0u;
+   unsigned STBI_AVIF_LONGLONG y_sum = 0u;
    unsigned int y_count = 0u;
    int y_avg;
 
@@ -8421,7 +8431,7 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
    }
    if (y_count == 0u)
       return;
-   y_avg = (int)(y_sum / (unsigned long long)y_count);
+   y_avg = (int)(y_sum / (unsigned STBI_AVIF_LONGLONG)y_count);
 
    for (y = 0u; y < cph && cpy + y < planes->ch; ++y)
    {
@@ -10854,18 +10864,18 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 
       if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4
           && max_dim > 0u) {
+         int depth, s_a, s_l, tctx, nsyms;
+         unsigned int cur_lw, cur_lh;
+         unsigned int mi_c, mi_r;
          /* Read depth from tx_size_cdf[max_dim-1][tctx], nsyms=min(max_dim,2) */
          /* tctx: (left_tx_intra[mi_row] >= mxh) + (above_tx_intra[mi_col] >= mxw) */
          unsigned int mi_col_ctx = mi_col;
          if (ctx->mi_cols > 0u && mi_col_ctx >= ctx->mi_cols)
             mi_col_ctx = ctx->mi_cols - 1u;
-         int s_a = (int)ctx->above_tx_intra[mi_col_ctx];
-         int s_l = (int)ctx->left_tx_intra[mi_row];
-         int tctx = (s_a >= (int)mxw ? 1 : 0) + (s_l >= (int)mxh ? 1 : 0);
-         int nsyms = (max_dim < 2u) ? 1 : 2;
-         int depth;
-         unsigned int cur_lw, cur_lh;
-         unsigned int mi_c, mi_r;
+         s_a = (int)ctx->above_tx_intra[mi_col_ctx];
+         s_l = (int)ctx->left_tx_intra[mi_row];
+         tctx = (s_a >= (int)mxw ? 1 : 0) + (s_l >= (int)mxh ? 1 : 0);
+         nsyms = (max_dim < 2u) ? 1 : 2;
          if (max_dim - 1u < 4u) {
             depth = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->tx_size_cdf[max_dim - 1u][tctx], nsyms + 1);
@@ -13227,8 +13237,8 @@ static void stbi_avif__superres_upscale_plane(
    {
       /* Per AV1 spec: x0_qn = extra_offset - ((dst_w - 1) * step - ((src_w - 1) << 14)) / 2 */
       /* where extra_offset = src_w << 14 >> 1 ... simplified: */
-      long long total_step = (long long)(dst_w - 1u) * (long long)step;
-      long long total_src  = (long long)(src_w - 1u) << 14;
+      STBI_AVIF_LONGLONG total_step = (STBI_AVIF_LONGLONG)(dst_w - 1u) * (STBI_AVIF_LONGLONG)step;
+      STBI_AVIF_LONGLONG total_src  = (STBI_AVIF_LONGLONG)(src_w - 1u) << 14;
       initial_subpel = (int)((total_src - total_step) / 2);
    }
 
