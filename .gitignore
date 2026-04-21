@@ -1,2 +1,4 @@
 output
 output_png
+tests/test_decode
+test_decode_run
