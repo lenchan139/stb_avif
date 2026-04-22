@@ -8274,8 +8274,9 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
       for (i = 0u; i < ref_count; ++i) { top[i] = ftop[i]; left[i] = fleft[i]; }
       top_left = ftl;
       /* Additional corner refinement for Z2 (diagonal) angles: re-filter the
-       * top-left reference pixel using the 5-point kernel per AV1 spec §7.11.2.3.
-       * tl[-1]=left[0], tl[0]=top_left, tl[1]=top[0]. */
+       * top-left reference pixel using the 5-point weighted kernel.
+       * Weights: neighbors (tl[-1]=left[0], tl[1]=top[0]) × 5, center × 6, bias 8, >>4.
+       * This matches the AV1 spec §7.11.2.3 intra edge filter for Z2 directions. */
       if (angle > 90 && angle < 180) {
          int new_tl = (((int)left[0] + (int)top[0]) * 5 + (int)top_left * 6 + 8) >> 4;
          top_left = (unsigned short)new_tl;
@@ -12287,7 +12288,8 @@ static void stbi_avif__deblock_apply_edge(
       *fq2 = stbi_avif__deblock_clamp((p0 + q0 + q1 + 2*q2 + q3 + q3 + q3     + 4) >> 3, bd);
       *used_wide = 1;
    } else {
-      /* Narrow filter: hev=1 uses only 3*(q0-p0); hev=0 adds p1-q1 correction */
+      /* Narrow filter: hev=1 uses only 3*(q0-p0) for a tight correction;
+       * hev=0 adds (p1-q1) to account for the wider edge context per AV1 spec §7.14.6. */
       if (hev_flag)
          f = 3 * (q0 - p0);
       else
@@ -12301,7 +12303,9 @@ static void stbi_avif__deblock_apply_edge(
    }
 }
 
-/* Legacy 4-tap helper kept for external use; wraps stbi_avif__deblock_apply_edge. */
+/* Legacy 4-tap helper kept for external use; wraps stbi_avif__deblock_apply_edge.
+ * p2/p3 are set to p1 and q2/q3 are set to q1 so the flat condition is never
+ * triggered (preventing the wide path from activating). */
 static void stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
                                         int level, int bd,
                                         int *out_p0, int *out_q0)
