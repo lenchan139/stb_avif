@@ -8273,6 +8273,13 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
          fleft[ref_count - 1u] = left[ref_count - 1u];
       for (i = 0u; i < ref_count; ++i) { top[i] = ftop[i]; left[i] = fleft[i]; }
       top_left = ftl;
+      /* Additional corner refinement for Z2 (diagonal) angles: re-filter the
+       * top-left reference pixel using the 5-point kernel per AV1 spec §7.11.2.3.
+       * tl[-1]=left[0], tl[0]=top_left, tl[1]=top[0]. */
+      if (angle > 90 && angle < 180) {
+         int new_tl = (((int)left[0] + (int)top[0]) * 5 + (int)top_left * 6 + 8) >> 4;
+         top_left = (unsigned short)new_tl;
+      }
    }
 
    /* Mode conversion for DC and PAETH when references unavailable (per AV1 spec) */
@@ -8598,8 +8605,9 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
          luma_avg = (int)(luma_sum / l_count);
          ac = luma_avg - y_avg;
          cfl_term = alpha * ac;
-         /* Round signed alpha*ac to nearest while applying AV1 CFL /8 scale. */
-         delta = (cfl_term + (cfl_term >= 0 ? 4 : -4)) >> 3;
+         /* Round signed alpha*ac to nearest while applying AV1 CFL /64 scale
+          * per AV1 spec §7.11.5.1: scaledLuma = Round2Signed(alpha * ac, 6). */
+         delta = (cfl_term + (cfl_term >= 0 ? 32 : -32)) >> 6;
          pred = (int)crow[x] + delta;
          crow[x] = stbi_avif__av1_clip_sample(pred, planes->bit_depth);
       }
@@ -10364,12 +10372,16 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             int cf_max = (1 << 20) - 1;
             if (dequant_val > cf_max) dequant_val = cf_max;
          }
-         /* Apply TX scale per AV1 spec §7.12.3:
-          * tx2dszctx 6+ (32x32+) → >>2, tx2dszctx 5 (e.g. 32x16, 16x32) → >>1 */
-         if (tx2dszctx >= 6)
-            dequant_val >>= 2;
-         else if (tx2dszctx >= 5)
-            dequant_val >>= 1;
+         /* Apply TX scale per AV1 spec §7.12.3.
+          * dq_shift = max(0, max(log2(txw), log2(txh)) - 4)
+          * 4..16px → >>0; 32px max → >>1; 64px max → >>2.
+          * Cannot use tx2dszctx here because min(log2w,3)+min(log2h,3)
+          * saturates at 6 for both 32×32 (needs >>1) and 64×64 (needs >>2). */
+         {
+            int max_dim = (txw > txh) ? txw : txh;
+            if (max_dim >= 64)      dequant_val >>= 2;
+            else if (max_dim >= 32) dequant_val >>= 1;
+         }
          if (sign) dequant_val = -dequant_val;
 
          if (pos < area) {
@@ -12224,53 +12236,82 @@ static int stbi_avif__deblock_clamp(int v, int bd)
    return v;
 }
 
-/* Apply 4-tap deblocking filter to a vertical or horizontal edge.
- * p1, p0 are pixels on one side of the edge, q0, q1 on the other.
- * Returns filtered p0 and q0 values via pointers. */
-static void stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
-                                        int level, int bd,
-                                        int *out_p0, int *out_q0)
+/* Apply deblocking filter to one edge with optional wide (6-sample) path.
+ * Takes 4 samples on each side (p3..p0 | q0..q3).
+ * Writes filtered p2, p1, p0, q0, q1, q2 via pointers.
+ * Sets *used_wide=1 when the wide flat filter was applied (p2/p1/q1/q2 changed).
+ * AV1 spec §7.14.6: narrow path corrects only p0/q0; flat path corrects p2..q2. */
+static void stbi_avif__deblock_apply_edge(
+   int p3, int p2, int p1, int p0, int q0, int q1, int q2, int q3,
+   int level, int bd,
+   int *fp2, int *fp1, int *fp0, int *fq0, int *fq1, int *fq2,
+   int *used_wide)
 {
-   int thresh, hev_flag, f, f1, f2;
-   int inner_limit = level >> 1;
+   int inner_limit, thresh, hev_flag, flat_flag, f, f1, f2;
+
+   *fp2 = p2; *fp1 = p1; *fp0 = p0;
+   *fq0 = q0; *fq1 = q1; *fq2 = q2;
+   *used_wide = 0;
+
+   inner_limit = level >> 1;
    if (inner_limit < 1) inner_limit = 1;
 
-   /* Check if edge needs filtering */
-   if (abs(p0 - q0) * 2 + (abs(p1 - q1) >> 1) > level + 2 * inner_limit) {
-      *out_p0 = p0;
-      *out_q0 = q0;
+   /* Outer filter condition */
+   if (abs(p0 - q0) * 2 + (abs(p1 - q1) >> 1) > level + 2 * inner_limit)
       return;
-   }
-   if (abs(p1 - p0) > inner_limit || abs(q1 - q0) > inner_limit) {
-      *out_p0 = p0;
-      *out_q0 = q0;
+   /* Inner limit */
+   if (abs(p1 - p0) > inner_limit || abs(q1 - q0) > inner_limit)
       return;
-   }
 
-   /* High-edge-variance check */
+   /* HEV threshold */
    thresh = level >> 4;
    if (thresh < 1) thresh = 1;
    hev_flag = (abs(p1 - p0) > thresh || abs(q1 - q0) > thresh) ? 1 : 0;
 
-   if (hev_flag) {
-      /* Narrow filter: 3-tap */
-      f = 3 * (q0 - p0);
-      if (f < -128) f = -128;
-      if (f > 127) f = 127;
-      f1 = (f + 4) >> 3;
-      f2 = (f + 3) >> 3;
-      *out_q0 = stbi_avif__deblock_clamp(q0 - f1, bd);
-      *out_p0 = stbi_avif__deblock_clamp(p0 + f2, bd);
-   } else {
-      /* Wider filter */
-      f = 3 * (q0 - p0);
-      if (f < -128) f = -128;
-      if (f > 127) f = 127;
-      f1 = (f + 4) >> 3;
-      f2 = (f + 3) >> 3;
-      *out_q0 = stbi_avif__deblock_clamp(q0 - f1, bd);
-      *out_p0 = stbi_avif__deblock_clamp(p0 + f2, bd);
+   /* Flat condition for wide 6-sample filter (AV1 spec §7.14.6):
+    * all neighbors within 1<<(bd-8) of the edge sample. */
+   {
+      int flat_thresh = 1 << (bd - 8);
+      flat_flag = (!hev_flag &&
+                   abs(p2 - p0) <= flat_thresh && abs(p3 - p0) <= flat_thresh &&
+                   abs(q2 - q0) <= flat_thresh && abs(q3 - q0) <= flat_thresh) ? 1 : 0;
    }
+
+   if (flat_flag) {
+      /* Wide 6-sample filter: Round2(sum, 3) */
+      *fp2 = stbi_avif__deblock_clamp((p3 + p3 + p3 + 2*p2 + p1 + p0 + q0     + 4) >> 3, bd);
+      *fp1 = stbi_avif__deblock_clamp((p3 + p3 + p2 + 2*p1 + p0 + q0 + q1     + 4) >> 3, bd);
+      *fp0 = stbi_avif__deblock_clamp((p3 + p2 + p1 + 2*p0 + q0 + q1 + q2     + 4) >> 3, bd);
+      *fq0 = stbi_avif__deblock_clamp((p2 + p1 + p0 + 2*q0 + q1 + q2 + q3     + 4) >> 3, bd);
+      *fq1 = stbi_avif__deblock_clamp((p1 + p0 + q0 + 2*q1 + q2 + q3 + q3     + 4) >> 3, bd);
+      *fq2 = stbi_avif__deblock_clamp((p0 + q0 + q1 + 2*q2 + q3 + q3 + q3     + 4) >> 3, bd);
+      *used_wide = 1;
+   } else {
+      /* Narrow filter: hev=1 uses only 3*(q0-p0); hev=0 adds p1-q1 correction */
+      if (hev_flag)
+         f = 3 * (q0 - p0);
+      else
+         f = 3 * (q0 - p0) + (p1 - q1);
+      if (f < -128) f = -128;
+      if (f > 127) f = 127;
+      f1 = (f + 4) >> 3;
+      f2 = (f + 3) >> 3;
+      *fq0 = stbi_avif__deblock_clamp(q0 - f1, bd);
+      *fp0 = stbi_avif__deblock_clamp(p0 + f2, bd);
+   }
+}
+
+/* Legacy 4-tap helper kept for external use; wraps stbi_avif__deblock_apply_edge. */
+static void stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
+                                        int level, int bd,
+                                        int *out_p0, int *out_q0)
+{
+   int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+   stbi_avif__deblock_apply_edge(p1, p1, p1, p0, q0, q1, q1, q1,
+                                  level, bd,
+                                  &fp2, &fp1, &fp0, &fq0, &fq1, &fq2, &used_wide);
+   *out_p0 = fp0;
+   *out_q0 = fq0;
 }
 
 static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
@@ -12300,14 +12341,28 @@ static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
    if (level_y_v > 0) {
       for (y = 0; y < h; ++y) {
          for (x = 4; x < w; x += 4) {
-            int p1 = planes->y[y * w + x - 2];
-            int p0 = planes->y[y * w + x - 1];
-            int q0 = planes->y[y * w + x];
-            int q1 = planes->y[y * w + x + 1 < w ? x + 1 : x];
-            int fp0, fq0;
-            stbi_avif__deblock_filter4(p1, p0, q0, q1, level_y_v, bd, &fp0, &fq0);
-            planes->y[y * w + x - 1] = (unsigned short)fp0;
-            planes->y[y * w + x]     = (unsigned short)fq0;
+            unsigned short *row = &planes->y[y * w];
+            int p3 = row[x >= 4 ? x - 4 : 0];
+            int p2 = row[x >= 3 ? x - 3 : 0];
+            int p1 = row[x - 2];
+            int p0 = row[x - 1];
+            int q0 = row[x];
+            int q1 = row[x + 1 < w ? x + 1 : x];
+            int q2 = row[x + 2 < w ? x + 2 : x];
+            int q3 = row[x + 3 < w ? x + 3 : x];
+            int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+            stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                          level_y_v, bd,
+                                          &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                          &used_wide);
+            if (used_wide) {
+               if (x >= 3) row[x - 3] = (unsigned short)fp2;
+               row[x - 2] = (unsigned short)fp1;
+               row[x + 1 < w ? x + 1 : x] = (unsigned short)fq1;
+               if (x + 2 < w) row[x + 2] = (unsigned short)fq2;
+            }
+            row[x - 1] = (unsigned short)fp0;
+            row[x]     = (unsigned short)fq0;
          }
       }
    }
@@ -12316,12 +12371,25 @@ static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
    if (level_y_h > 0) {
       for (y = 4; y < h; y += 4) {
          for (x = 0; x < w; ++x) {
+            int p3 = planes->y[(y >= 4 ? y - 4 : 0) * w + x];
+            int p2 = planes->y[(y >= 3 ? y - 3 : 0) * w + x];
             int p1 = planes->y[(y - 2) * w + x];
             int p0 = planes->y[(y - 1) * w + x];
             int q0 = planes->y[y * w + x];
             int q1 = planes->y[(y + 1 < h ? y + 1 : y) * w + x];
-            int fp0, fq0;
-            stbi_avif__deblock_filter4(p1, p0, q0, q1, level_y_h, bd, &fp0, &fq0);
+            int q2 = planes->y[(y + 2 < h ? y + 2 : y) * w + x];
+            int q3 = planes->y[(y + 3 < h ? y + 3 : y) * w + x];
+            int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+            stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                          level_y_h, bd,
+                                          &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                          &used_wide);
+            if (used_wide) {
+               if (y >= 3) planes->y[(y - 3) * w + x] = (unsigned short)fp2;
+               planes->y[(y - 2) * w + x] = (unsigned short)fp1;
+               planes->y[(y + 1 < h ? y + 1 : y) * w + x] = (unsigned short)fq1;
+               if (y + 2 < h) planes->y[(y + 2) * w + x] = (unsigned short)fq2;
+            }
             planes->y[(y - 1) * w + x] = (unsigned short)fp0;
             planes->y[y * w + x]       = (unsigned short)fq0;
          }
@@ -12336,24 +12404,51 @@ static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
       if (level_u > 0) {
          for (y = 0; y < ch; ++y) {
             for (x = 4; x < cw; x += 4) {
-               int p1 = planes->u[y * cw + x - 2];
-               int p0 = planes->u[y * cw + x - 1];
-               int q0 = planes->u[y * cw + x];
-               int q1 = planes->u[y * cw + (x + 1 < cw ? x + 1 : x)];
-               int fp0, fq0;
-               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_u, bd, &fp0, &fq0);
-               planes->u[y * cw + x - 1] = (unsigned short)fp0;
-               planes->u[y * cw + x]     = (unsigned short)fq0;
+               unsigned short *row = &planes->u[y * cw];
+               int p3 = row[x >= 4 ? x - 4 : 0];
+               int p2 = row[x >= 3 ? x - 3 : 0];
+               int p1 = row[x - 2];
+               int p0 = row[x - 1];
+               int q0 = row[x];
+               int q1 = row[x + 1 < cw ? x + 1 : x];
+               int q2 = row[x + 2 < cw ? x + 2 : x];
+               int q3 = row[x + 3 < cw ? x + 3 : x];
+               int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+               stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                             level_u, bd,
+                                             &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                             &used_wide);
+               if (used_wide) {
+                  if (x >= 3) row[x - 3] = (unsigned short)fp2;
+                  row[x - 2] = (unsigned short)fp1;
+                  row[x + 1 < cw ? x + 1 : x] = (unsigned short)fq1;
+                  if (x + 2 < cw) row[x + 2] = (unsigned short)fq2;
+               }
+               row[x - 1] = (unsigned short)fp0;
+               row[x]     = (unsigned short)fq0;
             }
          }
          for (y = 4; y < ch; y += 4) {
             for (x = 0; x < cw; ++x) {
+               int p3 = planes->u[(y >= 4 ? y - 4 : 0) * cw + x];
+               int p2 = planes->u[(y >= 3 ? y - 3 : 0) * cw + x];
                int p1 = planes->u[(y - 2) * cw + x];
                int p0 = planes->u[(y - 1) * cw + x];
                int q0 = planes->u[y * cw + x];
                int q1 = planes->u[(y + 1 < ch ? y + 1 : y) * cw + x];
-               int fp0, fq0;
-               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_u, bd, &fp0, &fq0);
+               int q2 = planes->u[(y + 2 < ch ? y + 2 : y) * cw + x];
+               int q3 = planes->u[(y + 3 < ch ? y + 3 : y) * cw + x];
+               int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+               stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                             level_u, bd,
+                                             &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                             &used_wide);
+               if (used_wide) {
+                  if (y >= 3) planes->u[(y - 3) * cw + x] = (unsigned short)fp2;
+                  planes->u[(y - 2) * cw + x] = (unsigned short)fp1;
+                  planes->u[(y + 1 < ch ? y + 1 : y) * cw + x] = (unsigned short)fq1;
+                  if (y + 2 < ch) planes->u[(y + 2) * cw + x] = (unsigned short)fq2;
+               }
                planes->u[(y - 1) * cw + x] = (unsigned short)fp0;
                planes->u[y * cw + x]       = (unsigned short)fq0;
             }
@@ -12364,24 +12459,51 @@ static void stbi_avif__av1_deblock_filter(stbi_avif__av1_planes *planes,
       if (level_v > 0) {
          for (y = 0; y < ch; ++y) {
             for (x = 4; x < cw; x += 4) {
-               int p1 = planes->v[y * cw + x - 2];
-               int p0 = planes->v[y * cw + x - 1];
-               int q0 = planes->v[y * cw + x];
-               int q1 = planes->v[y * cw + (x + 1 < cw ? x + 1 : x)];
-               int fp0, fq0;
-               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_v, bd, &fp0, &fq0);
-               planes->v[y * cw + x - 1] = (unsigned short)fp0;
-               planes->v[y * cw + x]     = (unsigned short)fq0;
+               unsigned short *row = &planes->v[y * cw];
+               int p3 = row[x >= 4 ? x - 4 : 0];
+               int p2 = row[x >= 3 ? x - 3 : 0];
+               int p1 = row[x - 2];
+               int p0 = row[x - 1];
+               int q0 = row[x];
+               int q1 = row[x + 1 < cw ? x + 1 : x];
+               int q2 = row[x + 2 < cw ? x + 2 : x];
+               int q3 = row[x + 3 < cw ? x + 3 : x];
+               int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+               stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                             level_v, bd,
+                                             &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                             &used_wide);
+               if (used_wide) {
+                  if (x >= 3) row[x - 3] = (unsigned short)fp2;
+                  row[x - 2] = (unsigned short)fp1;
+                  row[x + 1 < cw ? x + 1 : x] = (unsigned short)fq1;
+                  if (x + 2 < cw) row[x + 2] = (unsigned short)fq2;
+               }
+               row[x - 1] = (unsigned short)fp0;
+               row[x]     = (unsigned short)fq0;
             }
          }
          for (y = 4; y < ch; y += 4) {
             for (x = 0; x < cw; ++x) {
+               int p3 = planes->v[(y >= 4 ? y - 4 : 0) * cw + x];
+               int p2 = planes->v[(y >= 3 ? y - 3 : 0) * cw + x];
                int p1 = planes->v[(y - 2) * cw + x];
                int p0 = planes->v[(y - 1) * cw + x];
                int q0 = planes->v[y * cw + x];
                int q1 = planes->v[(y + 1 < ch ? y + 1 : y) * cw + x];
-               int fp0, fq0;
-               stbi_avif__deblock_filter4(p1, p0, q0, q1, level_v, bd, &fp0, &fq0);
+               int q2 = planes->v[(y + 2 < ch ? y + 2 : y) * cw + x];
+               int q3 = planes->v[(y + 3 < ch ? y + 3 : y) * cw + x];
+               int fp2, fp1, fp0, fq0, fq1, fq2, used_wide;
+               stbi_avif__deblock_apply_edge(p3, p2, p1, p0, q0, q1, q2, q3,
+                                             level_v, bd,
+                                             &fp2, &fp1, &fp0, &fq0, &fq1, &fq2,
+                                             &used_wide);
+               if (used_wide) {
+                  if (y >= 3) planes->v[(y - 3) * cw + x] = (unsigned short)fp2;
+                  planes->v[(y - 2) * cw + x] = (unsigned short)fp1;
+                  planes->v[(y + 1 < ch ? y + 1 : y) * cw + x] = (unsigned short)fq1;
+                  if (y + 2 < ch) planes->v[(y + 2) * cw + x] = (unsigned short)fq2;
+               }
                planes->v[(y - 1) * cw + x] = (unsigned short)fp0;
                planes->v[y * cw + x]       = (unsigned short)fq0;
             }
