@@ -1088,7 +1088,12 @@ static int stbi_avif__parse_av1_obu_stream(const unsigned char *data, size_t siz
          if (size - offset < 2)
             return stbi_avif__fail("truncated AV1 OBU extension");
          extension_byte = (unsigned int)data[offset + 1];
-         if ((extension_byte >> 5) != 0)
+         /* AV1 spec §5.3.2: extension header has temporal_id [7:5] and
+          * spatial_id [4:3].  AVIF requires both to be 0 (single layer).
+          * Shifting right by 3 moves both fields into bits [4:0]; reserved
+          * bits [2:0] are shifted out, so a non-zero result means either
+          * temporal_id or spatial_id is non-zero. */
+         if ((extension_byte >> 3) != 0u)
             return stbi_avif__fail("temporal or spatial layering is not supported");
          header_size += 1;
       }
@@ -1232,7 +1237,12 @@ static int stbi_avif__index_av1_frame_obus(const unsigned char *data, size_t siz
          if (size - offset < 2)
             return stbi_avif__fail("truncated AV1 OBU extension in payload");
          extension_byte = (unsigned int)data[offset + 1];
-         if ((extension_byte >> 5) != 0)
+         /* AV1 spec §5.3.2: extension header has temporal_id [7:5] and
+          * spatial_id [4:3].  AVIF requires both to be 0 (single layer).
+          * Shifting right by 3 moves both fields into bits [4:0]; reserved
+          * bits [2:0] are shifted out, so a non-zero result means either
+          * temporal_id or spatial_id is non-zero. */
+         if ((extension_byte >> 3) != 0u)
             return stbi_avif__fail("temporal or spatial layering is not supported");
          header_size += 1;
       }
@@ -2394,16 +2404,20 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
 }
 
 /*
- * AV1 spec §8.2.7  update_cdf(cdf, symbol, nsyms)
+ * update_cdf(cdf, symbol, nsyms)  -- dav1d ascending-CDF convention
  *
- * CDF arrays have `nsyms + 1` elements: indices 0..nsyms-1 are the cumulative
- * probabilities (in [1,32767] with cdf[nsyms-1] fixed at 32768), and index
- * nsyms stores the update count (starts at 0, used to compute the adaptation rate).
+ * CDF arrays are stored in ASCENDING order: cdf[i] = P(symbol <= i) * 32768,
+ * with cdf[nsyms-1] = 32768 always.  Index nsyms holds the update count
+ * (starts at 0).  This is the dav1d convention, which is the DUAL of the
+ * AV1 spec §8.2.7 ICDF convention (where cdf[i] = P(symbol > i) * 32768).
+ *
+ * Because the probabilities are stored as P(symbol <= i) rather than
+ * P(symbol > i), the update directions are opposite to those in the spec:
  *
  *   rate = (4 | (count >> 4)) + (nsyms > 2) + (nsyms > 4)   [dav1d]
- *   For each i in [0, nsyms-1]:
- *     if i < symbol:  cdf[i] += (32768 - cdf[i]) >> rate
- *     else:           cdf[i] -= cdf[i] >> rate
+ *   For each i in [0, nsyms-2]:
+ *     if i < symbol:  cdf[i] -= cdf[i] >> rate         (decrease P(sym<=i))
+ *     else:           cdf[i] += (32768 - cdf[i]) >> rate (increase P(sym<=i))
  *   count = min(count + 1, 32)
  */
 static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms)
