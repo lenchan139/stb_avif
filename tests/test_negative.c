@@ -74,6 +74,7 @@ static void check_info_fails(const char *name,
 
 static void check_cdf_update_rate_cases(void)
 {
+   /* size = nsyms + 1 (extra slot stores update count) */
    unsigned short cdf3[4];
    unsigned short cdf5[6];
 
@@ -83,6 +84,7 @@ static void check_cdf_update_rate_cases(void)
    cdf3[2] = 32768u;
    cdf3[3] = 0u; /* count */
    stbi_avif__av1_update_cdf(cdf3, 1, 3);
+   /* rate=4 => 16384 - (16384 >> 4) = 16384 - 1024 = 15360 */
    if (cdf3[0] != 15360u)
    {
       printf("FAIL [cdf_rate_n3]: got %u expected 15360\n", (unsigned)cdf3[0]);
@@ -101,6 +103,7 @@ static void check_cdf_update_rate_cases(void)
    cdf5[4] = 32768u;
    cdf5[5] = 0u; /* count */
    stbi_avif__av1_update_cdf(cdf5, 1, 5);
+   /* rate=5 => 16384 - (16384 >> 5) = 16384 - 512 = 15872 */
    if (cdf5[0] != 15872u)
    {
       printf("FAIL [cdf_rate_n5]: got %u expected 15872\n", (unsigned)cdf5[0]);
