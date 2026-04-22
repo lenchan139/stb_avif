@@ -2414,7 +2414,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
  * Because the probabilities are stored as P(symbol <= i) rather than
  * P(symbol > i), the update directions are opposite to those in the spec:
  *
- *   rate = (4 | (count >> 4)) + (nsyms > 2) + (nsyms > 4)   [dav1d]
+ *   rate = (4 | (count >> 4)) + (nsyms > 3)   [AV1 §8.2.7 simplified]
  *   For each i in [0, nsyms-2]:
  *     if i < symbol:  cdf[i] -= cdf[i] >> rate         (decrease P(sym<=i))
  *     else:           cdf[i] += (32768 - cdf[i]) >> rate (increase P(sym<=i))
@@ -2427,8 +2427,8 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
    int rate_shift;
 
    count = (int)cdf[nsyms]; /* update counter stored in the extra slot */
-   /* rate = (4 | (count >> 4)) + (nsyms > 2) + (nsyms > 4)  [dav1d convention] */
-   rate = (4 | (count >> 4)) + (nsyms > 2 ? 1 : 0) + (nsyms > 4 ? 1 : 0);
+   /* rate = (4 | (count >> 4)) + (nsyms > 3) */
+   rate = (4 | (count >> 4)) + (nsyms > 3 ? 1 : 0);
    rate_shift = rate;
 
    for (i = 0; i < nsyms - 1; ++i)

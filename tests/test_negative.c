@@ -72,6 +72,46 @@ static void check_info_fails(const char *name,
    }
 }
 
+static void check_cdf_update_rate_cases(void)
+{
+   unsigned short cdf3[4];
+   unsigned short cdf5[6];
+
+   /* 3 symbols (+count): expected rate uses no size bump (rate=4 at count=0). */
+   cdf3[0] = 16384u;
+   cdf3[1] = 24576u;
+   cdf3[2] = 32768u;
+   cdf3[3] = 0u; /* count */
+   stbi_avif__av1_update_cdf(cdf3, 1, 3);
+   if (cdf3[0] != 15360u)
+   {
+      printf("FAIL [cdf_rate_n3]: got %u expected 15360\n", (unsigned)cdf3[0]);
+      ++failures;
+   }
+   else
+   {
+      printf("PASS [cdf_rate_n3]\n");
+   }
+
+   /* 5 symbols (+count): expected +1 size bump (rate=5 at count=0). */
+   cdf5[0] = 16384u;
+   cdf5[1] = 20000u;
+   cdf5[2] = 24000u;
+   cdf5[3] = 28000u;
+   cdf5[4] = 32768u;
+   cdf5[5] = 0u; /* count */
+   stbi_avif__av1_update_cdf(cdf5, 1, 5);
+   if (cdf5[0] != 15872u)
+   {
+      printf("FAIL [cdf_rate_n5]: got %u expected 15872\n", (unsigned)cdf5[0]);
+      ++failures;
+   }
+   else
+   {
+      printf("PASS [cdf_rate_n5]\n");
+   }
+}
+
 /* --------------------------------------------------------------------- */
 /*  Shared test data buffers                                               */
 /* --------------------------------------------------------------------- */
@@ -149,6 +189,8 @@ int main(void)
    truncated_ftyp[6] = 0x79; truncated_ftyp[7] = 0x70; /* 'ftyp' */
 
    printf("==> Negative / robustness tests\n");
+
+   check_cdf_update_rate_cases();
 
    /* --- NULL / empty input ------------------------------------------- */
    check_decode_fails("null_buffer",  NULL, 0);
