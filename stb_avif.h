@@ -2287,7 +2287,10 @@ static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, siz
  * again by left-shifting and reading fresh bytes from the tile buffer.
  */
 
-/* Refill the 64-bit dif window from the byte stream (matches dav1d ctx_refill). */
+/* Refill the 64-bit dif window from the byte stream (matches dav1d ctx_refill).
+ * Invariant: unfilled bit positions in dif remain 1s. XOR bytes into the
+ * window so that dif effectively encodes ~stream (where 1-bits mark the
+ * "value below threshold" half of each symbol interval). */
 static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
 {
    int c;
@@ -2297,24 +2300,18 @@ static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
    dif   = rd->dif;
    bptr  = rd->bptr;
    end   = rd->end;
-   c = 40 - rd->cnt;  /* = EC_WIN_SIZE - cnt - 24, first free bit position */
-   do {
-      if (bptr >= end) {
-         /* fill remaining bits with 1s (complement of 0x00 stream) */
-         dif |= ~(~(unsigned STBI_AVIF_LONGLONG)0xFFu << c);
-         break;
-      }
-      dif |= (unsigned STBI_AVIF_LONGLONG)((unsigned int)bptr[0] ^ 0xFFu) << c;
-      bptr++;
+   c = 40 - rd->cnt;  /* first free byte-aligned bit position (EC_WIN_SIZE - cnt - 24) */
+   while (c >= 0 && bptr < end) {
+      dif ^= (unsigned STBI_AVIF_LONGLONG)(*bptr++) << c;
       c -= 8;
-   } while (c >= 0);
+   }
    rd->dif  = dif;
    rd->cnt  = 40 - c;  /* = EC_WIN_SIZE - c - 24 */
    rd->bptr = bptr;
 }
 
 /*
- * init (matches AOM od_ec_dec_init).
+ * init (matches dav1d dav1d_msac_init / AOM od_ec_dec_init).
  * bit_offset: bits already consumed by the tile-group header.
  */
 static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decoder,
@@ -2333,7 +2330,8 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    decoder->buf  = data + byte_start;
    decoder->end  = data + size;
    decoder->bptr = decoder->buf;
-   decoder->dif  = STBI_AVIF_ULL(0);
+   /* dav1d: dif = ((ec_win)1 << (EC_WIN_SIZE - 1)) - 1  (all bits 1 except top) */
+   decoder->dif  = (((unsigned STBI_AVIF_LONGLONG)1) << 63) - 1u;
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
@@ -2343,7 +2341,8 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
 
 /*
  * Normalize: left-shift range to restore invariant rng >= 0x8000.
- * Matches AOM od_ec_dec_normalize. Returns ret (the decoded symbol).
+ * Matches dav1d ctx_norm: dif = ((dif + 1) << d) - 1, which preserves the
+ * "unwritten bits are 1s" invariant in the newly-shifted-in low bits.
  */
 static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd,
                                                  unsigned STBI_AVIF_LONGLONG dif, unsigned int rng,
@@ -2351,12 +2350,12 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
 {
    int d;
    unsigned int r;
-   /* Count leading zeros in 16-bit representation of rng: d = 16 - ilog(rng) */
+   /* Count leading zeros in 16-bit representation of rng */
    d = 0;
    r = rng;
    while (r < 0x8000u) { r <<= 1u; ++d; }
    rd->cnt -= d;
-   rd->dif  = (dif << d);
+   rd->dif  = ((dif + 1u) << d) - 1u;
    rd->rng  = rng << d;
    if (rd->cnt < 0) stbi_avif__av1_rd_refill(rd);
    return ret;
@@ -2386,14 +2385,16 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    do {
       u = v;
       ++sym;
-      /* v = ((r >> 8) * (icdf >> EC_PROB_SHIFT) >> 1) + EC_MIN_PROB * (N - sym)
-         where icdf = 32768 - cdf[sym], EC_PROB_SHIFT=6, EC_MIN_PROB=4,
-         N = nsyms - 1. Note: EC_MIN_PROB term is 4*(N-sym) matching dav1d's
-         4*(n_symbols-val) with n_symbols = nsyms-1 (terminal 32768 not counted). */
+      /* AV1 spec §8.2.3 / libaom od_ec_decode_cdf_q15:
+       *   v = (rng >> 8) * (icdf[sym] >> EC_PROB_SHIFT) >> (7-EC_PROB_SHIFT)
+       *     + EC_MIN_PROB * (NSymbs - 1 - sym)
+       * with EC_PROB_SHIFT=6, EC_MIN_PROB=4.
+       * icdf = 32768 - cdf[sym] (our cdf is ascending, spec uses ICDF). */
       {
          unsigned int icdf_val = 32768u - (unsigned int)cdf[sym];
          unsigned int Nv = (unsigned int)(nsyms - 1);
-         v = (((r >> 8u) * (icdf_val >> 6u)) >> 1u) + 4u * (Nv - (unsigned int)sym);
+         v = (((r >> 8u) * (icdf_val >> 6u)) >> 1u)
+             + 4u * (Nv - (unsigned int)sym);
       }
    } while (c < v);
 
@@ -2424,19 +2425,21 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
 {
    int count, rate;
    int i;
-   int rate_shift;
 
    count = (int)cdf[nsyms]; /* update counter stored in the extra slot */
-   /* rate = (4 | (count >> 4)) + (nsyms > 2) + (nsyms > 4)  [dav1d convention] */
-   rate = (4 | (count >> 4)) + (nsyms > 2 ? 1 : 0) + (nsyms > 4 ? 1 : 0);
-   rate_shift = rate;
+   /* Matches dav1d src/msac.c update_cdf():
+    *   rate = 4 + (count >> 4) + (n_symbols > 2)
+    * dav1d's n_symbols == (our nsyms - 1) because our nsyms counts the
+    * terminal 32768 sentinel.  Thus dav1d's n_symbols > 2 maps to nsyms > 3.
+    */
+   rate = 4 + (count >> 4) + (nsyms > 3 ? 1 : 0);
 
    for (i = 0; i < nsyms - 1; ++i)
    {
       if (i < symbol)
-         cdf[i] -= (unsigned short)(cdf[i] >> rate_shift);
+         cdf[i] -= (unsigned short)(cdf[i] >> rate);
       else
-         cdf[i] += (unsigned short)((32768u - cdf[i]) >> rate_shift);
+         cdf[i] += (unsigned short)((32768u - cdf[i]) >> rate);
    }
 
    if (count < 32)
@@ -2447,23 +2450,63 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
  * Read a symbol using a MUTABLE CDF that is updated after each decode.
  * This is the adaptive version used for all main syntax elements.
  */
-static unsigned int stbi_avif__av1_read_symbol_adapt(stbi_avif__av1_range_decoder *rd,
-                                                       unsigned short *cdf, int nsyms)
+static unsigned int stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_decoder *rd,
+                                                       unsigned short *cdf, int nsyms, int _callsite_line)
 {
-   unsigned int sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
+   unsigned int sym;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   unsigned short _pre_cdf[32];
+   int _i;
+   for (_i = 0; _i < nsyms && _i < 32; ++_i) _pre_cdf[_i] = cdf[_i];
+#endif
+   sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
    stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   { static int _trace_ct = 0;
+     if (_trace_ct < 400) {
+        fprintf(stderr, "OURS_SYM[%d] line=%d nsyms=%d ret=%u rng=%u cdf=[",
+                _trace_ct, _callsite_line, nsyms, sym, rd->rng);
+        for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", _pre_cdf[_i]);
+        fprintf(stderr, "] cnt=%u\n", cdf[nsyms]);
+        _trace_ct++;
+     }
+   }
+#endif
    return sym;
+}
+#define stbi_avif__av1_read_symbol_adapt(rd, cdf, nsyms) \
+   stbi_avif__av1_read_symbol_adapt_impl((rd), (cdf), (nsyms), __LINE__)
+
+/* Equi-probable (50/50) bit read matching dav1d decode_bool_equi_c.
+ * Distinct from read_symbol(half_cdf,2): const term is EC_MIN_PROB=4, not 8.
+ * Returns the decoded bit (0 or 1). */
+static unsigned int stbi_avif__av1_read_bool_equi(stbi_avif__av1_range_decoder *rd)
+{
+   unsigned int r = rd->rng;
+   unsigned STBI_AVIF_LONGLONG dif = rd->dif;
+   unsigned int v, ret;
+   unsigned STBI_AVIF_LONGLONG vw;
+   /* v = ((r >> 8) << 7) + EC_MIN_PROB */
+   v = ((r >> 8u) << 7u) + 4u;
+   vw = (unsigned STBI_AVIF_LONGLONG)v << 48;
+   ret = (dif >= vw) ? 1u : 0u;
+   if (ret) {
+      dif -= vw;
+      v = r - v;      /* v += ret * (r - 2*v)  with ret=1 */
+   }
+   stbi_avif__av1_rd_normalize(rd, dif, v, 0u);
+   /* dav1d returns !ret */
+   return 1u - ret;
 }
 
 /* Read N literal bits from the range decoder (MSB first, each bit is 50/50) */
 static unsigned int stbi_avif__av1_read_literal(stbi_avif__av1_range_decoder *rd,
                                                  unsigned int nbits)
 {
-   static const unsigned short half_cdf[3] = { 16384u, 32768u, 0u };
    unsigned int result = 0u;
    unsigned int i;
    for (i = 0; i < nbits; ++i) {
-      result = (result << 1u) | stbi_avif__av1_read_symbol(rd, half_cdf, 2);
+      result = (result << 1u) | stbi_avif__av1_read_bool_equi(rd);
    }
    return result;
 }
@@ -10254,9 +10297,26 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    /* 4a. Read the EOB position coefficient (scan index eob-1) */
    {
       int pos = (int)scan[eob - 1];
-      int coeff_ctx = stbi_avif__av1_get_lower_levels_ctx_eob(bhl, txw, eob - 1);
+      /* Match dav1d recon_tmpl.c decode_coefs:
+       *   If eob_pos > 0 (our eob > 1): use eob_cdf[ctx] with
+       *     ctx = 1 + (eob_pos > 2<<tx2dszctx) + (eob_pos > 4<<tx2dszctx)
+       *     where eob_pos = our eob - 1 (0-indexed last coef position).
+       *   If eob_pos == 0 (DC-only, our eob == 1): use eob_cdf[0] (ctx=0). */
+      int tx_area_for_ctx = txw << bhl;
+      int eob_pos = eob - 1;  /* 0-indexed last coefficient position */
+      int coeff_ctx;
       int level;
       int ts = tx_ctx < 4 ? tx_ctx : 4;
+      if (eob_pos == 0) {
+         coeff_ctx = 0;  /* DC-only path uses fixed ctx=0 */
+      } else {
+         coeff_ctx = 1 + (eob_pos > (tx_area_for_ctx >> 3) ? 1 : 0)
+                      + (eob_pos > (tx_area_for_ctx >> 2) ? 1 : 0);
+      }
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+      fprintf(stderr, "OURS_EOBCOEF: ts=%d plane_type=%d coeff_ctx=%d eob=%d tx_area=%d txw=%d bhl=%d tx_ctx=%d\n",
+              ts, plane_type, coeff_ctx, eob, tx_area_for_ctx, txw, bhl, tx_ctx);
+#endif
       sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->coeff_base_eob_cdf[ts][plane_type][coeff_ctx], 3);
       level = (int)sym + 1; /* EOB coeff is always >= 1 */
@@ -10352,9 +10412,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
                      ctx->dc_sign_cdf[plane_type][dc_sign_ctx], 2);
             sign = (int)sym;
          } else {
-            sym = stbi_avif__av1_read_symbol(&ctx->rd,
-                     stbi_avif__av1_half_cdf, 2);
-            sign = (int)sym;
+            sign = (int)stbi_avif__av1_read_bool_equi(&ctx->rd);
          }
 
          /* Read Golomb remainder for large levels */
@@ -10363,14 +10421,12 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             unsigned int golomb_bit;
             int remainder = 0;
             while (golomb_len < 32) {
-               golomb_bit = stbi_avif__av1_read_symbol(&ctx->rd,
-                              stbi_avif__av1_half_cdf, 2);
+               golomb_bit = stbi_avif__av1_read_bool_equi(&ctx->rd);
                if (golomb_bit) break;  /* stop on 1 */
                ++golomb_len;
             }
             for (k = golomb_len - 1; k >= 0; --k) {
-               golomb_bit = stbi_avif__av1_read_symbol(&ctx->rd,
-                              stbi_avif__av1_half_cdf, 2);
+               golomb_bit = stbi_avif__av1_read_bool_equi(&ctx->rd);
                remainder |= ((int)golomb_bit << k);
             }
             lvl += (1 << golomb_len) - 1 + remainder;
@@ -10560,9 +10616,32 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    int seg_dc_qstep_y, seg_ac_qstep_y;
    int seg_dc_qstep_u, seg_ac_qstep_u;
    int seg_dc_qstep_v, seg_ac_qstep_v;
+   int has_chroma;
 
    if (px >= ctx->planes->width)  return 1;
    if (py >= ctx->planes->height) return 1;
+   /* has_chroma: per AV1 spec / dav1d decode.c:702-704.
+    *   has_chroma = (layout != I400) &&
+    *                (bw4 > ss_hor || mi_col & 1) &&
+    *                (bh4 > ss_ver || mi_row & 1)
+    * For 4:2:0 (ss_hor=ss_ver=1): small 4x4 Y blocks at even mi positions do
+    * not code chroma; the chroma is coded at their odd-positioned sibling. */
+   {
+      int ss_hor = (int)ctx->planes->subx;
+      int ss_ver = (int)ctx->planes->suby;
+      has_chroma = !ctx->monochrome
+                && ((int)bw4 > ss_hor || ((int)mi_col & 1))
+                && ((int)bh4 > ss_ver || ((int)mi_row & 1));
+   }
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   {
+      static int _ours_block_idx = 0;
+      int ss_hor = (int)ctx->planes->subx;
+      int ss_ver = (int)ctx->planes->suby;
+      fprintf(stderr, "OURS_BLOCK[%d] bs=%d bw4=%u bh4=%u bx=%u by=%u ss_hor=%d ss_ver=%d has_chroma=%d\n",
+              _ours_block_idx++, block_size, bw4, bh4, mi_col, mi_row, ss_hor, ss_ver, has_chroma);
+   }
+#endif
    palette_y_size = 0;
    palette_uv_size = 0;
    cfl_alpha_u = 0;
@@ -10704,7 +10783,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    /* UV mode (must be read before residual per AV1 spec) — skip for monochrome */
    uv_mode = 0u;
    uv_mode_raw = 0u;
-   if (!ctx->monochrome) {
+   if (has_chroma) {
       int cfl_allowed = (pw <= 32u && ph <= 32u); /* CFL only for blocks ≤ 32x32 */
       if (cpw >= 4u && cph >= 4u) {
          if (cfl_allowed)
@@ -10862,7 +10941,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
             }
          }
-         if (!ctx->monochrome && uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
+         if (has_chroma && uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
             unsigned int pal_uv_ctx = palette_y_size > 0 ? 1u : 0u;
             unsigned int pal_uv_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->palette_uv_mode_cdf[pal_uv_ctx], 2);
@@ -11123,8 +11202,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          px, py, pw, ph, ctx->planes->bit_depth, y_mode, y_angle_delta);
    }
 
-   /* Predict UV — skip for monochrome */
-   if (!ctx->monochrome && cpw > 0u && cph > 0u) {
+   /* Predict UV — skip for monochrome or Y-only sub-blocks (has_chroma=0) */
+   if (has_chroma && cpw > 0u && cph > 0u) {
       if (palette_uv_size > 0) {
          /* Fill UV from palette color map */
          unsigned int mi_r, mi_c;
@@ -11185,10 +11264,25 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          { 2, 4, 4, 4, 5 }, { 3, 5, 5, 5, 6 }
       };
 
+      /* Tile coding block into 64-pixel sub-regions; within each sub-region
+       * process all Y TUs first, then all U TUs, then all V TUs. This matches
+       * dav1d's read_coef_blocks loop ordering (recon_tmpl.c:read_coef_blocks).
+       * For blocks <=64x64 there's exactly one iteration and behavior matches
+       * the naive Y-then-UV ordering; for 128x128 SBs the tiling matters. */
+      { unsigned int init_x, init_y;
+      for (init_y = 0; init_y < ph; init_y += 64u) {
+         unsigned int sub_ph = (ph - init_y < 64u) ? (ph - init_y) : 64u;
+         for (init_x = 0; init_x < pw; init_x += 64u) {
+            unsigned int sub_pw = (pw - init_x < 64u) ? (pw - init_x) : 64u;
+            unsigned int sub_cpx = (init_x >> ctx->planes->subx);
+            unsigned int sub_cpy = (init_y >> ctx->planes->suby);
+            unsigned int sub_cpw = (sub_pw + (unsigned int)ctx->planes->subx) >> ctx->planes->subx;
+            unsigned int sub_cph = (sub_ph + (unsigned int)ctx->planes->suby) >> ctx->planes->suby;
+
       /* Y residual (skip if palette) */
       if (palette_y_size == 0)
-      for (tx_row = 0; tx_row < ph; tx_row += tx_h) {
-         for (tx_col = 0; tx_col < pw; tx_col += tx_w) {
+      for (tx_row = init_y; tx_row < init_y + sub_ph; tx_row += tx_h) {
+         for (tx_col = init_x; tx_col < init_x + sub_pw; tx_col += tx_w) {
             unsigned int txb_skip;
             int ts_skip = tx_ctx < 5 ? tx_ctx : 4;
             int txb_skip_ctx, dc_sign_ctx_y;
@@ -11288,7 +11382,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       /* U and V residual (skip for monochrome, palette, or if chroma block too small for a TX).
        * In 4:2:0, a 4x4 luma block maps to a 2x2 chroma block which is below
        * the minimum 4x4 TX size; those blocks are never chroma references. */
-      if (!ctx->monochrome && cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
+      if (has_chroma && cpw >= 4u && cph >= 4u && palette_uv_size == 0 && sub_cpw >= 1u && sub_cph >= 1u) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_szw / 4u;
          unsigned int uv_h_mi = uv_tx_szh / 4u;
@@ -11299,8 +11393,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             unsigned short *plane_buf = (p == 1) ? ctx->planes->u : ctx->planes->v;
             int dc_qstep_plane = (p == 1) ? seg_dc_qstep_u : seg_dc_qstep_v;
             int ac_qstep_plane = (p == 1) ? seg_ac_qstep_u : seg_ac_qstep_v;
-            for (uv_tx_row = 0; uv_tx_row < cph; uv_tx_row += uv_tx_szh) {
-               for (uv_tx_col = 0; uv_tx_col < cpw; uv_tx_col += uv_tx_szw) {
+            for (uv_tx_row = sub_cpy; uv_tx_row < sub_cpy + sub_cph && uv_tx_row < cph; uv_tx_row += uv_tx_szh) {
+               for (uv_tx_col = sub_cpx; uv_tx_col < sub_cpx + sub_cpw && uv_tx_col < cpw; uv_tx_col += uv_tx_szw) {
                   unsigned int mi_tx_col_uv = (cpx + uv_tx_col) / 4u;
                   unsigned int mi_tx_row_uv = (cpy + uv_tx_row) / 4u;
                   unsigned int ti;
@@ -11371,6 +11465,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             }
          }
       }
+         } /* end for init_x */
+      } /* end for init_y */
+      } /* end init_x/init_y scope */
    }
 
    } /* end fi_flag/fi_mode scope */
@@ -11481,6 +11578,13 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
    partition = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                    ctx->partition_cdf[bsize_ctx][part_ctx],
                    stbi_avif__partition_nsym[bsize_ctx]);
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   fprintf(stderr, "OURS_PART bs=%d bsize_ctx=%d part_ctx=%d above=%d left=%d bsl=%d mi=%u,%u above_raw=%d left_raw=%d part=%u\n",
+           block_size, bsize_ctx, part_ctx, above, left, bsl, mi_col, mi_row,
+           (int)ctx->above_partition_ctx[mi_col],
+           (int)ctx->left_partition_ctx[mi_row % sb_mi],
+           partition);
+#endif
 
 
    /* Compute the sub-block size for SPLIT. */
