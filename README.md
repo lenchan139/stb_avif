@@ -95,6 +95,22 @@ bash test_run.sh
 This compiles three binaries, converts all sample AVIF files in `example_avif/` to PNG
 in `output_png/`, runs the negative tests, and smoke-tests the `avif2png` CLI tool.
 
+### Debug tracing
+
+To trace internal container / AV1 bitstream / reconstruction state line-by-line,
+compile with `-DSTBI_AVIF_DEBUG_TRACE`:
+
+```sh
+cc -O2 -DSTBI_AVIF_DEBUG_TRACE tests/test_decode.c -o /tmp/td -lm
+/tmp/td input.avif out.png 2>&1 | grep '^\[stb_avif\]'
+```
+
+Traces are emitted at every major stage (`ftyp`, `pitm`, `iloc`, container
+summary, each OBU, sequence header, frame header, tile group, RGBA output).
+You can also `#define STBI_AVIF_TRACE(...)` before including `stb_avif.h` to
+route trace output to a custom sink. With the macro undefined (default) the
+trace calls expand to nothing.
+
 ## `avif2png` CLI Converter
 
 A minimal, self-contained command-line converter is provided in `tools/avif2png.c`.
