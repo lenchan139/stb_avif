@@ -2402,6 +2402,11 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    r   = rd->rng;
    dif = rd->dif;
    c   = (unsigned int)(dif >> 48);   /* top 16 bits of dif window */
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   { unsigned int _c_pre = c; (void)_c_pre;
+     fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld\n",
+       _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr)); }
+#endif
 
    v   = r;
    sym = -1;
@@ -2422,6 +2427,9 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    r   = u - v;
    dif -= (unsigned STBI_AVIF_LONGLONG)v << 48;
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   fprintf(stderr, "sym=%u dif=%llu rng=%u\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng);
+#endif
    return ret;
 }
 
@@ -2441,6 +2449,8 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
  *     if i < symbol:  cdf[i] -= cdf[i] >> rate         (decrease P(sym<=i))
  *     else:           cdf[i] += (32768 - cdf[i]) >> rate (increase P(sym<=i))
  *   count = min(count + 1, 32)
+   fprintf(stderr, "sym=%u dif=%llu rng=%u\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng);
+#endif
  */
 static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms)
 {
