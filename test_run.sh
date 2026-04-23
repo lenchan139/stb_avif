@@ -29,4 +29,12 @@ done
 echo "==> Cleaning up build files..."
 rm -f "$BIN"
 
+echo ""
+echo "==> Running validation checklist..."
+CHECKLIST_SRC="$SCRIPT_DIR/tests/test_checklist.c"
+CHECKLIST_BIN="$SCRIPT_DIR/test_checklist_run"
+cc -O2 -o "$CHECKLIST_BIN" "$CHECKLIST_SRC" -lm
+"$CHECKLIST_BIN" "$INPUT_DIR"/*.avif
+rm -f "$CHECKLIST_BIN"
+
 echo "==> Done. Output in: $OUTPUT_DIR"
