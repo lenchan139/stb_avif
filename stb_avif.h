@@ -72,6 +72,29 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
 #define STBI_AVIF_FREE(p) free(p)
 #endif
 
+/* -------------------------------------------------------------------------
+ * Optional debug tracing.
+ *
+ * Disabled by default (expands to nothing).  Enable by defining either:
+ *
+ *   #define STBI_AVIF_DEBUG_TRACE            (writes to stderr)
+ *   #define STBI_AVIF_DEBUG_TRACE fprintf    (same)
+ *   -DSTBI_AVIF_DEBUG_TRACE                  (command-line form)
+ *
+ * Or override `STBI_AVIF_TRACE(fmt, ...)` with a project-specific sink.
+ * Traces are emitted at every checklist-relevant stage: container brands,
+ * primary item, iloc, av1C, OBU stream, sequence header, frame header,
+ * tile group, plane dimensions, and RGBA output geometry.
+ * ------------------------------------------------------------------------- */
+#ifndef STBI_AVIF_TRACE
+#  ifdef STBI_AVIF_DEBUG_TRACE
+#    define STBI_AVIF_TRACE(...) \
+        do { fprintf(stderr, "[stb_avif] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#  else
+#    define STBI_AVIF_TRACE(...) ((void)0)
+#  endif
+#endif
+
 #define STBI_AVIF_CHANNELS 4
 #define STBI_AVIF_MAX_ASSOCIATIONS 32
 
@@ -1116,11 +1139,23 @@ static int stbi_avif__parse_av1_obu_stream(const unsigned char *data, size_t siz
          return stbi_avif__fail("AV1 OBU payload exceeds buffer bounds");
 
       payload = data + offset + header_size;
+      STBI_AVIF_TRACE("OBU: type=%u ext=%u header_size=%zu payload_size=%zu @offset=%zu",
+                      obu_type, extension_flag, header_size, payload_size, offset);
       if (obu_type == STBI_AVIF_AV1_OBU_SEQUENCE_HEADER)
       {
          if (!stbi_avif__parse_av1_sequence_header(payload, payload_size, &headers->sequence_header))
             return 0;
          headers->saw_sequence_header = 1;
+         STBI_AVIF_TRACE("  seq_header: profile=%u bit_depth=%u mono=%d subx=%d suby=%d max_w=%u max_h=%u still=%d range=%d",
+                         headers->sequence_header.seq_profile,
+                         headers->sequence_header.bit_depth,
+                         headers->sequence_header.monochrome,
+                         headers->sequence_header.subsampling_x,
+                         headers->sequence_header.subsampling_y,
+                         headers->sequence_header.max_frame_width,
+                         headers->sequence_header.max_frame_height,
+                         headers->sequence_header.still_picture,
+                         headers->sequence_header.color_range);
       }
       else if (obu_type == STBI_AVIF_AV1_OBU_FRAME_HEADER || obu_type == STBI_AVIF_AV1_OBU_FRAME)
       {
@@ -14654,6 +14689,8 @@ static int stbi_avif__parse_ftyp(const stbi_avif__buffer *buffer, const stbi_avi
    }
 
    parser->saw_ftyp = 1;
+   STBI_AVIF_TRACE("ftyp: has_avif_brand=%d payload_size=%zu",
+                   parser->has_avif_brand, payload_size);
    return 1;
 }
 
@@ -14682,6 +14719,8 @@ static int stbi_avif__parse_pitm(const stbi_avif__buffer *buffer, const stbi_avi
       parser->primary_item_id = (unsigned int)stbi_avif__read_be32(buffer->data + payload);
    }
 
+   STBI_AVIF_TRACE("pitm: primary_item_id=%u (version=%u)",
+                   parser->primary_item_id, version);
    return 1;
 }
 
@@ -14813,6 +14852,9 @@ static int stbi_avif__parse_iloc(const stbi_avif__buffer *buffer, const stbi_avi
       item_count = stbi_avif__read_be32(buffer->data + payload);
       payload += 4;
    }
+
+   STBI_AVIF_TRACE("iloc: version=%u item_count=%lu offset_size=%u length_size=%u base_offset_size=%u index_size=%u",
+                   version, item_count, offset_size, length_size, base_offset_size, index_size);
 
    for (i = 0; i < item_count; ++i)
    {
@@ -15487,6 +15529,12 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
    if (!ok)
       return NULL;
 
+   STBI_AVIF_TRACE("container: primary_item_id=%u width=%u height=%u has_alpha=%d "
+                   "primary_extent_count=%u payload_offset=%zu payload_size=%zu",
+                   parser.primary_item_id, parser.width, parser.height,
+                   parser.has_alpha, (unsigned)parser.primary_extent_count,
+                   parser.payload_offset, parser.payload_size);
+
    if (x != NULL)
       *x = (int)parser.width;
    if (y != NULL)
@@ -15548,6 +15596,12 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       stbi_avif__parser_free(&parser);
       return NULL;
    }
+   STBI_AVIF_TRACE("frame_header: type=%u show=%d w=%u h=%u upscaled_w=%u superres_denom=%u base_q_idx=%u tile_cols=%u tile_rows=%u",
+                   frame_header.frame_type, frame_header.show_frame,
+                   frame_header.frame_width, frame_header.frame_height,
+                   frame_header.upscaled_width, frame_header.superres_denom,
+                   frame_header.base_q_idx,
+                   frame_header.tile_cols, frame_header.tile_rows);
 
    ok = stbi_avif__parse_av1_tile_group_header(payload_ptr + frame_index.tile_group_offset,
                                                frame_index.tile_group_size,
@@ -15560,6 +15614,9 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
       stbi_avif__parser_free(&parser);
       return NULL;
    }
+   STBI_AVIF_TRACE("tile_group: tile_group_offset=%zu tile_group_size=%zu combined_obu=%d",
+                   frame_index.tile_group_offset, frame_index.tile_group_size,
+                   frame_index.frame_is_combined_obu);
 
    /* Full decode: plane allocation + superblock traversal + YUV→RGBA. */
    {
@@ -15659,6 +15716,11 @@ unsigned char *stbi_avif_load_from_memory(const unsigned char *buffer, int len, 
          else
             *channels_in_file = 3;
       }
+
+      STBI_AVIF_TRACE("output: width=%u height=%u channels=%d alpha=%d desired=%d",
+                      frame_header.upscaled_width, frame_header.frame_height,
+                      (channels_in_file != NULL) ? *channels_in_file : -1,
+                      file_has_alpha, desired_channels);
 
       /* Post-process: convert RGBA to desired channel count */
       if (desired_channels == 3)

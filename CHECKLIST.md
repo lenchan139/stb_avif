@@ -184,6 +184,37 @@ For each decode, print:
 This lets you compare your decoder line-by-line against libavif and isolate
 the first point where the two diverge.
 
+### Built-in tracing
+
+`stb_avif.h` ships with optional, zero-cost trace instrumentation guarded by
+a compile-time macro. Build with `-DSTBI_AVIF_DEBUG_TRACE` to emit a
+`[stb_avif]` line at every checklist-relevant stage (container brands,
+`pitm`, `iloc`, OBU stream, sequence header, frame header, tile group, and
+the final RGBA geometry). With the macro undefined the trace calls expand
+to nothing, so there is no overhead in release builds.
+
+Example (truncated):
+
+```
+$ cc -O2 -DSTBI_AVIF_DEBUG_TRACE tests/test_decode.c -o /tmp/td -lm
+$ /tmp/td example_avif/kimono.avif /tmp/out.png 2>&1 | grep '^\[stb_avif\]'
+[stb_avif] ftyp: has_avif_brand=1 payload_size=24
+[stb_avif] iloc: version=0 item_count=1 offset_size=0 length_size=4 base_offset_size=4 index_size=0
+[stb_avif] pitm: primary_item_id=1 (version=0)
+[stb_avif] container: primary_item_id=1 width=722 height=1024 has_alpha=0 primary_extent_count=1 payload_offset=325 payload_size=85120
+[stb_avif] OBU: type=1 ext=0 header_size=2 payload_size=10 @offset=0
+[stb_avif]   seq_header: profile=0 bit_depth=8 mono=0 subx=1 suby=1 max_w=722 max_h=1024 still=1 range=0
+[stb_avif] OBU: type=3 ext=0 header_size=2 payload_size=5 @offset=12
+[stb_avif] OBU: type=4 ext=0 header_size=4 payload_size=85097 @offset=19
+[stb_avif] frame_header: type=0 show=1 w=722 h=1024 upscaled_w=722 superres_denom=8 base_q_idx=72 tile_cols=1 tile_rows=1
+[stb_avif] tile_group: tile_group_offset=23 tile_group_size=85097 combined_obu=0
+[stb_avif] output: width=722 height=1024 channels=3 alpha=0 desired=3
+```
+
+You can also override the sink by defining your own `STBI_AVIF_TRACE(...)`
+macro before including `stb_avif.h` (e.g. to route the output to a log
+file or a custom logger).
+
 ---
 
 ## 8 · Fast triage by symptom
