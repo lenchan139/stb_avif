@@ -2403,9 +2403,11 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    dif = rd->dif;
    c   = (unsigned int)(dif >> 48);   /* top 16 bits of dif window */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-   { unsigned int _c_pre = c; (void)_c_pre;
-     fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld\n",
-       _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr)); }
+   { unsigned int _c_pre = c; int _i; (void)_c_pre;
+     fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld nsyms=%d cdf=[",
+       _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
+     for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
+     fprintf(stderr, "]\n"); }
 #endif
 
    v   = r;
@@ -2475,11 +2477,25 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
       cdf[nsyms] = (unsigned short)(count + 1);
 }
 
+static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_decoder *rd,
+                                                       unsigned short *cdf, int nsyms, int line)
+{
+   unsigned int sym;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   fprintf(stderr, "CALLSITE line=%d cdf_ptr=%p\n", line, (void*)cdf);
+#endif
+   sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
+   stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
+   return sym;
+}
+#define stbi_avif__av1_read_symbol_adapt(rd, cdf, nsyms) \
+    stbi_avif__av1_read_symbol_adapt_trace((rd), (cdf), (nsyms), __LINE__)
+
 /*
  * Read a symbol using a MUTABLE CDF that is updated after each decode.
  * This is the adaptive version used for all main syntax elements.
  */
-static unsigned int stbi_avif__av1_read_symbol_adapt(stbi_avif__av1_range_decoder *rd,
+static unsigned int stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_decoder *rd,
                                                        unsigned short *cdf, int nsyms)
 {
    unsigned int sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
@@ -11388,11 +11404,19 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      /* min_log2: 0=TX_4X4,1=TX_8X8,2=TX_16X16 — direct CDF index */
                      if (ctx->reduced_tx_set || min_log2 >= 2u) {
                         /* use txtp_intra2 (nsyms=5) */
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+                        fprintf(stderr, "TXTP_INTRA2 y_mode=%u min_log2=%u max_log2=%u reduced=%d\n",
+                           (unsigned)y_mode, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+#endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                            ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode < 13 ? y_mode : 0], 5);
                         tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 5 ? tx_type_sym : 0];
                      } else {
                         /* use txtp_intra1 (nsyms=7) */
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+                        fprintf(stderr, "TXTP_INTRA1 y_mode=%u min_log2=%u max_log2=%u reduced=%d\n",
+                           (unsigned)y_mode, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+#endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                            ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode < 13 ? y_mode : 0], 7);
                         tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 7 ? tx_type_sym : 0];
