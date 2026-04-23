@@ -89,10 +89,26 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
 #ifndef STBI_AVIF_TRACE
 #  ifdef STBI_AVIF_DEBUG_TRACE
 #    define STBI_AVIF_TRACE(...) \
-        do { fprintf(stderr, "[stb_avif] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+         do { fprintf(stderr, "[stb_avif] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #  else
 #    define STBI_AVIF_TRACE(...) ((void)0)
 #  endif
+#endif
+
+/*
+ * Optional symbol-by-symbol AV1 entropy tracing controls.
+ *
+ * STBI_AVIF_TRACE_SYMBOLS               Enable verbose symbol tracing.
+ * STBI_AVIF_TRACE_SYMBOLS_LINE=<line>   Only trace adaptive symbols from one callsite line.
+ * STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS=N  Stop after N traced symbol decodes (0 = unlimited).
+ */
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+#ifndef STBI_AVIF_TRACE_SYMBOLS_LINE
+#define STBI_AVIF_TRACE_SYMBOLS_LINE 0
+#endif
+#ifndef STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS
+#define STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS 0
+#endif
 #endif
 
 #define STBI_AVIF_CHANNELS 4
@@ -386,6 +402,10 @@ typedef struct
    unsigned int         rng;       /* current range  (always >= 0x8000 after renorm) */
    int                  cnt;       /* number of unconsumed bits buffered */
    int                  initialized;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   int                  trace_symbols_event_count;
+   int                  trace_symbols_active_line;
+#endif
 } stbi_avif__av1_range_decoder;
 
 #define STBI_AVIF_AV1_OBU_SEQUENCE_HEADER 1
@@ -2394,6 +2414,10 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   decoder->trace_symbols_event_count = 0;
+   decoder->trace_symbols_active_line = 0;
+#endif
    stbi_avif__av1_rd_refill(decoder);
    return 1;
 }
@@ -2427,22 +2451,34 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
  *
  * nsyms >= 2; cdf[nsyms-1] must be 32768.
  */
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+static int stbi_avif__trace_symbols_should_log(stbi_avif__av1_range_decoder *rd, int line);
+static int stbi_avif__trace_symbols_allow_aux(stbi_avif__av1_range_decoder *rd);
+#endif
+
 static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
                                                 const unsigned short *cdf, int nsyms)
 {
    unsigned int r, c, u, v, ret;
    unsigned STBI_AVIF_LONGLONG dif;
    int sym;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   int trace_this_symbol = 0;
+#endif
 
    r   = rd->rng;
    dif = rd->dif;
    c   = (unsigned int)(dif >> 48);   /* top 16 bits of dif window */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-   { unsigned int _c_pre = c; int _i; (void)_c_pre;
-     fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld nsyms=%d cdf=[",
-       _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
-     for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
-     fprintf(stderr, "]\n"); }
+   if (rd->trace_symbols_active_line != 0)
+      trace_this_symbol = 1;
+   else
+      trace_this_symbol = stbi_avif__trace_symbols_should_log(rd, 0);
+   if (trace_this_symbol) { unsigned int _c_pre = c; int _i; (void)_c_pre;
+      fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld nsyms=%d cdf=[",
+        _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
+      for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
+      fprintf(stderr, "]\n"); }
 #endif
 
    v   = r;
@@ -2465,7 +2501,8 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    dif -= (unsigned STBI_AVIF_LONGLONG)v << 48;
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-   fprintf(stderr, "sym=%u dif=%llu rng=%u\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng);
+   if (trace_this_symbol)
+      fprintf(stderr, "sym=%u dif=%llu rng=%u line=%d\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng, rd->trace_symbols_active_line);
 #endif
    return ret;
 }
@@ -2512,14 +2549,43 @@ static void stbi_avif__av1_update_cdf(unsigned short *cdf, int symbol, int nsyms
       cdf[nsyms] = (unsigned short)(count + 1);
 }
 
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+static int stbi_avif__trace_symbols_should_log(stbi_avif__av1_range_decoder *rd, int line)
+{
+   if (STBI_AVIF_TRACE_SYMBOLS_LINE > 0 && line != STBI_AVIF_TRACE_SYMBOLS_LINE)
+      return 0;
+   if (STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS > 0 &&
+       rd->trace_symbols_event_count >= STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS)
+      return 0;
+   ++rd->trace_symbols_event_count;
+   return 1;
+}
+
+static int stbi_avif__trace_symbols_allow_aux(stbi_avif__av1_range_decoder *rd)
+{
+   if (STBI_AVIF_TRACE_SYMBOLS_LINE > 0)
+      return 0;
+   if (STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS > 0 &&
+       rd->trace_symbols_event_count >= STBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS)
+      return 0;
+   return 1;
+}
+#endif
+
 static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_decoder *rd,
                                                        unsigned short *cdf, int nsyms, int line)
 {
    unsigned int sym;
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-   fprintf(stderr, "CALLSITE line=%d cdf_ptr=%p\n", line, (void*)cdf);
+   int trace_this_callsite = stbi_avif__trace_symbols_should_log(rd, line);
+   rd->trace_symbols_active_line = trace_this_callsite ? line : 0;
+   if (trace_this_callsite)
+      fprintf(stderr, "CALLSITE line=%d cdf_ptr=%p\n", line, (void*)cdf);
 #endif
    sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+   rd->trace_symbols_active_line = 0;
+#endif
    stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
    return sym;
 }
@@ -11452,8 +11518,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      if (ctx->reduced_tx_set || min_log2 >= 2u) {
                         /* use txtp_intra2 (nsyms=5) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-                        fprintf(stderr, "TXTP_INTRA2 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
-                           (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+                         if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
+                            fprintf(stderr, "TXTP_INTRA2 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
+                               (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
 #endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                            ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 5);
@@ -11461,8 +11528,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      } else {
                         /* use txtp_intra1 (nsyms=7) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-                        fprintf(stderr, "TXTP_INTRA1 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
-                           (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+                         if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
+                            fprintf(stderr, "TXTP_INTRA1 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
+                               (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
 #endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                            ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 7);

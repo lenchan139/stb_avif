@@ -111,6 +111,18 @@ You can also `#define STBI_AVIF_TRACE(...)` before including `stb_avif.h` to
 route trace output to a custom sink. With the macro undefined (default) the
 trace calls expand to nothing.
 
+For entropy-symbol diffing against a reference decoder, `-DSTBI_AVIF_TRACE_SYMBOLS`
+prints per-symbol range-decoder state. Because this can be very large, you can
+limit it with compile-time filters:
+
+```sh
+# trace only one adaptive symbol callsite (line number in stb_avif.h)
+cc -O2 -DSTBI_AVIF_TRACE_SYMBOLS -DSTBI_AVIF_TRACE_SYMBOLS_LINE=11467 tests/test_decode.c -o /tmp/td -lm
+
+# or stop after N symbol decodes
+cc -O2 -DSTBI_AVIF_TRACE_SYMBOLS -DSTBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS=2000 tests/test_decode.c -o /tmp/td -lm
+```
+
 ## `avif2png` CLI Converter
 
 A minimal, self-contained command-line converter is provided in `tools/avif2png.c`.
