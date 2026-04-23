@@ -351,6 +351,27 @@ static int write_bmp_rgb(const char *filename, const unsigned char *pixels, int 
    return 1;
 }
 
+static unsigned char *rgba2rgb(const unsigned char *pixels, int width, int height)
+{
+   /* Strip alpha: RGBA → RGB */
+   size_t pixel_count = (size_t)width * (size_t)height;
+   unsigned char *rgb = (unsigned char *)malloc(pixel_count * 3u);
+   if (!rgb)
+   {
+      return 0;
+   }
+   {
+      size_t i;
+      for (i = 0; i < pixel_count; ++i)
+      {
+         rgb[i * 3u + 0u] = pixels[i * 4u + 0u];
+         rgb[i * 3u + 1u] = pixels[i * 4u + 1u];
+         rgb[i * 3u + 2u] = pixels[i * 4u + 2u];
+      }
+   }
+   return rgb;
+}
+
 static int write_image(const char *filename, const unsigned char *pixels, int width, int height, int channels, int desired_channels)
 {
    const unsigned char *out_pixels = pixels;
@@ -359,31 +380,15 @@ static int write_image(const char *filename, const unsigned char *pixels, int wi
    if (desired_channels == 1 || desired_channels == 3 || desired_channels == 4)
       out_channels = desired_channels;
 
-   if(desired_channels == 4 && channels == 3) {
-      /* Strip alpha: RGBA → RGB */
-      size_t pixel_count = (size_t)width * (size_t)height;
-      unsigned char *rgb = (unsigned char *)malloc(pixel_count * 3u);
-      if (!rgb)
-      {
-         return 0;
-      }
-      {
-         size_t i;
-         for (i = 0; i < pixel_count; ++i)
-         {
-            rgb[i * 3u + 0u] = pixels[i * 4u + 0u];
-            rgb[i * 3u + 1u] = pixels[i * 4u + 1u];
-            rgb[i * 3u + 2u] = pixels[i * 4u + 2u];
-         }
-      }
-         out_pixels = rgb;
-   }
-
-   if (has_ext(filename, ".ppm"))
+   if (has_ext(filename, ".ppm")) {
+      if(desired_channels == 4) out_pixels = rgba2rgb(pixels, width, height);
       return write_ppm_rgb(filename, out_pixels, width, height, 3);
-   if (has_ext(filename, ".bmp"))
+   }
+   else if (has_ext(filename, ".bmp")) {
+      if(desired_channels == 4) out_pixels = rgba2rgb(pixels, width, height);
       return write_bmp_rgb(filename, out_pixels, width, height, 3);
-   if (has_ext(filename, ".png"))
+   }
+   else if (has_ext(filename, ".png"))
       return write_png_rgba(filename, pixels, width, height, out_channels);
    return 0;
 }
