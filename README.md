@@ -117,7 +117,7 @@ limit it with compile-time filters:
 
 ```sh
 # trace only one adaptive symbol callsite (line number in stb_avif.h)
-cc -O2 -DSTBI_AVIF_TRACE_SYMBOLS -DSTBI_AVIF_TRACE_SYMBOLS_LINE=11467 tests/test_decode.c -o /tmp/td -lm
+cc -O2 -DSTBI_AVIF_TRACE_SYMBOLS -DSTBI_AVIF_TRACE_SYMBOLS_LINE=<line> tests/test_decode.c -o /tmp/td -lm
 
 # or stop after N symbol decodes
 cc -O2 -DSTBI_AVIF_TRACE_SYMBOLS -DSTBI_AVIF_TRACE_SYMBOLS_MAX_EVENTS=2000 tests/test_decode.c -o /tmp/td -lm
