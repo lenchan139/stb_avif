@@ -290,6 +290,13 @@ typedef struct
    int delta_q_u_ac;
    int delta_q_v_dc;
    int delta_q_v_ac;
+   /* Per-superblock delta Q/LF (AV1 spec §5.9.13/14) */
+   int delta_q_present;       /* frame-level flag: per-SB delta_q encoded */
+   int delta_q_res_log2;      /* delta_q_res (0..3) — shift applied to decoded delta */
+   int delta_lf_present;      /* frame-level flag: per-SB delta_lf encoded */
+   int delta_lf_res_log2;     /* delta_lf_res (0..3) */
+   int delta_lf_multi;        /* 0 = single delta for all planes; 1 = per-plane deltas */
+   int coded_lossless;        /* 1 if entire frame is lossless (no QM scaling, no loop filters) */
    int cdef_bits;
    int cdef_damping;
    int cdef_y_strengths[8];   /* up to 8 CDEF strength values for Y */
@@ -1866,25 +1873,39 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
          }
       }
 
-      if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
-         return 0;
+      if (base_q_idx > 0u) {
+         if (!stbi_avif__bit_read_flag(&bits, &delta_q_present))
+            return 0;
+      } else {
+         delta_q_present = 0;
+      }
       if (delta_q_present)
       {
          if (!stbi_avif__bit_read_bits(&bits, 2u, &value))
             return 0;
+         frame->delta_q_res_log2 = (int)value;
+      } else {
+         frame->delta_q_res_log2 = 0;
       }
+      frame->delta_q_present = delta_q_present;
 
       delta_lf_present = 0;
-      if (delta_q_present)
+      frame->delta_lf_res_log2 = 0;
+      frame->delta_lf_multi = 0;
+      if (delta_q_present && !allow_intrabc)
       {
          if (!stbi_avif__bit_read_flag(&bits, &delta_lf_present))
             return 0;
          if (delta_lf_present)
          {
+            int lf_multi_tmp = 0;
             if (!stbi_avif__bit_read_bits(&bits, 2u, &value)) return 0;
-            if (!stbi_avif__bit_read_flag(&bits, &seg_enabled)) return 0;
+            frame->delta_lf_res_log2 = (int)value;
+            if (!stbi_avif__bit_read_flag(&bits, &lf_multi_tmp)) return 0;
+            frame->delta_lf_multi = lf_multi_tmp;
          }
       }
+      frame->delta_lf_present = delta_lf_present;
 
       coded_lossless = (base_q_idx == 0u &&
                         delta_q_y_dc == 0 &&
@@ -1893,6 +1914,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
                         delta_q_v_dc == 0 &&
                         delta_q_v_ac == 0 &&
                         !using_qmatrix);
+      frame->coded_lossless = coded_lossless;
 
       if (!allow_intrabc && !coded_lossless &&
           !stbi_avif__bit_reader_bits_left(&bits, seq->monochrome ? 16u : 28u))
@@ -7602,6 +7624,26 @@ static unsigned short stbi_avif__av1_filter_intra_mode_cdf[6] = {
    8949u, 12776u, 17211u, 29558u, 32768u, 0u
 };
 
+/* Delta Q / Delta LF CDFs — dav1d cdf.c .delta_q/.delta_lf default.
+ * Layout: nsyms=4 (3 real + terminal 32768), +1 slot for adapt count.
+ * dav1d ICDF values CDF3(28160, 32120, 32677) → ascending:
+ *   asc[0] = 32768 - 28160 =  4608
+ *   asc[1] = 32768 - 32120 =   648
+ *   asc[2] = 32768 - 32677 =    91
+ *   asc[3] = 32768 (terminal)
+ *   asc[4] = 0 (adapt count init)
+ */
+static unsigned short stbi_avif__av1_delta_q_cdf[5] = {
+   4608u, 648u, 91u, 32768u, 0u
+};
+static unsigned short stbi_avif__av1_delta_lf_cdf[5][5] = {
+   { 4608u, 648u, 91u, 32768u, 0u },
+   { 4608u, 648u, 91u, 32768u, 0u },
+   { 4608u, 648u, 91u, 32768u, 0u },
+   { 4608u, 648u, 91u, 32768u, 0u },
+   { 4608u, 648u, 91u, 32768u, 0u }
+};
+
 /* Loop restoration type CDFs — AV1 spec default CDFs */
 /* Switchable: {NONE, WIENER, SGRPROJ} — 3 symbols, CDF_SIZE(3) = 4 */
 static unsigned short stbi_avif__av1_lr_switchable_cdf[4] = {
@@ -7940,6 +7982,17 @@ typedef struct
    unsigned short  lr_sgrproj_cdf[3];            /* {NONE, SGRPROJ, sentinel} */
    /* Segmentation CDF (8 segments + sentinel) */
    unsigned short  seg_tree_cdf[9];
+   /* Delta Q / Delta LF CDFs (AV1 spec §5.11.4; dav1d cdf.c .delta_q/.delta_lf)
+    * Adaptive; 3 real symbols + terminal = nsyms 4.  delta_lf has 5 copies:
+    *   [0]        used when delta_lf_multi=0 (single per-SB delta for all planes)
+    *   [1..4]     used when delta_lf_multi=1 (one CDF per plane, up to 4 planes)
+    */
+   unsigned short  delta_q_cdf[5];
+   unsigned short  delta_lf_cdf[5][5];
+   /* Per-SB running state (updated as we decode; matches dav1d ts->last_qidx
+    * and ts->last_delta_lf).  Reset at tile start. */
+   int             last_qidx;           /* current qindex (clipped 1..255) */
+   signed char     last_delta_lf[4];    /* current delta_lf per plane (−63..63) */
 } stbi_avif__av1_decode_ctx;
 
 
@@ -10378,9 +10431,12 @@ static int stbi_avif__av1_read_coeffs_after_skip(
 
          /* Dequantize */
          qstep = (pos == 0) ? dc_qstep : ac_qstep;
-         /* TODO: Quantization matrix (QM) scaling not yet applied.
-          * When frame->using_qmatrix is set, coefficients should be
-          * scaled by the QM table entry. This is rare in still AVIFs. */
+         /* AV1 spec §7.12.3 quantization matrix scaling:
+          *   dequant = (level * qstep * qmLevel[scan_pos]) / 32
+          * where qmLevel comes from QM_X[tx_size][scan_pos] with X ∈ {qm_y,qm_u,qm_v}.
+          * The matrix table is large (~60KB); rather than embed it we reject
+          * frames that actually enable qmatrix (`using_qmatrix=1`) at decode
+          * entry, so at this point qmatrix scaling is always a no-op. */
          dequant_val = (lvl * qstep) & 0xffffff;
          /* Clamp to valid coefficient range per AV1 spec */
          {
@@ -10609,6 +10665,80 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       unsigned int skip_ctx_left  = (mi_col > 0u) ? ctx->left_skip[mi_row]  : 0u;
       unsigned int skip_ctx = skip_ctx_above + skip_ctx_left;
       skip = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->skip_cdf[skip_ctx], 2);
+   }
+
+   /* Per-SB delta_q / delta_lf decoding (AV1 spec §5.11.5 / dav1d decode.c:962).
+    * Gate: we are at the top-left corner of a superblock (mi_row & mi_col both
+    * aligned to SB size) AND the block is not a full-SB-sized skipped block. */
+   if (ctx->fhdr->delta_q_present) {
+      unsigned int sb_mask = ctx->sb_size_mi - 1u;
+      int at_sb_corner = ((mi_row & sb_mask) == 0u) && ((mi_col & sb_mask) == 0u);
+      int is_sb_sized = ((unsigned int)block_size ==
+                         (ctx->use_128 ? (unsigned int)STBI_AVIF_BLOCK_128X128
+                                       : (unsigned int)STBI_AVIF_BLOCK_64X64));
+      if (at_sb_corner && (!is_sb_sized || !skip)) {
+         int delta_q_sym;
+         delta_q_sym = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                                                             ctx->delta_q_cdf, 4);
+         if (delta_q_sym == 3) {
+            unsigned int nb;
+            int n_bits, abs_val;
+            /* n_bits = 1 + read_bools(3) [equi] */
+            nb  = stbi_avif__av1_read_literal(&ctx->rd, 1);
+            nb |= stbi_avif__av1_read_literal(&ctx->rd, 1) << 1;
+            nb |= stbi_avif__av1_read_literal(&ctx->rd, 1) << 2;
+            n_bits = 1 + (int)nb;
+            abs_val = (int)stbi_avif__av1_read_literal(&ctx->rd,
+                                                      (unsigned int)n_bits)
+                    + 1 + (1 << n_bits);
+            delta_q_sym = abs_val;
+         }
+         if (delta_q_sym) {
+            /* Sign bit via bool_equi = read_literal(1) */
+            int sign = (int)stbi_avif__av1_read_literal(&ctx->rd, 1);
+            int delta_q = sign ? -delta_q_sym : delta_q_sym;
+            delta_q <<= ctx->fhdr->delta_q_res_log2;
+            ctx->last_qidx += delta_q;
+            if (ctx->last_qidx < 1)   ctx->last_qidx = 1;
+            if (ctx->last_qidx > 255) ctx->last_qidx = 255;
+         }
+
+         if (ctx->fhdr->delta_lf_present) {
+            int n_lfs = ctx->fhdr->delta_lf_multi
+                      ? (ctx->monochrome ? 2 : 4)
+                      : 1;
+            int lf_i;
+            for (lf_i = 0; lf_i < n_lfs; ++lf_i) {
+               int cdf_idx = lf_i + ctx->fhdr->delta_lf_multi;
+               int delta_lf_sym;
+               delta_lf_sym = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+                                 ctx->delta_lf_cdf[cdf_idx], 4);
+               if (delta_lf_sym == 3) {
+                  unsigned int nb;
+                  int n_bits, abs_val;
+                  nb  = stbi_avif__av1_read_literal(&ctx->rd, 1);
+                  nb |= stbi_avif__av1_read_literal(&ctx->rd, 1) << 1;
+                  nb |= stbi_avif__av1_read_literal(&ctx->rd, 1) << 2;
+                  n_bits = 1 + (int)nb;
+                  abs_val = (int)stbi_avif__av1_read_literal(&ctx->rd,
+                                                            (unsigned int)n_bits)
+                          + 1 + (1 << n_bits);
+                  delta_lf_sym = abs_val;
+               }
+               if (delta_lf_sym) {
+                  int sign = (int)stbi_avif__av1_read_literal(&ctx->rd, 1);
+                  int delta_lf = sign ? -delta_lf_sym : delta_lf_sym;
+                  delta_lf <<= ctx->fhdr->delta_lf_res_log2;
+                  {
+                     int cur = (int)ctx->last_delta_lf[lf_i] + delta_lf;
+                     if (cur < -63) cur = -63;
+                     if (cur >  63) cur =  63;
+                     ctx->last_delta_lf[lf_i] = (signed char)cur;
+                  }
+               }
+            }
+         }
+      }
    }
 
    /* Segmentation: read segment_id after skip if !seg_id_pre_skip.
@@ -11755,6 +11885,14 @@ static int stbi_avif__av1_decode_tile(stbi_avif__av1_decode_ctx *ctx,
 
    sb_size4   = ctx->use_128 ? 32u : 16u;
    root_bsize = ctx->use_128 ? STBI_AVIF_BLOCK_128X128 : STBI_AVIF_BLOCK_64X64;
+
+   /* Per-tile state reset (AV1 §5.11.6): last_qidx seeds to base_q_idx,
+    * and per-plane last_delta_lf resets to zero. */
+   ctx->last_qidx = (int)ctx->base_q_idx;
+   ctx->last_delta_lf[0] = 0;
+   ctx->last_delta_lf[1] = 0;
+   ctx->last_delta_lf[2] = 0;
+   ctx->last_delta_lf[3] = 0;
 
    for (sb_row = sb_row_start; sb_row < sb_row_end; ++sb_row) {
       /* Reset left context at start of each SB row */
@@ -13699,6 +13837,8 @@ static void stbi_avif__av1_reset_cdfs(stbi_avif__av1_decode_ctx *ctx, int q_ctx)
    memcpy(ctx->lr_switchable_cdf, stbi_avif__av1_lr_switchable_cdf, sizeof(stbi_avif__av1_lr_switchable_cdf));
    memcpy(ctx->lr_wiener_cdf, stbi_avif__av1_lr_wiener_cdf, sizeof(stbi_avif__av1_lr_wiener_cdf));
    memcpy(ctx->lr_sgrproj_cdf, stbi_avif__av1_lr_sgrproj_cdf, sizeof(stbi_avif__av1_lr_sgrproj_cdf));
+   memcpy(ctx->delta_q_cdf, stbi_avif__av1_delta_q_cdf, sizeof(stbi_avif__av1_delta_q_cdf));
+   memcpy(ctx->delta_lf_cdf, stbi_avif__av1_delta_lf_cdf, sizeof(stbi_avif__av1_delta_lf_cdf));
 
    /* Segment tree CDF: uniform distribution over 8 segments (per AV1 spec default) */
    {
@@ -13742,6 +13882,13 @@ static unsigned char *stbi_avif__av1_decode(
    unsigned int qidx_y_dc, qidx_y_ac, qidx_u_dc, qidx_u_ac, qidx_v_dc, qidx_v_ac;
 
    memset(&ctx, 0, sizeof(ctx));
+   /* Intra block copy (AV1 §6.8.2) requires per-block use_intrabc flag,
+    * motion vector decoding, and self-reference prediction — not supported. */
+   if (fhdr->allow_intrabc)
+      return (unsigned char *)(stbi_avif__fail("AV1 allow_intrabc is not supported"), NULL);
+   /* Quantization matrix scaling not yet implemented (see dequant loop). */
+   if (fhdr->using_qmatrix)
+      return (unsigned char *)(stbi_avif__fail("AV1 using_qmatrix is not supported"), NULL);
    q_ctx = stbi_avif__av1_get_q_ctx(fhdr->base_q_idx);
    ctx.base_q_idx = fhdr->base_q_idx;
    ctx.q_ctx = q_ctx;
@@ -14030,6 +14177,15 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
    size_t plane_size;
 
    memset(&ctx, 0, sizeof(ctx));
+   /* Intra block copy not supported (see main decoder). */
+   if (fhdr->allow_intrabc) {
+      stbi_avif__fail("AV1 allow_intrabc is not supported");
+      return NULL;
+   }
+   if (fhdr->using_qmatrix) {
+      stbi_avif__fail("AV1 using_qmatrix is not supported");
+      return NULL;
+   }
    q_ctx = stbi_avif__av1_get_q_ctx(fhdr->base_q_idx);
    ctx.base_q_idx = fhdr->base_q_idx;
    ctx.q_ctx = q_ctx;

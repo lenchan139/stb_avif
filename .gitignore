@@ -2,3 +2,5 @@ output
 output_png
 tests/test_decode
 test_decode_run
+.DS_Store
+__pycache__
