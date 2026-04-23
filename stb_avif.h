@@ -11402,23 +11402,35 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                    * Decode TX type only for max_log2 <= 2 (up to 16px). */
                   if (max_log2 <= 2u) {
                      /* min_log2: 0=TX_4X4,1=TX_8X8,2=TX_16X16 — direct CDF index */
+                     /* dav1d: y_mode_nofilt = (y_mode==FILTER_PRED) ? filter_mode_to_y_mode[y_angle] : y_mode.
+                      * We store filter_intra under fi_flag; map fi_mode (0..4) to the base-mode slot dav1d uses. */
+                     static const unsigned char stbi_avif__filter_mode_to_y_mode_local[5] = {
+                        0u, /* DC_PRED */
+                        1u, /* VERT_PRED */
+                        2u, /* HOR_PRED */
+                        6u, /* HOR_DOWN_PRED */
+                        0u  /* DC_PRED */
+                     };
+                     unsigned int y_mode_nofilt = (fi_flag && fi_mode < 5u)
+                        ? (unsigned int)stbi_avif__filter_mode_to_y_mode_local[fi_mode]
+                        : (y_mode < 13u ? y_mode : 0u);
                      if (ctx->reduced_tx_set || min_log2 >= 2u) {
                         /* use txtp_intra2 (nsyms=5) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-                        fprintf(stderr, "TXTP_INTRA2 y_mode=%u min_log2=%u max_log2=%u reduced=%d\n",
-                           (unsigned)y_mode, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+                        fprintf(stderr, "TXTP_INTRA2 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
+                           (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
 #endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode < 13 ? y_mode : 0], 5);
+                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 5);
                         tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 5 ? tx_type_sym : 0];
                      } else {
                         /* use txtp_intra1 (nsyms=7) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-                        fprintf(stderr, "TXTP_INTRA1 y_mode=%u min_log2=%u max_log2=%u reduced=%d\n",
-                           (unsigned)y_mode, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
+                        fprintf(stderr, "TXTP_INTRA1 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
+                           (unsigned)y_mode, y_mode_nofilt, (unsigned)min_log2, (unsigned)max_log2, (int)ctx->reduced_tx_set);
 #endif
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode < 13 ? y_mode : 0], 7);
+                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 7);
                         tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 7 ? tx_type_sym : 0];
                      }
                   }
