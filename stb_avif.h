@@ -7521,6 +7521,20 @@ static int stbi_avif__av1_get_lower_levels_ctx_eob(int bhl, int width, int scan_
    return 3;
 }
 
+/* Convert our stored level (0..255) to dav1d's "level byte" representation
+ * for context magnitude computation. dav1d stores base tokens as tok*0x41
+ * (= 65,130,195 for tok=1,2,3) and hi_tok positions as tok+(3<<6) = tok+192.
+ * Our stored level is the actual coefficient level value (1..). Map it: */
+static int stbi_avif__av1_level_to_mag_byte(int lev)
+{
+   if (lev <= 0) return 0;
+   if (lev == 1) return 65;
+   if (lev == 2) return 130;
+   if (lev == 3) return 195;
+   /* lev >= 4: dav1d stores (lev-3)+192 = lev+189; cap at 255 */
+   { int v = lev + 189; return v > 255 ? 255 : v; }
+}
+
 /* get_lower_levels_ctx_2d: context for coefficients at positions < EOB */
 static int stbi_avif__av1_get_lower_levels_ctx_2d(const unsigned char *levels,
    int coeff_idx, int bhl, int txw)
@@ -7560,20 +7574,15 @@ static int stbi_avif__av1_get_lower_levels_ctx_2d(const unsigned char *levels,
    offset = nz_map_5x5[shape][ycl][xcl];
    /* 5 neighbors in padded layout: (+1,0), (0,+1), (+1,+1), (+2,0), (0,+2) */
    {
-      int a = (int)levels[padded_pos + 1];
-      int b = (int)levels[padded_pos + stride];
-      int c = (int)levels[padded_pos + stride + 1];
-      int d = (int)levels[padded_pos + 2];
-      int e = (int)levels[padded_pos + stride * 2];
-      if (a > 3) a = 3;
-      if (b > 3) b = 3;
-      if (c > 3) c = 3;
-      if (d > 3) d = 3;
-      if (e > 3) e = 3;
+      int a = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 1]);
+      int b = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + stride]);
+      int c = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + stride + 1]);
+      int d = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 2]);
+      int e = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + stride * 2]);
       mag = a + b + c + d + e;
    }
-   ctx = (mag + 1) >> 1;
-   if (ctx > 4) ctx = 4;
+   /* dav1d: ctx = (mag > 512) ? 4 : (mag + 64) >> 7 */
+   ctx = (mag > 512) ? 4 : (mag + 64) >> 7;
    return ctx + offset;
 }
 
@@ -10360,8 +10369,15 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          for (d = 0; d < txw + txh - 1; ++d) {
             rowmax = d < txh ? d : txh - 1;
             rowmin = d - txw + 1 > 0 ? d - txw + 1 : 0;
-            for (row = rowmin; row <= rowmax; ++row)
-               scan_buf[n++] = (unsigned short)((d - row) * txh + row);
+            if (txw > txh) {
+               /* wide TX: within each diagonal, col increases (row decreases) */
+               for (row = rowmax; row >= rowmin; --row)
+                  scan_buf[n++] = (unsigned short)((d - row) * txh + row);
+            } else {
+               /* tall TX: within each diagonal, row increases (col decreases) */
+               for (row = rowmin; row <= rowmax; ++row)
+                  scan_buf[n++] = (unsigned short)((d - row) * txh + row);
+            }
          }
       }
       scan = scan_buf;
@@ -10743,6 +10759,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    int seg_dc_qstep_y, seg_ac_qstep_y;
    int seg_dc_qstep_u, seg_ac_qstep_u;
    int seg_dc_qstep_v, seg_ac_qstep_v;
+   int block_lossless;
+   int has_chroma;
 
    if (px >= ctx->planes->width)  return 1;
    if (py >= ctx->planes->height) return 1;
@@ -10759,6 +10777,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    seg_ac_qstep_u = ctx->ac_qstep_u;
    seg_dc_qstep_v = ctx->dc_qstep_v;
    seg_ac_qstep_v = ctx->ac_qstep_v;
+   block_lossless = 0;
    if (px + pw > ctx->planes->width)  pw = ctx->planes->width  - px;
    if (py + ph > ctx->planes->height) ph = ctx->planes->height - py;
 
@@ -10769,6 +10788,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    cph = (ph + (unsigned int)ctx->planes->suby) >> ctx->planes->suby;
    if (cpx + cpw > ctx->planes->cw) cpw = ctx->planes->cw - cpx;
    if (cpy + cph > ctx->planes->ch) cph = ctx->planes->ch - cpy;
+   has_chroma = !ctx->monochrome
+             && (bw4 > (unsigned int)ctx->planes->subx || (mi_col & 1u))
+             && (bh4 > (unsigned int)ctx->planes->suby || (mi_row & 1u));
 
    /* ======== MODE INFO ======== */
 
@@ -10893,6 +10915,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       seg_ac_qstep_v = stbi_avif__av1_ac_qlookup_value(ctx->seq->bit_depth, seg_qidx_v_ac);
    }
 
+   block_lossless = (seg_dc_qstep_y == 0 && seg_ac_qstep_y == 0 &&
+                     seg_dc_qstep_u == 0 && seg_ac_qstep_u == 0 &&
+                     seg_dc_qstep_v == 0 && seg_ac_qstep_v == 0);
+
    /* CDEF index: read for first non-skip block in each 64x64 CDEF unit.
     * With 64x64 SBs, this is the first non-skip block at SB origin. */
    if (ctx->cdef_bits > 0 && !skip) {
@@ -10961,16 +10987,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    /* UV mode (must be read before residual per AV1 spec) — skip for monochrome */
    uv_mode = 0u;
    uv_mode_raw = 0u;
-   if (!ctx->monochrome) {
+   if (has_chroma) {
       int cfl_allowed = (pw <= 32u && ph <= 32u); /* CFL only for blocks ≤ 32x32 */
-      if (cpw >= 4u && cph >= 4u) {
-         if (cfl_allowed)
-            uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-               ctx->uv_mode_cdf_cfl[y_mode < 13 ? y_mode : 0], 14);
-         else
-            uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-               ctx->uv_mode_cdf_no_cfl[y_mode < 13 ? y_mode : 0], 13);
-      }
+      if (cfl_allowed)
+         uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+            ctx->uv_mode_cdf_cfl[y_mode < 13 ? y_mode : 0], 14);
+      else
+         uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
+            ctx->uv_mode_cdf_no_cfl[y_mode < 13 ? y_mode : 0], 13);
 
       /* UV angle delta */
       if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
@@ -11119,7 +11143,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
             }
          }
-         if (!ctx->monochrome && uv_mode_raw == 0u && cpw >= 4u && cph >= 4u) { /* UV DC_PRED (not CFL) */
+         if (has_chroma && uv_mode_raw == 0u) { /* UV DC_PRED (not CFL) */
             unsigned int pal_uv_ctx = palette_y_size > 0 ? 1u : 0u;
             unsigned int pal_uv_flag = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->palette_uv_mode_cdf[pal_uv_ctx], 2);
@@ -11280,9 +11304,17 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       max_tx_log2h = mxh;
       tx_size = mxw < mxh ? mxw : mxh;
 
-      if (ctx->tx_mode_select && !skip && block_size > STBI_AVIF_BLOCK_4X4
-          && max_dim > 0u) {
-         int depth, s_a, s_l, tctx, nsyms;
+      if (block_lossless) {
+         tx_log2w = 0;
+         tx_log2h = 0;
+         max_tx_log2w = 0;
+         max_tx_log2h = 0;
+         tx_size = 0;
+      }
+
+     if (ctx->tx_mode_select && !skip && !block_lossless &&
+        block_size > STBI_AVIF_BLOCK_4X4 && max_dim > 0u) {
+       int depth, s_a, s_l, tctx, nsyms;
          unsigned int cur_lw, cur_lh;
          unsigned int mi_c, mi_r;
          /* Read depth from tx_size_cdf[max_dim-1][tctx], nsyms=min(max_dim,2) */
@@ -11294,6 +11326,11 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          s_l = (int)ctx->left_tx_intra[mi_row];
          tctx = (s_a >= (int)mxw ? 1 : 0) + (s_l >= (int)mxh ? 1 : 0);
          nsyms = (max_dim < 2u) ? 1 : 2;
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+         fprintf(stderr,
+            "OURS_TXSZ mi=(%u,%u) bs=%d mxw=%u mxh=%u s_a=%d s_l=%d tctx=%d block_lossless=%d skip=%d\\n",
+            mi_row, mi_col, block_size, mxw, mxh, s_a, s_l, tctx, block_lossless, skip);
+#endif
          if (max_dim - 1u < 4u) {
             depth = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->tx_size_cdf[max_dim - 1u][tctx], nsyms + 1);
@@ -11327,12 +11364,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 
    /* above/left tx_intra updated inside TX size tree read above.
     * For non-switchable or skip blocks, update entire block now. */
-   if (!ctx->tx_mode_select || skip || block_size <= STBI_AVIF_BLOCK_4X4) {
+   if (!ctx->tx_mode_select || skip || block_size <= STBI_AVIF_BLOCK_4X4 || block_lossless) {
       unsigned int mi_c, mi_r;
+      unsigned int ctx_txw = block_lossless ? 0u : max_tx_log2w;
+      unsigned int ctx_txh = block_lossless ? 0u : max_tx_log2h;
       for (mi_c = mi_col; mi_c < mi_col + bw4 && mi_c < ctx->mi_cols; ++mi_c)
-         ctx->above_tx_intra[mi_c] = (signed char)max_tx_log2w;
+         ctx->above_tx_intra[mi_c] = (signed char)ctx_txw;
       for (mi_r = mi_row; mi_r < mi_row + bh4 && mi_r < ctx->mi_rows; ++mi_r)
-         ctx->left_tx_intra[mi_r] = (signed char)max_tx_log2h;
+         ctx->left_tx_intra[mi_r] = (signed char)ctx_txh;
    }
 
    /* UV TX size: for YUV444 matches Y TX dims; for subsampled, use chroma dims.
@@ -11340,9 +11379,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    {
       /* UV TX size is based on chroma block dimensions, not Y TX sub-tile size.
        * dav1d: b->uvtx = dav1d_max_txfm_size_for_bs[bs][layout] */
-      unsigned int uv_log2w = 2, uv_log2h = 2;
-      if (cpw >= 32) uv_log2w = 3; else if (cpw >= 16) uv_log2w = 2; else if (cpw >= 8) uv_log2w = 1;
-      if (cph >= 32) uv_log2h = 3; else if (cph >= 16) uv_log2h = 2; else if (cph >= 8) uv_log2h = 1;
+      unsigned int uv_log2w = 0, uv_log2h = 0;
+      if (block_lossless) {
+         uv_log2w = 0;
+         uv_log2h = 0;
+      } else {
+         if (cpw >= 32) uv_log2w = 3; else if (cpw >= 16) uv_log2w = 2; else if (cpw >= 8) uv_log2w = 1;
+         if (cph >= 32) uv_log2h = 3; else if (cph >= 16) uv_log2h = 2; else if (cph >= 8) uv_log2h = 1;
+      }
       /* Cap at 32px = log2 of 3 */
       if (uv_log2w > 3u) uv_log2w = 3u;
       if (uv_log2h > 3u) uv_log2h = 3u;
@@ -11486,6 +11530,34 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                }
             }
 
+
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+            if (stbi_avif__trace_symbols_allow_aux(&ctx->rd)) {
+               int t_top = 0, t_lft = 0;
+               unsigned int bw_px = pw, bh_px = ph;
+               if (bw_px != tx_w || bh_px != tx_h) {
+                  int ti;
+                  for (ti = 0; ti < tx_w_mi && mi_tx_col + ti < ctx->mi_cols; ti++)
+                     t_top |= ctx->above_entropy[0][mi_tx_col + ti];
+                  t_top &= 0x07;
+                  if (t_top > 4) t_top = 4;
+                  for (ti = 0; ti < tx_h_mi && (mi_tx_row % sb_mi_val) + ti < sb_mi_val; ti++)
+                     t_lft |= ctx->left_entropy[0][(mi_tx_row % sb_mi_val) + ti];
+                  t_lft &= 0x07;
+                  if (t_lft > 4) t_lft = 4;
+               }
+               fprintf(stderr,
+                  "OURS_TXBSKIP mi_tx=(%u,%u) ts=%d txw=%u txh=%u top=%u lft=%u sctx=%d skip=%d\\n",
+                  mi_tx_row, mi_tx_col, ts_skip, tx_w, tx_h,
+                  t_top, t_lft, txb_skip_ctx, skip);
+            }
+#endif
+            
+#ifdef STBI_AVIF_TRACE_SYMBOLS
+            if (stbi_avif__trace_symbols_allow_aux(&ctx->rd)) {
+               fprintf(stderr, "OURS_TXBSKIP plane=0 chroma=0 tx=%u sctx=%d\n", ts_skip, txb_skip_ctx);
+            }
+#endif
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
             if (!txb_skip) {
@@ -11567,7 +11639,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       /* U and V residual (skip for monochrome, palette, or if chroma block too small for a TX).
        * In 4:2:0, a 4x4 luma block maps to a 2x2 chroma block which is below
        * the minimum 4x4 TX size; those blocks are never chroma references. */
-      if (!ctx->monochrome && cpw >= 4u && cph >= 4u && palette_uv_size == 0) {
+      if (has_chroma && palette_uv_size == 0) {
          unsigned int uv_tx_row, uv_tx_col;
          unsigned int uv_w_mi = uv_tx_szw / 4u;
          unsigned int uv_h_mi = uv_tx_szh / 4u;
