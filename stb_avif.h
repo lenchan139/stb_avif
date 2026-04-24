@@ -2447,6 +2447,12 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
    return ret;
 }
 
+/* a workaround for old VC not emitting proper unsigned __int64 */
+static unsigned STBI_AVIF_LONGLONG stbi_avif__ret_ull(unsigned STBI_AVIF_LONGLONG a) {
+    unsigned STBI_AVIF_LONGLONG b = a;
+    return b;
+}
+
 /*
  * read_symbol (matches AOM od_ec_decode_cdf_q15):
  *
@@ -2490,7 +2496,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    } while (c < v);
 
    r   = u - v;
-   dif -= (unsigned STBI_AVIF_LONGLONG)v << 48;
+   dif -= stbi_avif__ret_ull((unsigned STBI_AVIF_LONGLONG)v << 48);
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    fprintf(stderr, "sym=%u dif=%" STBI_AVIF_PRIu64 " rng=%u\n", ret, (unsigned STBI_AVIF_LONGLONG)(rd->dif >> 48), rd->rng);
