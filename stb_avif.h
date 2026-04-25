@@ -2605,14 +2605,19 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_d
 }
 
 /* Read N literal bits from the range decoder (MSB first, each bit is 50/50) */
+static unsigned int stbi_avif__av1_read_bool_equi(stbi_avif__av1_range_decoder *rd)
+{
+   static const unsigned short half_cdf[3] = { 16384u, 32768u, 0u };
+   return stbi_avif__av1_read_symbol(rd, half_cdf, 2);
+}
+
 static unsigned int stbi_avif__av1_read_literal(stbi_avif__av1_range_decoder *rd,
                                                  unsigned int nbits)
 {
-   static const unsigned short half_cdf[3] = { 16384u, 32768u, 0u };
    unsigned int result = 0u;
    unsigned int i;
    for (i = 0; i < nbits; ++i) {
-      result = (result << 1u) | stbi_avif__av1_read_symbol(rd, half_cdf, 2);
+      result = (result << 1u) | stbi_avif__av1_read_bool_equi(rd);
    }
    return result;
 }
@@ -10548,8 +10553,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
                      ctx->dc_sign_cdf[plane_type][dc_sign_ctx], 2);
             sign = (int)sym;
          } else {
-            sym = stbi_avif__av1_read_symbol(&ctx->rd,
-                     stbi_avif__av1_half_cdf, 2);
+            sym = stbi_avif__av1_read_bool_equi(&ctx->rd);
             sign = (int)sym;
          }
 
@@ -10559,14 +10563,12 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             unsigned int golomb_bit;
             int remainder = 0;
             while (golomb_len < 32) {
-               golomb_bit = stbi_avif__av1_read_symbol(&ctx->rd,
-                              stbi_avif__av1_half_cdf, 2);
+               golomb_bit = stbi_avif__av1_read_bool_equi(&ctx->rd);
                if (golomb_bit) break;  /* stop on 1 */
                ++golomb_len;
             }
             for (k = golomb_len - 1; k >= 0; --k) {
-               golomb_bit = stbi_avif__av1_read_symbol(&ctx->rd,
-                              stbi_avif__av1_half_cdf, 2);
+               golomb_bit = stbi_avif__av1_read_bool_equi(&ctx->rd);
                remainder |= ((int)golomb_bit << k);
             }
             lvl += (1 << golomb_len) - 1 + remainder;
@@ -11953,10 +11955,9 @@ static int stbi_avif__av1_read_signed_literal(stbi_avif__av1_range_decoder *rd,
                                                 unsigned int bits)
 {
    unsigned int mag;
-   unsigned short half_cdf[3] = { 16384u, 32768u, 0u };
    mag = stbi_avif__av1_read_literal(rd, bits);
    if (mag > 0) {
-      unsigned int sign = stbi_avif__av1_read_symbol(rd, half_cdf, 2);
+      unsigned int sign = stbi_avif__av1_read_bool_equi(rd);
       if (sign) return -(int)mag;
    }
    return (int)mag;
