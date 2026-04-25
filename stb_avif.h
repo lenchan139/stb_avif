@@ -86,6 +86,30 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
  * primary item, iloc, av1C, OBU stream, sequence header, frame header,
  * tile group, plane dimensions, and RGBA output geometry.
  * ------------------------------------------------------------------------- */
+#ifdef _MSC_VER
+#include <stdarg.h>
+void stb_avif_dbgprint(const char *format, ...) {
+#  ifdef STBI_AVIF_DEBUG_TRACE
+    char myfmt[1024];
+    char *p = myfmt;
+    va_list pl;
+    strcpy(myfmt, "[stb_avif] ");
+    strcat(myfmt, format);
+    strcat(myfmt, "\n");
+    while(*p) {
+        if(*p == '%' && *(p+1) == 'z') {
+            strcpy(p+1,p+2); // remove 'z' from format code
+        }
+        ++p;
+    }
+    va_start(pl, format);
+    vfprintf(stderr, myfmt, pl);
+    va_end(pl);
+#  endif
+}
+#define STBI_AVIF_TRACE stb_avif_dbgprint
+#endif
+
 #ifndef STBI_AVIF_TRACE
 #  ifdef STBI_AVIF_DEBUG_TRACE
 #    define STBI_AVIF_TRACE(...) \
@@ -116,10 +140,14 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
 
 #ifdef _MSC_VER
 #define STBI_AVIF_LONGLONG __int64
+#define STBI_AVIF_PRI64 "I64d"
+#define STBI_AVIF_PRIu64 "I64u"
 #define STBI_AVIF_LL(x) x ## i64
 #define STBI_AVIF_ULL(x) x ## ui64
 #else
 #define STBI_AVIF_LONGLONG long long
+#define STBI_AVIF_PRI64 "lld"
+#define STBI_AVIF_PRIu64 "llu"
 #define STBI_AVIF_LL(x) x ## LL
 #define STBI_AVIF_ULL(x) x ## ULL
 #endif
@@ -2443,6 +2471,12 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
    return ret;
 }
 
+/* a workaround for old VC not emitting proper unsigned __int64 */
+static unsigned STBI_AVIF_LONGLONG stbi_avif__ret_ull(unsigned STBI_AVIF_LONGLONG a) {
+    unsigned STBI_AVIF_LONGLONG b = a;
+    return b;
+}
+
 /*
  * read_symbol (matches AOM od_ec_decode_cdf_q15):
  *
@@ -2470,15 +2504,11 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    dif = rd->dif;
    c   = (unsigned int)(dif >> 48);   /* top 16 bits of dif window */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-   if (rd->trace_symbols_active_line != 0)
-      trace_this_symbol = 1;
-   else
-      trace_this_symbol = stbi_avif__trace_symbols_should_log(rd, 0);
-   if (trace_this_symbol) { unsigned int _c_pre = c; int _i; (void)_c_pre;
-      fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%llu cnt=%d bytes_left=%ld nsyms=%d cdf=[",
-        _c_pre, r, (unsigned long long)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
-      for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
-      fprintf(stderr, "]\n"); }
+   { unsigned int _c_pre = c; int _i; (void)_c_pre;
+     fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%" STBI_AVIF_PRIu64 " cnt=%d bytes_left=%ld nsyms=%d cdf=[",
+       _c_pre, r, (unsigned STBI_AVIF_LONGLONG)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
+     for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
+     fprintf(stderr, "]\n"); }
 #endif
 
    v   = r;
@@ -2498,11 +2528,15 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    } while (c < v);
 
    r   = u - v;
-   dif -= (unsigned STBI_AVIF_LONGLONG)v << 48;
+   dif -= stbi_avif__ret_ull((unsigned STBI_AVIF_LONGLONG)v << 48);
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
 #ifdef STBI_AVIF_TRACE_SYMBOLS
+<<<<<<< HEAD
    if (trace_this_symbol)
       fprintf(stderr, "sym=%u dif=%llu rng=%u line=%d\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng, rd->trace_symbols_active_line);
+=======
+   fprintf(stderr, "sym=%u dif=%" STBI_AVIF_PRIu64 " rng=%u\n", ret, (unsigned STBI_AVIF_LONGLONG)(rd->dif >> 48), rd->rng);
+>>>>>>> 2d53cf7bb66ed31de25b5557d75ae731573ed2b7
 #endif
    return ret;
 }
