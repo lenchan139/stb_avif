@@ -430,6 +430,7 @@ typedef struct
    unsigned int         rng;       /* current range  (always >= 0x8000 after renorm) */
    int                  cnt;       /* number of unconsumed bits buffered */
    int                  initialized;
+   int                  failed;    /* sticky impossible-state guard */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    int                  trace_symbols_event_count;
    int                  trace_symbols_active_line;
@@ -1223,11 +1224,15 @@ static int stbi_avif__parse_av1_obu_stream(const unsigned char *data, size_t siz
       }
       else if (obu_type == STBI_AVIF_AV1_OBU_REDUNDANT_FRAME_HEADER)
       {
-         return stbi_avif__fail("redundant AV1 frame headers are not supported");
+         /* Redundant frame headers are optional in AV1. For still AVIF we can
+          * safely ignore them in the pre-parse pass and keep scanning. */
+         STBI_AVIF_TRACE("  skip: redundant frame header OBU");
       }
       else
       {
-         return stbi_avif__fail("unsupported AV1 OBU type");
+         /* Forward compatibility: unknown non-critical OBU types should be
+          * skipped by length, not treated as a fatal parse error. */
+         STBI_AVIF_TRACE("  skip: unknown/unhandled OBU type=%u", obu_type);
       }
 
       offset += header_size + payload_size;
@@ -2399,6 +2404,10 @@ static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
    unsigned STBI_AVIF_LONGLONG dif;
    const unsigned char *bptr;
    const unsigned char *end;
+
+   if (rd->failed)
+      return;
+
    dif   = rd->dif;
    bptr  = rd->bptr;
    end   = rd->end;
@@ -2442,6 +2451,7 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
+   decoder->failed = 0;
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    decoder->trace_symbols_event_count = 0;
    decoder->trace_symbols_active_line = 0;
@@ -2460,6 +2470,19 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
 {
    int d;
    unsigned int r;
+
+   if (rd->failed)
+      return ret;
+   if (rng == 0u)
+   {
+      rd->failed = 1;
+      rd->dif = 0;
+      rd->rng = 0x8000u;
+      rd->cnt = 0;
+      stbi_avif__fail("invalid AV1 range decoder state");
+      return ret;
+   }
+
    /* Count leading zeros in 16-bit representation of rng: d = 16 - ilog(rng) */
    d = 0;
    r = rng;
@@ -2500,6 +2523,9 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    int trace_this_symbol = 0;
 #endif
 
+   if (rd->failed)
+      return 0u;
+
    r   = rd->rng;
    dif = rd->dif;
    c   = (unsigned int)(dif >> 48);   /* top 16 bits of dif window */
@@ -2531,12 +2557,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    dif -= stbi_avif__ret_ull((unsigned STBI_AVIF_LONGLONG)v << 48);
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
 #ifdef STBI_AVIF_TRACE_SYMBOLS
-<<<<<<< HEAD
-   if (trace_this_symbol)
-      fprintf(stderr, "sym=%u dif=%llu rng=%u line=%d\n", ret, (unsigned long long)(rd->dif >> 48), rd->rng, rd->trace_symbols_active_line);
-=======
-   fprintf(stderr, "sym=%u dif=%" STBI_AVIF_PRIu64 " rng=%u\n", ret, (unsigned STBI_AVIF_LONGLONG)(rd->dif >> 48), rd->rng);
->>>>>>> 2d53cf7bb66ed31de25b5557d75ae731573ed2b7
+
 #endif
    return ret;
 }
@@ -2620,6 +2641,8 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    rd->trace_symbols_active_line = 0;
 #endif
+   if (rd->failed)
+      return 0u;
    stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
    return sym;
 }
@@ -2634,6 +2657,8 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_d
                                                        unsigned short *cdf, int nsyms)
 {
    unsigned int sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
+   if (rd->failed)
+      return 0u;
    stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
    return sym;
 }
