@@ -2397,7 +2397,10 @@ static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, siz
  * again by left-shifting and reading fresh bytes from the tile buffer.
  */
 
-/* Refill the 64-bit dif window from the byte stream (matches dav1d ctx_refill). */
+/* Refill the 64-bit dif window from the byte stream (matches dav1d ctx_refill
+ * exactly). dav1d convention: dif initial = (1<<63)-1, refill XORs raw bytes
+ * into the high free positions, low unfilled bits remain 1. On end-of-stream,
+ * stop reading; remaining bits stay 1 (which acts as natural 0xFF padding). */
 static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
 {
    int c;
@@ -2412,16 +2415,11 @@ static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
    bptr  = rd->bptr;
    end   = rd->end;
    c = 40 - rd->cnt;  /* = EC_WIN_SIZE - cnt - 24, first free bit position */
-   do {
-      if (bptr >= end) {
-         /* fill remaining bits with 1s (complement of 0x00 stream) */
-         dif |= ~(~(unsigned STBI_AVIF_LONGLONG)0xFFu << c);
-         break;
-      }
-      dif |= (unsigned STBI_AVIF_LONGLONG)((unsigned int)bptr[0] ^ 0xFFu) << c;
+   while (c >= 0 && bptr < end) {
+      dif ^= (unsigned STBI_AVIF_LONGLONG)bptr[0] << c;
       bptr++;
       c -= 8;
-   } while (c >= 0);
+   }
    rd->dif  = dif;
    rd->cnt  = 40 - c;  /* = EC_WIN_SIZE - c - 24 */
    rd->bptr = bptr;
@@ -2447,7 +2445,10 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    decoder->buf  = data + byte_start;
    decoder->end  = data + size;
    decoder->bptr = decoder->buf;
-   decoder->dif  = STBI_AVIF_ULL(0);
+   /* dav1d MSAC init: dif = (1 << (EC_WIN_SIZE - 1)) - 1 = (1<<63)-1.
+    * Together with XOR-refill and ((dif+1)<<d)-1 in normalize, this
+    * preserves the convention that unfilled low bits of dif read as 1. */
+   decoder->dif  = ((unsigned STBI_AVIF_LONGLONG)1 << 63) - (unsigned STBI_AVIF_LONGLONG)1;
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
@@ -2488,7 +2489,12 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
    r = rng;
    while (r < 0x8000u) { r <<= 1u; ++d; }
    rd->cnt -= d;
-   rd->dif  = (dif << d);
+   /* dav1d ctx_norm: dif = ((dif + 1) << d) - 1. The +1/-1 preserves the
+    * "unfilled low bits = 1" invariant across normalizations. Plain (dif << d)
+    * loses this and silently corrupts later symbol decisions, which manifests
+    * as the range-decoder cnt dropping well below the normal -8..0 working
+    * range (renorm-loop misbehavior). */
+   rd->dif  = ((dif + (unsigned STBI_AVIF_LONGLONG)1) << d) - (unsigned STBI_AVIF_LONGLONG)1;
    rd->rng  = rng << d;
    if (rd->cnt < 0) stbi_avif__av1_rd_refill(rd);
    return ret;
@@ -8326,10 +8332,18 @@ static void stbi_avif__av1_filter_intra_predict(unsigned short *plane, unsigned 
                  (by > 0u) ? (int)plane[(by-1u)*stride + bx] :
                  (bx > 0u) ? (int)plane[by*stride + bx-1u] : (int)mid;
          } else if (sbr == 0u) {
-            /* sbc > 0, sbr == 0: top-left is already-written output at (py0-1, px0-1)
-             * but py0 = by, so py0-1 = by-1. If by==0, no row above, use same-row left */
-            p0 = (by > 0u) ? (int)plane[(by-1u)*stride + px0-1u]
-                           : (int)plane[by*stride + px0-1u]; /* fallback: same row, just left of us */
+            /* sbc > 0, sbr == 0: top-left from edge buffer at offset sbc.
+             * If by==0 (no top neighbor), dav1d fills the entire top edge
+             * buffer with pixel(0, bx-1) (the no-top fallback), so p0 here
+             * must use the SAME constant fallback (NOT same-row, just-left-
+             * of-us, which would read predicted output of the previous sub-
+             * block). */
+            if (by > 0u)
+               p0 = (int)plane[(by-1u)*stride + px0-1u];
+            else if (bx > 0u)
+               p0 = (int)plane[by*stride + bx-1u];
+            else
+               p0 = (int)mid;
          } else {
             /* sbr > 0: top-left = sample just above-left of current top row, already written */
             p0 = (int)plane[(py0-1u)*stride + (px0 > 0u ? px0-1u : px0)];
@@ -8433,6 +8447,23 @@ static const int stbi_avif__mode_to_angle[9] = {
    0, 90, 180, 45, 135, 113, 157, 203, 67
 };
 
+static void stbi_avif__av1_predict_block_ex(unsigned short *p,
+                                          unsigned int stride,
+                                          unsigned int plane_w,
+                                          unsigned int plane_h,
+                                          unsigned int bx,
+                                          unsigned int by,
+                                          unsigned int bw,
+                                          unsigned int bh,
+                                          unsigned int bit_depth,
+                                          unsigned int mode,
+                                          int angle_delta,
+                                          int have_top_right,
+                                          int have_bottom_left);
+
+/* Conservative wrapper: assumes neither above-right nor below-left neighbors
+ * are available (matches the legacy "always replicate extended-ref" behavior
+ * used for whole-block prediction prior to the per-TX refactor). */
 static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int stride,
                                           unsigned int plane_w,
@@ -8444,6 +8475,24 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
                                           unsigned int bit_depth,
                                           unsigned int mode,
                                           int angle_delta)
+{
+   stbi_avif__av1_predict_block_ex(p, stride, plane_w, plane_h, bx, by, bw, bh,
+      bit_depth, mode, angle_delta, 0, 0);
+}
+
+static void stbi_avif__av1_predict_block_ex(unsigned short *p,
+                                          unsigned int stride,
+                                          unsigned int plane_w,
+                                          unsigned int plane_h,
+                                          unsigned int bx,
+                                          unsigned int by,
+                                          unsigned int bw,
+                                          unsigned int bh,
+                                          unsigned int bit_depth,
+                                          unsigned int mode,
+                                          int angle_delta,
+                                          int have_top_right,
+                                          int have_bottom_left)
 {
    unsigned short top[512];
    unsigned short left[512];
@@ -8467,25 +8516,37 @@ static void stbi_avif__av1_predict_block(unsigned short *p,
    if (ref_count > 512u)
       ref_count = 512u;
 
-   /* Fill left[] reference array: if no left col, fill with top[0] or base+1 */
+   /* Fill left[] reference array. The extended portion (i >= bh) corresponds
+    * to rows below the block; available only when have_bottom_left=true. */
    for (i = 0u; i < ref_count; ++i) {
       unsigned int ly = by + i;
       if (ly >= plane_h) ly = plane_h - 1u;
-      if (have_left)
-         left[i] = p[ly * stride + (bx - 1u)];
-      else if (have_top)
+      if (have_left) {
+         if (i < bh)
+            left[i] = p[ly * stride + (bx - 1u)];
+         else if (have_bottom_left && by + i < plane_h)
+            left[i] = p[ly * stride + (bx - 1u)];
+         else
+            left[i] = (i > 0u) ? left[i - 1u] : p[ly * stride + (bx - 1u)];
+      } else if (have_top)
          left[i] = p[(by - 1u) * stride + bx]; /* fill with top[0] */
       else
          left[i] = (unsigned short)(base + 1); /* DC_128+1 = (1<<bd)/2 + 1 */
    }
 
-   /* Fill top[] reference array: if no top row, fill with left[0] or base-1 */
+   /* Fill top[] reference array. The extended portion (i >= bw) corresponds
+    * to pixels above-right of the block; available only when have_top_right=true. */
    for (i = 0u; i < ref_count; ++i) {
       unsigned int tx = bx + i;
       if (tx >= plane_w) tx = plane_w - 1u;
-      if (have_top)
-         top[i] = p[(by - 1u) * stride + tx];
-      else if (have_left)
+      if (have_top) {
+         if (i < bw)
+            top[i] = p[(by - 1u) * stride + tx];
+         else if (have_top_right && bx + i < plane_w)
+            top[i] = p[(by - 1u) * stride + tx];
+         else
+            top[i] = (i > 0u) ? top[i - 1u] : p[(by - 1u) * stride + tx];
+      } else if (have_left)
          top[i] = p[by * stride + (bx - 1u)]; /* fill with left[0] at current row */
       else
          top[i] = (unsigned short)(base - 1); /* (1<<bd)/2 - 1 */
@@ -8899,9 +8960,12 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
 #define STBI_AVIF_ROUND_SHIFT(a, b) (((a) + (1 << ((b) - 1))) >> (b))
 
 /* AV1 spec inter-stage clipping: clamp to signed (bd+8)-bit range.
- * For 8-bit: ±(1<<15)-1 = ±32767. For 10-bit: ±(1<<17)-1. For 12-bit: ±(1<<19)-1.
- * Since we work with 8-bit internally, use 16-bit range. */
-#define STBI_AVIF_CLIP_INT16(x) ((x) > 32767 ? 32767 : ((x) < -32767 ? -32767 : (x)))
+ * For 8-bit: -32768..32767. For 10-bit: -131072..131071. For 12-bit: -524288..524287.
+ * The active range is set per-call by stbi_avif__av1_inverse_transform_2d_rect()
+ * based on the plane's bit_depth. Default initialized for 8-bit safety. */
+static int stbi_avif__inv_clip_max = 32767;
+static int stbi_avif__inv_clip_min = -32768;
+#define STBI_AVIF_CLIP_INT16(x) ((x) > stbi_avif__inv_clip_max ? stbi_avif__inv_clip_max : ((x) < stbi_avif__inv_clip_min ? stbi_avif__inv_clip_min : (x)))
 
 /* AOM-compatible half butterfly: round((a*x + b*y) >> cos_bit) */
 #define STBI_AVIF_HALF_BTF(w0, in0, w1, in1, cos_bit) \
@@ -10225,7 +10289,7 @@ static void stbi_avif__av1_iidentity64(const int *input, int *output)
    Coefficients are laid out as coeffs[row * txw + col], row in [0,txh), col in [0,txw).
    tx_type selects sub-transforms for rows/columns.
 */
-static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int txh, int tx_type)
+static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int txh, int tx_type, int bit_depth)
 {
    int buf[64];
    int *temp;
@@ -10234,6 +10298,17 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    void (*row_fn)(const int *, int *);
    void (*col_fn)(const int *, int *);
    int ud_flip = 0, lr_flip = 0;
+
+   /* Set inter-stage clip range to (bit_depth + 8)-bit signed per AV1 spec
+    * §7.7.2. Without this, 10-/12-bit content saturates at ±32767 and the
+    * inverse transform produces severely under-magnitude residuals. */
+   if (bit_depth >= 12) {
+      stbi_avif__inv_clip_max =  524287; stbi_avif__inv_clip_min = -524288;
+   } else if (bit_depth >= 10) {
+      stbi_avif__inv_clip_max =  131071; stbi_avif__inv_clip_min = -131072;
+   } else {
+      stbi_avif__inv_clip_max =   32767; stbi_avif__inv_clip_min =  -32768;
+   }
 
    temp = (int *)STBI_AVIF_MALLOC((size_t)(txw * txh) * sizeof(int));
    if (!temp) return;
@@ -10342,9 +10417,9 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    STBI_AVIF_FREE(temp);
 }
 
-static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type)
+static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type, int bit_depth)
 {
-   stbi_avif__av1_inverse_transform_2d_rect(coeffs, sz, sz, tx_type);
+   stbi_avif__av1_inverse_transform_2d_rect(coeffs, sz, sz, tx_type, bit_depth);
 }
 
 /*
@@ -10642,12 +10717,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
           * frames that actually enable qmatrix (`using_qmatrix=1`) at decode
           * entry, so at this point qmatrix scaling is always a no-op. */
          dequant_val = (lvl * qstep) & 0xffffff;
-         /* Clamp to valid coefficient range per AV1 spec */
-         {
-            int cf_max = (1 << 20) - 1;
-            if (dequant_val > cf_max) dequant_val = cf_max;
-         }
-         /* Apply TX scale per AV1 spec §7.12.3.
+         /* Apply TX scale per AV1 spec §7.12.3 BEFORE the cf_max clamp.
           * dq_shift = max(0, max(log2(txw), log2(txh)) - 4)
           * 4..16px → >>0; 32px max → >>1; 64px max → >>2.
           * Cannot use tx2dszctx here because min(log2w,3)+min(log2h,3)
@@ -10656,6 +10726,17 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             int max_dim = (txw > txh) ? txw : txh;
             if (max_dim >= 64)      dequant_val >>= 2;
             else if (max_dim >= 32) dequant_val >>= 1;
+         }
+         /* Clamp to valid coefficient range per AV1 spec: cf_max = (1 << (bpc+7)) - 1.
+          * 8-bit→32767, 10-bit→131071, 12-bit→524287. dav1d uses umin(dq, cf_max)
+          * AFTER dq_shift; doing it before would clip too tightly for 32x32/64x64. */
+         {
+            int cf_max;
+            int bpc = ctx->planes ? ctx->planes->bit_depth : 8;
+            if (bpc <= 8)       cf_max = (1 << 15) - 1;
+            else if (bpc <= 10) cf_max = (1 << 17) - 1;
+            else                cf_max = (1 << 19) - 1;
+            if (dequant_val > cf_max) dequant_val = cf_max;
          }
          if (sign) dequant_val = -dequant_val;
 
@@ -10751,7 +10832,7 @@ static void stbi_avif__av1_reconstruct_tx_block(
          memset(big, 0, (size_t)(txw * txh) * sizeof(int));
          for (y = 0; y < coeff_h; ++y)
             memcpy(big + y * txw, coeffs + y * coeff_w, coeff_w * sizeof(int));
-         stbi_avif__av1_inverse_transform_2d_rect(big, (int)txw, (int)txh, tx_type);
+         stbi_avif__av1_inverse_transform_2d_rect(big, (int)txw, (int)txh, tx_type, bit_depth);
          for (y = 0; y < (unsigned int)h; ++y) {
             for (x = 0; x < (unsigned int)w; ++x) {
                int pred = (int)plane[(by + y) * stride + (bx + x)];
@@ -10762,9 +10843,21 @@ static void stbi_avif__av1_reconstruct_tx_block(
          STBI_AVIF_FREE(big);
       }
    } else {
+      if (bx == 24 && by == 0 && txw == 8 && plane_w == 1204) {
+         int i; fprintf(stderr, "DBG24 coeffs (pre-IDCT) tx_type=%d:\n", tx_type);
+         for (i = 0; i < 64; i++) {
+            fprintf(stderr, "%d ", coeffs[i]);
+            if ((i&7)==7) fprintf(stderr, "\n");
+         }
+      }
       /* Inverse transform in place */
-      stbi_avif__av1_inverse_transform_2d_rect(coeffs, (int)txw, (int)txh, tx_type);
-
+      stbi_avif__av1_inverse_transform_2d_rect(coeffs, (int)txw, (int)txh, tx_type, bit_depth);
+      if (bx == 24 && by == 0 && txw == 8 && plane_w == 1204) {
+         fprintf(stderr, "DBG24 pred row0: %d %d %d %d %d %d %d %d  (col15=%d col23=%d)\n",
+           plane[bx+0],plane[bx+1],plane[bx+2],plane[bx+3],
+           plane[bx+4],plane[bx+5],plane[bx+6],plane[bx+7],
+           plane[15], plane[23]);
+      }
       /* Add residual to prediction */
       for (y = 0; y < (unsigned int)h; ++y) {
          for (x = 0; x < (unsigned int)w; ++x) {
