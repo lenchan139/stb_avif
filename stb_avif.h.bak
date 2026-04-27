@@ -11725,26 +11725,13 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             } else if (palette_y_size == 0) {
                /* Per-TX regular intra prediction. Required so the 2nd+ TX in a
                 * multi-TX intra block reads the locally-reconstructed pixels of
-                * the previous TX as its left/top neighbor (matches dav1d).
-                *
-                * Edge flags within block (assuming block-level sb_has_tr=sb_has_bl=0,
-                * matching dav1d's conservative default):
-                *  have_top_right = (tx_col + tx_w < pw): another TX exists to our
-                *    right inside this block. When tx_row==0 the above-right pixels
-                *    are in an already-decoded neighbor block above; when tx_row>0
-                *    they're in TXs of this block decoded earlier in raster order.
-                *  have_bottom_left = (tx_col == 0 && tx_row + tx_h < ph): a TX below
-                *    us in the leftmost column exists, and its left column comes from
-                *    the already-decoded neighbor block to the block's left. */
+                * the previous TX as its left/top neighbor (matches dav1d). */
                unsigned int eff_w = (tx_col + tx_w <= pw) ? tx_w : (pw - tx_col);
                unsigned int eff_h = (tx_row + tx_h <= ph) ? tx_h : (ph - tx_row);
-               int have_tr = (tx_col + tx_w < pw) ? 1 : 0;
-               int have_bl = (tx_col == 0u && tx_row + tx_h < ph) ? 1 : 0;
-               stbi_avif__av1_predict_block_ex(ctx->planes->y, ctx->planes->width,
+               stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
                   ctx->planes->width, ctx->planes->height,
                   px + tx_col, py + tx_row, eff_w, eff_h,
-                  ctx->planes->bit_depth, y_mode, y_angle_delta,
-                  have_tr, have_bl);
+                  ctx->planes->bit_depth, y_mode, y_angle_delta);
             }
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
