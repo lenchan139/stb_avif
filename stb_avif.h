@@ -10843,21 +10843,8 @@ static void stbi_avif__av1_reconstruct_tx_block(
          STBI_AVIF_FREE(big);
       }
    } else {
-      if (bx == 24 && by == 0 && txw == 8 && plane_w == 1204) {
-         int i; fprintf(stderr, "DBG24 coeffs (pre-IDCT) tx_type=%d:\n", tx_type);
-         for (i = 0; i < 64; i++) {
-            fprintf(stderr, "%d ", coeffs[i]);
-            if ((i&7)==7) fprintf(stderr, "\n");
-         }
-      }
       /* Inverse transform in place */
       stbi_avif__av1_inverse_transform_2d_rect(coeffs, (int)txw, (int)txh, tx_type, bit_depth);
-      if (bx == 24 && by == 0 && txw == 8 && plane_w == 1204) {
-         fprintf(stderr, "DBG24 pred row0: %d %d %d %d %d %d %d %d  (col15=%d col23=%d)\n",
-           plane[bx+0],plane[bx+1],plane[bx+2],plane[bx+3],
-           plane[bx+4],plane[bx+5],plane[bx+6],plane[bx+7],
-           plane[15], plane[23]);
-      }
       /* Add residual to prediction */
       for (y = 0; y < (unsigned int)h; ++y) {
          for (x = 0; x < (unsigned int)w; ++x) {
@@ -11569,13 +11556,27 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          }
       }
    } else if (fi_flag) {
-      stbi_avif__av1_filter_intra_predict(ctx->planes->y, ctx->planes->width,
-         ctx->planes->width, ctx->planes->height,
-         px, py, pw, ph, fi_mode, ctx->planes->bit_depth);
+      /* Per-TX filter_intra prediction is performed inside the Y residual loop below.
+       * Whole-block filter_intra is incorrect because the top edge of TX tiles after
+       * the first column needs to read locally-reconstructed pixels (top-right of the
+       * previous TX), which only exist after each TX is fully recon'd.
+       * For skip-flagged blocks (no residual), per-TX == whole-block, so call once. */
+      if (skip) {
+         stbi_avif__av1_filter_intra_predict(ctx->planes->y, ctx->planes->width,
+            ctx->planes->width, ctx->planes->height,
+            px, py, pw, ph, fi_mode, ctx->planes->bit_depth);
+      }
    } else {
-      stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
-         ctx->planes->width, ctx->planes->height,
-         px, py, pw, ph, ctx->planes->bit_depth, y_mode, y_angle_delta);
+      /* Per-TX prediction is performed inside the Y residual loop below.
+       * Whole-block prediction is only correct when the coding block has a
+       * single TX; otherwise inner TXs need locally-reconstructed top/left
+       * pixels from previously-decoded TXs in the same block.
+       * For skip-flagged blocks (no residual loop runs), call once here. */
+      if (skip) {
+         stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
+            ctx->planes->width, ctx->planes->height,
+            px, py, pw, ph, ctx->planes->bit_depth, y_mode, y_angle_delta);
+      }
    }
 
    /* Predict UV — skip for monochrome */
@@ -11712,6 +11713,26 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                fprintf(stderr, "OURS_TXBSKIP plane=0 chroma=0 tx=%u sctx=%d\n", ts_skip, txb_skip_ctx);
             }
 #endif
+            /* Per-TX filter_intra prediction: must run AFTER any earlier TX in this
+             * block has been fully reconstructed (so plane[bx-1] holds the locally-
+             * reconstructed top-right of the previous TX). */
+            if (fi_flag) {
+               unsigned int eff_w = (tx_col + tx_w <= pw) ? tx_w : (pw - tx_col);
+               unsigned int eff_h = (tx_row + tx_h <= ph) ? tx_h : (ph - tx_row);
+               stbi_avif__av1_filter_intra_predict(ctx->planes->y, ctx->planes->width,
+                  ctx->planes->width, ctx->planes->height,
+                  px + tx_col, py + tx_row, eff_w, eff_h, fi_mode, ctx->planes->bit_depth);
+            } else if (palette_y_size == 0) {
+               /* Per-TX regular intra prediction. Required so the 2nd+ TX in a
+                * multi-TX intra block reads the locally-reconstructed pixels of
+                * the previous TX as its left/top neighbor (matches dav1d). */
+               unsigned int eff_w = (tx_col + tx_w <= pw) ? tx_w : (pw - tx_col);
+               unsigned int eff_h = (tx_row + tx_h <= ph) ? tx_h : (ph - tx_row);
+               stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
+                  ctx->planes->width, ctx->planes->height,
+                  px + tx_col, py + tx_row, eff_w, eff_h,
+                  ctx->planes->bit_depth, y_mode, y_angle_delta);
+            }
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
             if (!txb_skip) {
@@ -14518,6 +14539,21 @@ static unsigned char *stbi_avif__av1_decode(
 
    /* Apply film grain synthesis (after all in-loop filters) */
    stbi_avif__av1_apply_film_grain(&planes, fhdr, seq);
+
+   {
+      const char *yuv_path = getenv("STBI_AVIF_DUMP_YUV");
+      if (yuv_path && *yuv_path) {
+         FILE *yf = fopen(yuv_path, "wb");
+         if (yf) {
+            unsigned int yc = planes.width * planes.height;
+            unsigned int cc = planes.cw * planes.ch;
+            fwrite(planes.y, sizeof(unsigned short), yc, yf);
+            fwrite(planes.u, sizeof(unsigned short), cc, yf);
+            fwrite(planes.v, sizeof(unsigned short), cc, yf);
+            fclose(yf);
+         }
+      }
+   }
 
    rgba = stbi_avif__av1_planes_to_rgba(&planes,
                                          (int)seq->matrix_coefficients,
