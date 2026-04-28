@@ -7728,6 +7728,33 @@ static int stbi_avif__av1_get_br_ctx_2d(const unsigned char *levels,
    return mag + 14;
 }
 
+/* get_br_ctx_1d: BR context for non-2D classes (TX_CLASS_H / TX_CLASS_V).
+   Per dav1d/spec: ((y>0)?14:7) + min(6,(mag+1)>>1)
+   where mag = sum of three neighbor levels (capped at 15 each).
+   In dav1d, both H and V classes use y = i >> shift (the row coordinate
+   in the current storage layout), since levels are stored at x*stride+y. */
+static int stbi_avif__av1_get_br_ctx_1d(const unsigned char *levels,
+   int coeff_idx, int bhl)
+{
+   int txh = 1 << bhl;
+   int stride = txh + STBI_AVIF_TX_PAD_HOR;
+   int col = coeff_idx >> bhl;
+   int row = coeff_idx - (col << bhl);
+   int padded_pos = col * stride + row;
+   int a = (int)levels[padded_pos + 1];
+   int b = (int)levels[padded_pos + stride];
+   int c = (int)levels[padded_pos + 2];
+   int mag, y;
+   if (a > 15) a = 15;
+   if (b > 15) b = 15;
+   if (c > 15) c = 15;
+   mag = a + b + c;
+   mag = (mag + 1) >> 1;
+   if (mag > 6) mag = 6;
+   y = row;
+   return mag + (y > 0 ? 14 : 7);
+}
+
 /* get_br_ctx for position 0 (DC) */
 static int stbi_avif__av1_get_br_ctx_dc(const unsigned char *levels, int bhl)
 {
@@ -10580,6 +10607,8 @@ static int stbi_avif__av1_read_coeffs_after_skip(
       }
       eob_pt = (int)eob_pt_sym; /* keep for compatibility below */
    }
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+      fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-eob_pt[%d]: r=%u\n", eob_pt, ctx->rd.rng);
 
    /* 3. Compute EOB from eob_pt_sym (0-indexed symbol) using dav1d formula:
       sym=0 → eob=0, sym=1 → eob=1,
@@ -10602,6 +10631,8 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    }
    if (eob > area) eob = area;
    if (eob < 1) { STBI_AVIF_FREE(scan_buf); return 0; }
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+      fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-eob[%d]: r=%u (dc_sign_ctx=%d)\n", eob, ctx->rd.rng, dc_sign_ctx);
 
    /* 4. Read coefficient levels (reverse scan order) */
 
@@ -10650,7 +10681,9 @@ static int stbi_avif__av1_read_coeffs_after_skip(
                   ctx->coeff_base_cdf[ts][plane_type][coeff_ctx], 4);
          level = (int)sym;
          if (level > 2) { /* NUM_BASE_LEVELS = 2 */
-            int br_ctx = stbi_avif__av1_get_br_ctx_2d(levels, pos, bhl);
+            int br_ctx = (tx_class != 0)
+               ? stbi_avif__av1_get_br_ctx_1d(levels, pos, bhl)
+               : stbi_avif__av1_get_br_ctx_2d(levels, pos, bhl);
             for (k = 0; k < 4; ++k) {
                sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                         ctx->coeff_br_cdf[ts2][plane_type][br_ctx], 4);
@@ -10660,6 +10693,8 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          }
          levels[stbi_avif__av1_get_padded_idx(pos, bhl)] =
             (unsigned char)(level < 255 ? level : 255);
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+            fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-lo_tok[ctx=%d,c=%d,pos=%d,lvl=%d]: r=%u\n", coeff_ctx, c, pos, level, ctx->rd.rng);
       }
 
       /* 4c. Read DC coefficient (scan index 0) */
@@ -10671,9 +10706,13 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             : 0;
          int level;
          if (coeff_ctx >= 42) coeff_ctx = 41;
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+            fprintf((FILE *)ctx->dbg_blocks_fp, "  Pre-dc_lo_tok[ctx=%d,tx_class=%d]: r=%u\n", coeff_ctx, tx_class, ctx->rd.rng);
          sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                   ctx->coeff_base_cdf[ts][plane_type][coeff_ctx], 4);
          level = (int)sym;
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+            fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-dc_lo_tok[ctx=%d,v=%d]: r=%u\n", coeff_ctx, level, ctx->rd.rng);
          if (level > 2) {
             int padded_dc = stbi_avif__av1_get_padded_idx(pos, bhl);
             int br_ctx = stbi_avif__av1_get_br_ctx_dc(levels + padded_dc, bhl);
@@ -10702,9 +10741,13 @@ static int stbi_avif__av1_read_coeffs_after_skip(
 
          /* Read sign */
          if (c == 0) {
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "  Pre-dc_sign[ctx=%d]: r=%u (lvl=%d)\n", dc_sign_ctx, ctx->rd.rng, lvl);
             sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                      ctx->dc_sign_cdf[plane_type][dc_sign_ctx], 2);
             sign = (int)sym;
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-dc_sign[%d][%d]: r=%u\n", dc_sign_ctx, sign, ctx->rd.rng);
          } else {
             sym = stbi_avif__av1_read_bool_equi(&ctx->rd);
             sign = (int)sym;
@@ -11679,7 +11722,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       /* tx_ctx = max(log2w, log2h), used for skip/coeff_base/coeff_br CDFs */
       int tx_ctx = (int)(tx_log2w > tx_log2h ? tx_log2w : tx_log2h);
       unsigned int sb_mi_val = ctx->use_128 ? 32u : 16u;
-      static const signed char dc_signs[3] = { 0, 1, -1 };
+      static const signed char dc_signs[3] = { 0, -1, 1 };
       static const signed char dc_sign_contexts[65] = {
          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -11802,6 +11845,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             int dbg_y_txtp = 0;
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "  Post-txb_skip[ts=%d,sctx=%d,v=%u]: r=%u\n", ts_skip, txb_skip_ctx, txb_skip, ctx->rd.rng);
             if (!txb_skip) {
                unsigned int tx_type_sym = 0;
                int tx_type_actual = 0;
@@ -12092,6 +12137,16 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
                    ctx->partition_cdf[bsize_ctx][part_ctx],
                    stbi_avif__partition_nsym[bsize_ctx]);
 
+   if (ctx->dbg_blocks_fp == (void *)1) {
+      const char *p = getenv("STBI_AVIF_DBG_BLOCKS");
+      ctx->dbg_blocks_fp = (p && p[0]) ? fopen(p, "w") : NULL;
+   }
+   if (ctx->dbg_blocks_fp) {
+      fprintf((FILE*)ctx->dbg_blocks_fp,
+              "PART mi=(%u,%u) bs=%u bsctx=%u partctx=%u above=%d left=%d bsl=%d => %u r=%u\n",
+              mi_row, mi_col, (unsigned)block_size, (unsigned)bsize_ctx, (unsigned)part_ctx,
+              above, left, bsl, (unsigned)partition, ctx->rd.rng);
+   }
 
    /* Compute the sub-block size for SPLIT. */
    sub_size = block_size - 3; /* e.g. 128→64, 64→32, 32→16, … */
@@ -12168,6 +12223,15 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
 
       case STBI_AVIF_PARTITION_HORZ_4:
          {
+            /* TODO: spec-correct sub block_size for HORZ_4 of 16x16/32x32/64x64
+             * is BLOCK_16X4(17) / BLOCK_32X8(19) / BLOCK_64X16(21).
+             * Using sub_size = block_size - 3 gives 8x8/16x16/32x32 instead.
+             * Switching to spec-correct values (verified) made overall MAE
+             * worse because downstream code paths (intra-pred / IDCT /
+             * coeff-context for non-square 1:4 ratio blocks) are not yet
+             * fully implemented. Keep the broken-but-survivable path until
+             * those pipelines are audited. See repo memory entry 2026-04-28
+             * "HORZ_4/VERT_4 sub-size bug". */
             unsigned int q4 = bh4 / 4u;
             unsigned int qi;
             for (qi = 0; qi < 4u; ++qi)
@@ -12178,6 +12242,8 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
 
       case STBI_AVIF_PARTITION_VERT_4:
          {
+            /* TODO: see HORZ_4 above. Spec sub size is BLOCK_4X16(16) /
+             * BLOCK_8X32(18) / BLOCK_16X64(20). */
             unsigned int q4 = bw4 / 4u;
             unsigned int qi;
             for (qi = 0; qi < 4u; ++qi)
