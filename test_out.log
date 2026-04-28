@@ -1,0 +1,186 @@
+==> Compiling...
+==> Build complete: /Users/len/Downloads/gcp/test_decode_run
+==> Converting AVIF files to PNG...
+  G-0trmKXsAA1sQZ-thumb.avif -> G-0trmKXsAA1sQZ-thumb.png
+container parsed: 89 x 100, channels=3
+decode info: 89 x 100, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/G-0trmKXsAA1sQZ-thumb.png
+decode succeeded
+  G-0trmKXsAA1sQZ.avif -> G-0trmKXsAA1sQZ.png
+container parsed: 1429 x 1623, channels=3
+decode info: 1429 x 1623, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/G-0trmKXsAA1sQZ.png
+decode succeeded
+  Gb5RU6RWoAAQQ1n.avif -> Gb5RU6RWoAAQQ1n.png
+container parsed: 1461 x 1530, channels=3
+decode info: 1461 x 1530, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/Gb5RU6RWoAAQQ1n.png
+decode succeeded
+  fox.profile0.10bpc.yuv420.avif -> fox.profile0.10bpc.yuv420.png
+container parsed: 1204 x 800, channels=3
+decode info: 1204 x 800, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/fox.profile0.10bpc.yuv420.png
+decode succeeded
+  fox.profile0.8bpc.yuv420.avif -> fox.profile0.8bpc.yuv420.png
+container parsed: 1204 x 800, channels=3
+decode info: 1204 x 800, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/fox.profile0.8bpc.yuv420.png
+decode succeeded
+  kimono.avif -> kimono.png
+container parsed: 722 x 1024, channels=3
+decode info: 722 x 1024, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/kimono.png
+decode succeeded
+  red-at-12-oclock-with-color-profile-10bpc.avif -> red-at-12-oclock-with-color-profile-10bpc.png
+container parsed: 800 x 800, channels=3
+decode info: 800 x 800, channels=3
+converted to: /Users/len/Downloads/gcp/output_png/red-at-12-oclock-with-color-profile-10bpc.png
+decode succeeded
+  steam_2253100.avif -> steam_2253100.png
+container parsed: 1024 x 772, channels=4
+decode info: 1024 x 772, channels=4
+converted to: /Users/len/Downloads/gcp/output_png/steam_2253100.png
+decode succeeded
+==> Cleaning up build files...
+
+==> Running validation checklist...
+=== AVIF Decoder Validation Checklist ===
+
+File: /Users/len/Downloads/gcp/example_avif/G-0trmKXsAA1sQZ-thumb.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=89
+  [PASS] C3-height-positive : height=100
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (89x100)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 89x100x3 = 26700 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 89x100 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/G-0trmKXsAA1sQZ.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=1429
+  [PASS] C3-height-positive : height=1623
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (1429x1623)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 1429x1623x3 = 6957801 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 1429x1623 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/Gb5RU6RWoAAQQ1n.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=1461
+  [PASS] C3-height-positive : height=1530
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (1461x1530)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 1461x1530x3 = 6705990 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 1461x1530 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/fox.profile0.10bpc.yuv420.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=1204
+  [PASS] C3-height-positive : height=800
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (1204x800)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 1204x800x3 = 2889600 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 1204x800 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/fox.profile0.8bpc.yuv420.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=1204
+  [PASS] C3-height-positive : height=800
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (1204x800)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 1204x800x3 = 2889600 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 1204x800 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/kimono.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=722
+  [PASS] C3-height-positive : height=1024
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (722x1024)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 722x1024x3 = 2217984 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 722x1024 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/red-at-12-oclock-with-color-profile-10bpc.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=800
+  [PASS] C3-height-positive : height=800
+  [PASS] C4-channels-valid : channels=3 (RGB)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=3 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (800x800)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 800x800x3 = 1920000 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 3, info 3)
+  [PASS] C6-dims-match : 800x800 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : no alpha channel (RGB image)
+
+File: /Users/len/Downloads/gcp/example_avif/steam_2253100.avif
+  [PASS] C1-container-parse : stbi_avif_info succeeded
+  [PASS] C2-width-positive : width=1024
+  [PASS] C3-height-positive : height=772
+  [PASS] C4-channels-valid : channels=4 (RGBA)
+  [PASS] C5-av1-decode : stbi_avif_load succeeded
+  [PASS]   C5.1-seq-header : profile/bit-depth/chroma supported (channels=4 honoured)
+  [PASS]   C5.2-frame-header : frame+render dims valid (1024x772)
+  [PASS]   C5.3-tile-structure : tile group parsed without truncation
+  [PASS]   C5.4-block-decode : partition / intra / tx / coeffs decoded
+  [PASS]   C5.5-reconstruction : buffer 1024x772x4 = 3162112 bytes addressable
+  [PASS]   C5.6-loop-filters : deblock / CDEF / LR applied without aborting decode
+  [PASS]   C5.7-output : RGBA expansion OK (channels 4, info 4)
+  [PASS] C6-dims-match : 1024x772 matches info
+  [PASS] C7-pixel-variance : pixels contain variation
+  [PASS] C8-alpha-consistency : alpha plane contains variation - semi-transparent image
+
+=== Summary: 8/8 files fully decoded ===
+==> Done. Output in: /Users/len/Downloads/gcp/output_png

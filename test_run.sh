@@ -37,4 +37,12 @@ cc -O2 -o "$CHECKLIST_BIN" "$CHECKLIST_SRC" -lm
 "$CHECKLIST_BIN" "$INPUT_DIR"/*.avif
 rm -f "$CHECKLIST_BIN"
 
+echo ""
+echo "==> Running negative / robustness tests..."
+NEGATIVE_SRC="$SCRIPT_DIR/tests/test_negative.c"
+NEGATIVE_BIN="$SCRIPT_DIR/test_negative_run"
+cc -std=c89 -Wall -Wextra -pedantic -O2 -o "$NEGATIVE_BIN" "$NEGATIVE_SRC" -lm
+"$NEGATIVE_BIN"
+rm -f "$NEGATIVE_BIN"
+
 echo "==> Done. Output in: $OUTPUT_DIR"
