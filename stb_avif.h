@@ -85,38 +85,26 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
  * Traces are emitted at every checklist-relevant stage: container brands,
  * primary item, iloc, av1C, OBU stream, sequence header, frame header,
  * tile group, plane dimensions, and RGBA output geometry.
+ *
+ * Implemented as a variadic function (legal in C89) rather than a variadic
+ * macro (C99) so this header compiles cleanly under -std=c89 -pedantic-errors.
  * ------------------------------------------------------------------------- */
-#ifdef _MSC_VER
-#include <stdarg.h>
-void stb_avif_dbgprint(const char *format, ...) {
-#  ifdef STBI_AVIF_DEBUG_TRACE
-    char myfmt[1024];
-    char *p = myfmt;
-    va_list pl;
-    strcpy(myfmt, "[stb_avif] ");
-    strcat(myfmt, format);
-    strcat(myfmt, "\n");
-    while(*p) {
-        if(*p == '%' && *(p+1) == 'z') {
-            strcpy(p+1,p+2); // remove 'z' from format code
-        }
-        ++p;
-    }
-    va_start(pl, format);
-    vfprintf(stderr, myfmt, pl);
-    va_end(pl);
-#  endif
-}
-#define STBI_AVIF_TRACE stb_avif_dbgprint
-#endif
-
 #ifndef STBI_AVIF_TRACE
-#  ifdef STBI_AVIF_DEBUG_TRACE
-#    define STBI_AVIF_TRACE(...) \
-         do { fprintf(stderr, "[stb_avif] " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#  else
-#    define STBI_AVIF_TRACE(...) ((void)0)
-#  endif
+#include <stdarg.h>
+static void stbi_avif__trace(const char *fmt, ...)
+{
+#ifdef STBI_AVIF_DEBUG_TRACE
+    va_list ap;
+    fputs("[stb_avif] ", stderr);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+#else
+    (void)fmt;
+#endif
+}
+#define STBI_AVIF_TRACE stbi_avif__trace
 #endif
 
 /*
@@ -138,14 +126,35 @@ void stb_avif_dbgprint(const char *format, ...) {
 #define STBI_AVIF_CHANNELS 4
 #define STBI_AVIF_MAX_ASSOCIATIONS 32
 
-#ifdef _MSC_VER
-#define STBI_AVIF_LONGLONG __int64
+/* 64-bit integer types.  C89 has no native 64-bit int, so we typedef one
+ * via the host compiler's extension.  The typedef approach (rather than a
+ * `long long` macro) lets us use `__extension__` to silence -Wlong-long
+ * warnings under -std=c89 -pedantic-errors on GCC/clang. */
+#if defined(_MSC_VER)
+typedef __int64           stbi_avif__i64;
+typedef unsigned __int64  stbi_avif__u64;
 #define STBI_AVIF_PRI64 "I64d"
 #define STBI_AVIF_PRIu64 "I64u"
 #define STBI_AVIF_LL(x) x ## i64
 #define STBI_AVIF_ULL(x) x ## ui64
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#include <stdint.h>
+typedef int64_t           stbi_avif__i64;
+typedef uint64_t          stbi_avif__u64;
+#define STBI_AVIF_PRI64 "lld"
+#define STBI_AVIF_PRIu64 "llu"
+#define STBI_AVIF_LL(x) x ## LL
+#define STBI_AVIF_ULL(x) x ## ULL
+#elif defined(__GNUC__) || defined(__clang__)
+__extension__ typedef long long          stbi_avif__i64;
+__extension__ typedef unsigned long long stbi_avif__u64;
+#define STBI_AVIF_PRI64 "lld"
+#define STBI_AVIF_PRIu64 "llu"
+#define STBI_AVIF_LL(x) __extension__ (x ## LL)
+#define STBI_AVIF_ULL(x) __extension__ (x ## ULL)
 #else
-#define STBI_AVIF_LONGLONG long long
+typedef long long          stbi_avif__i64;
+typedef unsigned long long stbi_avif__u64;
 #define STBI_AVIF_PRI64 "lld"
 #define STBI_AVIF_PRIu64 "llu"
 #define STBI_AVIF_LL(x) x ## LL
@@ -154,6 +163,14 @@ void stb_avif_dbgprint(const char *format, ...) {
 
 #define STBI_AVIF_FOURCC(a,b,c,d) \
    ((((unsigned long)(a)) << 24) | (((unsigned long)(b)) << 16) | (((unsigned long)(c)) << 8) | ((unsigned long)(d)))
+
+/* Mark a static helper as possibly unused so -Werror=unused-function passes
+ * under strict warnings.  Some helpers are kept as documentation/reference. */
+#if defined(__GNUC__) || defined(__clang__)
+#define STBI_AVIF_MAYBE_UNUSED __attribute__((unused))
+#else
+#define STBI_AVIF_MAYBE_UNUSED
+#endif
 
 typedef struct
 {
@@ -426,7 +443,7 @@ typedef struct
    const unsigned char *buf;       /* start of payload */
    const unsigned char *end;       /* end of payload */
    const unsigned char *bptr;      /* current read pointer */
-   unsigned STBI_AVIF_LONGLONG dif;    /* bit window (top 16 bits hold comparison value) */
+   stbi_avif__u64 dif;    /* bit window (top 16 bits hold comparison value) */
    unsigned int         rng;       /* current range  (always >= 0x8000 after renorm) */
    int                  cnt;       /* number of unconsumed bits buffered */
    int                  initialized;
@@ -651,7 +668,7 @@ static int stbi_avif__bit_read_bits(stbi_avif__bit_reader *reader, unsigned int 
    return 1;
 }
 
-static int stbi_avif__bit_skip(stbi_avif__bit_reader *reader, unsigned int bit_count)
+static int STBI_AVIF_MAYBE_UNUSED stbi_avif__bit_skip(stbi_avif__bit_reader *reader, unsigned int bit_count)
 {
    if (!stbi_avif__bit_reader_bits_left(reader, (size_t)bit_count))
       return stbi_avif__fail("truncated AV1 bitstream");
@@ -2404,7 +2421,7 @@ static int stbi_avif__parse_av1_tile_group_header(const unsigned char *data, siz
 static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
 {
    int c;
-   unsigned STBI_AVIF_LONGLONG dif;
+   stbi_avif__u64 dif;
    const unsigned char *bptr;
    const unsigned char *end;
 
@@ -2416,7 +2433,7 @@ static void stbi_avif__av1_rd_refill(stbi_avif__av1_range_decoder *rd)
    end   = rd->end;
    c = 40 - rd->cnt;  /* = EC_WIN_SIZE - cnt - 24, first free bit position */
    while (c >= 0 && bptr < end) {
-      dif ^= (unsigned STBI_AVIF_LONGLONG)bptr[0] << c;
+      dif ^= (stbi_avif__u64)bptr[0] << c;
       bptr++;
       c -= 8;
    }
@@ -2448,7 +2465,7 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
    /* dav1d MSAC init: dif = (1 << (EC_WIN_SIZE - 1)) - 1 = (1<<63)-1.
     * Together with XOR-refill and ((dif+1)<<d)-1 in normalize, this
     * preserves the convention that unfilled low bits of dif read as 1. */
-   decoder->dif  = ((unsigned STBI_AVIF_LONGLONG)1 << 63) - (unsigned STBI_AVIF_LONGLONG)1;
+   decoder->dif  = ((stbi_avif__u64)1 << 63) - (stbi_avif__u64)1;
    decoder->rng  = 0x8000u;
    decoder->cnt  = -15;
    decoder->initialized = 1;
@@ -2466,7 +2483,7 @@ static int stbi_avif__av1_range_decoder_init(stbi_avif__av1_range_decoder *decod
  * Matches AOM od_ec_dec_normalize. Returns ret (the decoded symbol).
  */
 static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd,
-                                                 unsigned STBI_AVIF_LONGLONG dif, unsigned int rng,
+                                                 stbi_avif__u64 dif, unsigned int rng,
                                                  unsigned int ret)
 {
    int d;
@@ -2494,15 +2511,15 @@ static unsigned int stbi_avif__av1_rd_normalize(stbi_avif__av1_range_decoder *rd
     * loses this and silently corrupts later symbol decisions, which manifests
     * as the range-decoder cnt dropping well below the normal -8..0 working
     * range (renorm-loop misbehavior). */
-   rd->dif  = ((dif + (unsigned STBI_AVIF_LONGLONG)1) << d) - (unsigned STBI_AVIF_LONGLONG)1;
+   rd->dif  = ((dif + (stbi_avif__u64)1) << d) - (stbi_avif__u64)1;
    rd->rng  = rng << d;
    if (rd->cnt < 0) stbi_avif__av1_rd_refill(rd);
    return ret;
 }
 
 /* a workaround for old VC not emitting proper unsigned __int64 */
-static unsigned STBI_AVIF_LONGLONG stbi_avif__ret_ull(unsigned STBI_AVIF_LONGLONG a) {
-    unsigned STBI_AVIF_LONGLONG b = a;
+static stbi_avif__u64 stbi_avif__ret_ull(stbi_avif__u64 a) {
+    stbi_avif__u64 b = a;
     return b;
 }
 
@@ -2523,7 +2540,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
                                                 const unsigned short *cdf, int nsyms)
 {
    unsigned int r, c, u, v, ret;
-   unsigned STBI_AVIF_LONGLONG dif;
+   stbi_avif__u64 dif;
    int sym;
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    int trace_this_symbol = 0;
@@ -2538,7 +2555,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    { unsigned int _c_pre = c; int _i; (void)_c_pre;
      fprintf(stderr, "PRE c_pre=%u rng=%u dif_full=%" STBI_AVIF_PRIu64 " cnt=%d bytes_left=%ld nsyms=%d cdf=[",
-       _c_pre, r, (unsigned STBI_AVIF_LONGLONG)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
+       _c_pre, r, (stbi_avif__u64)dif, rd->cnt, (long)(rd->end - rd->bptr), nsyms);
      for (_i = 0; _i < nsyms; ++_i) fprintf(stderr, "%u,", (unsigned)cdf[_i]);
      fprintf(stderr, "]\n"); }
 #endif
@@ -2560,7 +2577,7 @@ static unsigned int stbi_avif__av1_read_symbol(stbi_avif__av1_range_decoder *rd,
    } while (c < v);
 
    r   = u - v;
-   dif -= stbi_avif__ret_ull((unsigned STBI_AVIF_LONGLONG)v << 48);
+   dif -= stbi_avif__ret_ull((stbi_avif__u64)v << 48);
    ret = stbi_avif__av1_rd_normalize(rd, dif, r, (unsigned int)sym);
 #ifdef STBI_AVIF_TRACE_SYMBOLS
 
@@ -2637,6 +2654,9 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_
                                                        unsigned short *cdf, int nsyms, int line)
 {
    unsigned int sym;
+#ifndef STBI_AVIF_TRACE_SYMBOLS
+   (void)line;
+#endif
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    int trace_this_callsite = stbi_avif__trace_symbols_should_log(rd, line);
    rd->trace_symbols_active_line = trace_this_callsite ? line : 0;
@@ -2659,7 +2679,7 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_
  * Read a symbol using a MUTABLE CDF that is updated after each decode.
  * This is the adaptive version used for all main syntax elements.
  */
-static unsigned int stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_decoder *rd,
+static unsigned int STBI_AVIF_MAYBE_UNUSED stbi_avif__av1_read_symbol_adapt_impl(stbi_avif__av1_range_decoder *rd,
                                                        unsigned short *cdf, int nsyms)
 {
    unsigned int sym = stbi_avif__av1_read_symbol(rd, cdf, nsyms);
@@ -7571,7 +7591,7 @@ static const signed char stbi_avif__av1_nz_map_ctx_off_16x16[256] = {
 };
 
 /* For 32x32: compute ctx_offset on the fly (mostly 21) */
-static int stbi_avif__av1_nz_map_ctx_off_32(int idx)
+static int STBI_AVIF_MAYBE_UNUSED stbi_avif__av1_nz_map_ctx_off_32(int idx)
 {
    int row = idx & 31, col = idx >> 5;
    if (idx == 0) return 0;
@@ -8115,6 +8135,7 @@ typedef struct
    int                           ac_qstep_v;
    unsigned char                *above_modes;
    unsigned char                *left_modes;
+   void                         *dbg_blocks_fp;   /* lazy-opened debug FILE*, sentinel (void*)1 = uninit */
    unsigned char                *above_partition_ctx;
    unsigned char                 left_partition_ctx[32]; /* max 128px/4 = 32 mi */
    unsigned char                *above_skip;       /* per mi-col skip context */
@@ -8208,7 +8229,7 @@ typedef struct
  * =============================================================================
  */
 
-static void stbi_avif__av1_fill_block(unsigned short *p,
+static void STBI_AVIF_MAYBE_UNUSED stbi_avif__av1_fill_block(unsigned short *p,
                                        unsigned int pw,
                                        unsigned int bx, unsigned int by,
                                        unsigned int bw, unsigned int bh,
@@ -8502,14 +8523,12 @@ static void stbi_avif__av1_predict_block_ex(unsigned short *p,
    unsigned int x;
    unsigned int y;
    int base;
-   int amp;
    int dc;
    int angle, dx, dy;
    int have_top = (by > 0u) ? 1 : 0;
    int have_left = (bx > 0u) ? 1 : 0;
 
    base = (int)(1u << (bit_depth - 1u));
-   amp = (bit_depth > 8u) ? (8 << (bit_depth - 8u)) : 8;
 
    /* AV1 spec: extended reference array is 2*max(bw,bh) samples per side. */
    ref_count = 2u * (bw > bh ? bw : bh);
@@ -8883,7 +8902,7 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
    unsigned int x, y;
    unsigned int subsample_x_factor = 1u << (unsigned int)planes->subx;
    unsigned int subsample_y_factor = 1u << (unsigned int)planes->suby;
-   unsigned STBI_AVIF_LONGLONG y_sum = 0u;
+   stbi_avif__u64 y_sum = 0u;
    unsigned int y_count = 0u;
    int y_avg;
 
@@ -8901,7 +8920,7 @@ static void stbi_avif__av1_apply_cfl_plane(stbi_avif__av1_planes *planes,
    }
    if (y_count == 0u)
       return;
-   y_avg = (int)(y_sum / (unsigned STBI_AVIF_LONGLONG)y_count);
+   y_avg = (int)(y_sum / (stbi_avif__u64)y_count);
 
    for (y = 0u; y < cph && cpy + y < planes->ch; ++y)
    {
@@ -10417,7 +10436,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    STBI_AVIF_FREE(temp);
 }
 
-static void stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type, int bit_depth)
+static void STBI_AVIF_MAYBE_UNUSED stbi_avif__av1_inverse_transform_2d(int *coeffs, int sz, int tx_type, int bit_depth)
 {
    stbi_avif__av1_inverse_transform_2d_rect(coeffs, sz, sz, tx_type, bit_depth);
 }
@@ -10933,6 +10952,26 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
              && (bw4 > (unsigned int)ctx->planes->subx || (mi_col & 1u))
              && (bh4 > (unsigned int)ctx->planes->suby || (mi_row & 1u));
 
+   /* Optional per-block diagnostic: STBI_AVIF_DBG_BLOCKS=<path> dumps
+    * (mi_row, mi_col, bsize, range-decoder state) at start of every
+    * coding unit, and the y_mode/uv_mode/skip later in the function. */
+   {
+      if (ctx->dbg_blocks_fp == (void *)1) {
+         /* uninitialized sentinel: open or disable on first call */
+         const char *p = getenv("STBI_AVIF_DBG_BLOCKS");
+         ctx->dbg_blocks_fp = (p && p[0]) ? fopen(p, "w") : NULL;
+      }
+      if (ctx->dbg_blocks_fp) {
+         FILE *fp = (FILE *)ctx->dbg_blocks_fp;
+         long bytes_left = (long)(ctx->rd.end - ctx->rd.bptr);
+         fprintf(fp,
+            "BLK mi=(%u,%u) bs=%d bw4=%u bh4=%u rd_bytes_left=%ld rd_rng=%u rd_dif_hi=%u rd_cnt=%d\n",
+            mi_row, mi_col, block_size, bw4, bh4,
+            bytes_left, ctx->rd.rng,
+            (unsigned int)(ctx->rd.dif >> 48), ctx->rd.cnt);
+      }
+   }
+
    /* ======== MODE INFO ======== */
 
    /* Segmentation: read segment_id if seg_id_pre_skip, before skip flag.
@@ -10956,6 +10995,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       unsigned int skip_ctx = skip_ctx_above + skip_ctx_left;
       skip = (int)stbi_avif__av1_read_symbol_adapt(&ctx->rd, ctx->skip_cdf[skip_ctx], 2);
    }
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+      fprintf((FILE *)ctx->dbg_blocks_fp, "Post-skip[%d]: r=%u\n", skip, ctx->rd.rng);
 
    /* Per-SB delta_q / delta_lf decoding (AV1 spec §5.11.5 / dav1d decode.c:962).
     * Gate: we are at the top-left corner of a superblock (mi_row & mi_col both
@@ -11104,6 +11145,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    y_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->kf_y_mode_cdf[above_ctx][left_ctx], 13);
 
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+      fprintf((FILE *)ctx->dbg_blocks_fp, "Post-ymode[%u]: r=%u\n", y_mode, ctx->rd.rng);
 
    /* Update mode map and skip context */
    {
@@ -11136,6 +11179,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       else
          uv_mode = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
             ctx->uv_mode_cdf_no_cfl[y_mode < 13 ? y_mode : 0], 13);
+
+      if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+         fprintf((FILE *)ctx->dbg_blocks_fp, "Post-uvmode[%u]: r=%u\n", uv_mode, ctx->rd.rng);
 
       /* UV angle delta */
       if (uv_mode >= 1u && uv_mode <= 8u && block_size >= STBI_AVIF_BLOCK_8X8)
@@ -11434,7 +11480,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
     */
    tx_split[0] = 0u; tx_split[1] = 0u;
    {
-      unsigned int bsi = block_size < 22u ? block_size : 0u;
+      unsigned int bsi = ((unsigned int)block_size < 22u) ? (unsigned int)block_size : 0u;
       unsigned int mxw = stbi_avif__bsize_max_txw[bsi];
       unsigned int mxh = stbi_avif__bsize_max_txh[bsi];
       unsigned int max_dim = mxw > mxh ? mxw : mxh;  /* max(lw,lh) = t_dim->max */
@@ -11478,6 +11524,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          } else {
             depth = 0;
          }
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+            fprintf((FILE *)ctx->dbg_blocks_fp, "Post-tx[%d]: r=%u\n", depth, ctx->rd.rng);
          /* Apply depth reductions: square TX halves both dims, rect TX halves the larger */
          cur_lw = mxw; cur_lh = mxh;
          while (depth-- > 0) {
@@ -11536,7 +11584,10 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       uv_tx_szw = 4u << uv_log2w;
       uv_tx_szh = 4u << uv_log2h;
       uv_tx_sz = uv_tx_szw < uv_tx_szh ? uv_tx_szw : uv_tx_szh; /* keep for any square-only uses */
+      (void)uv_tx_size;
+      (void)uv_tx_sz;
    }
+   (void)tx_size;
 
    /* ======== PREDICTION ======== */
 
@@ -11628,7 +11679,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       /* tx_ctx = max(log2w, log2h), used for skip/coeff_base/coeff_br CDFs */
       int tx_ctx = (int)(tx_log2w > tx_log2h ? tx_log2w : tx_log2h);
       unsigned int sb_mi_val = ctx->use_128 ? 32u : 16u;
-      static const signed char dc_signs[3] = { 0, -1, 1 };
+      static const signed char dc_signs[3] = { 0, 1, -1 };
       static const signed char dc_sign_contexts[65] = {
          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -11746,6 +11797,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   ctx->planes->bit_depth, y_mode, y_angle_delta,
                   have_tr, have_bl);
             }
+            {
+            int dbg_y_eob = -1;
+            int dbg_y_txtp = 0;
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
             if (!txb_skip) {
@@ -11802,6 +11856,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   (int)(tx_w <= 32u ? tx_w : 32u), (int)(tx_h <= 32u ? tx_h : 32u),
                   coeffs, seg_dc_qstep_y, seg_ac_qstep_y,
                   dc_sign_ctx_y, &cul_level);
+               dbg_y_eob = eob;
+               dbg_y_txtp = tx_type_actual;
                /* Update entropy context with cul_level */
                for (ti = 0; ti < tx_w_mi && mi_tx_col + ti < ctx->mi_cols; ti++)
                   ctx->above_entropy[0][mi_tx_col + ti] = (unsigned char)cul_level;
@@ -11820,6 +11876,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   ctx->above_entropy[0][mi_tx_col + ti] = 0;
                for (ti = 0; ti < tx_h_mi && (mi_tx_row % sb_mi_val) + ti < sb_mi_val; ti++)
                   ctx->left_entropy[0][(mi_tx_row % sb_mi_val) + ti] = 0;
+            }
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "Post-y-cf-blk[txtp=%d,eob=%d]: r=%u\n", dbg_y_txtp, dbg_y_eob, ctx->rd.rng);
             }
          }
       }
@@ -11892,6 +11951,9 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                      coeffs, dc_qstep_plane, ac_qstep_plane,
                      txb_skip_ctx_uv, dc_sign_ctx_uv, &cul_level_uv);
 
+                  if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+                     fprintf((FILE *)ctx->dbg_blocks_fp, "Post-uv-cf-blk[pl=%d]: r=%u\n", p - 1, ctx->rd.rng);
+
                   /* Update entropy context with cul_level */
                   for (ti = 0; ti < uv_w_mi && mi_tx_col_uv + ti < (ctx->mi_cols >> (unsigned)ctx->planes->subx); ti++)
                      ctx->above_entropy[p][mi_tx_col_uv + ti] = (unsigned char)cul_level_uv;
@@ -11913,6 +11975,15 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
    }
 
    } /* end fi_flag/fi_mode scope */
+
+   /* End-of-block diagnostic (paired with BLK trace). */
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1) {
+      FILE *fp = (FILE *)ctx->dbg_blocks_fp;
+      fprintf(fp,
+         "END mi=(%u,%u) bs=%d skip=%d y_mode=%u uv_mode=%u tx_log2w=%u tx_log2h=%u\n",
+         mi_row, mi_col, block_size, skip, y_mode, uv_mode,
+         tx_log2w, tx_log2h);
+   }
 
    return 1;
 }
@@ -12866,7 +12937,7 @@ static void stbi_avif__deblock_apply_edge(
 /* Legacy 4-tap helper kept for external use; wraps stbi_avif__deblock_apply_edge.
  * p2/p3 are set to p1 and q2/q3 are set to q1 so the flat condition is never
  * triggered (preventing the wide path from activating). */
-static void stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
+static void STBI_AVIF_MAYBE_UNUSED stbi_avif__deblock_filter4(int p1, int p0, int q0, int q1,
                                         int level, int bd,
                                         int *out_p0, int *out_q0)
 {
@@ -14115,8 +14186,8 @@ static void stbi_avif__superres_upscale_plane(
    {
       /* Per AV1 spec: x0_qn = extra_offset - ((dst_w - 1) * step - ((src_w - 1) << 14)) / 2 */
       /* where extra_offset = src_w << 14 >> 1 ... simplified: */
-      STBI_AVIF_LONGLONG total_step = (STBI_AVIF_LONGLONG)(dst_w - 1u) * (STBI_AVIF_LONGLONG)step;
-      STBI_AVIF_LONGLONG total_src  = (STBI_AVIF_LONGLONG)(src_w - 1u) << 14;
+      stbi_avif__i64 total_step = (stbi_avif__i64)(dst_w - 1u) * (stbi_avif__i64)step;
+      stbi_avif__i64 total_src  = (stbi_avif__i64)(src_w - 1u) << 14;
       initial_subpel = (int)((total_src - total_step) / 2);
    }
 
@@ -14290,6 +14361,7 @@ static unsigned char *stbi_avif__av1_decode(
    unsigned int qidx_y_dc, qidx_y_ac, qidx_u_dc, qidx_u_ac, qidx_v_dc, qidx_v_ac;
 
    memset(&ctx, 0, sizeof(ctx));
+   ctx.dbg_blocks_fp = (void *)1; /* sentinel: uninitialized; lazy-opened from STBI_AVIF_DBG_BLOCKS env */
    /* Intra block copy (AV1 §6.8.2) requires per-block use_intrabc flag,
     * motion vector decoding, and self-reference prediction — not supported. */
    if (fhdr->allow_intrabc)
@@ -14600,6 +14672,7 @@ static unsigned short *stbi_avif__av1_decode_alpha_plane(
    size_t plane_size;
 
    memset(&ctx, 0, sizeof(ctx));
+   ctx.dbg_blocks_fp = (void *)1; /* sentinel: lazy-opened from STBI_AVIF_DBG_BLOCKS env */
    /* Intra block copy not supported (see main decoder). */
    if (fhdr->allow_intrabc) {
       stbi_avif__fail("AV1 allow_intrabc is not supported");

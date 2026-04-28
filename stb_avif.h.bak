@@ -85,38 +85,26 @@ unsigned char *stbi_avif_write_png_to_memory(const unsigned char *pixels, int wi
  * Traces are emitted at every checklist-relevant stage: container brands,
  * primary item, iloc, av1C, OBU stream, sequence header, frame header,
  * tile group, plane dimensions, and RGBA output geometry.
+ *
+ * Implemented as a variadic function (legal in C89) rather than a variadic
+ * macro (C99) so this header compiles cleanly under -std=c89 -pedantic-errors.
  * ------------------------------------------------------------------------- */
-#ifdef _MSC_VER
-#include <stdarg.h>
-void stb_avif_dbgprint(const char *format, ...) {
-#  ifdef STBI_AVIF_DEBUG_TRACE
-    char myfmt[1024];
-    char *p = myfmt;
-    va_list pl;
-    strcpy(myfmt, "[stb_avif] ");
-    strcat(myfmt, format);
-    strcat(myfmt, "\n");
-    while(*p) {
-        if(*p == '%' && *(p+1) == 'z') {
-            strcpy(p+1,p+2); // remove 'z' from format code
-        }
-        ++p;
-    }
-    va_start(pl, format);
-    vfprintf(stderr, myfmt, pl);
-    va_end(pl);
-#  endif
-}
-#define STBI_AVIF_TRACE stb_avif_dbgprint
-#endif
-
 #ifndef STBI_AVIF_TRACE
-#  ifdef STBI_AVIF_DEBUG_TRACE
-#    define STBI_AVIF_TRACE(...) \
-         do { fprintf(stderr, "[stb_avif] " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#  else
-#    define STBI_AVIF_TRACE(...) ((void)0)
-#  endif
+#include <stdarg.h>
+static void stbi_avif__trace(const char *fmt, ...)
+{
+#ifdef STBI_AVIF_DEBUG_TRACE
+    va_list ap;
+    fputs("[stb_avif] ", stderr);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+#else
+    (void)fmt;
+#endif
+}
+#define STBI_AVIF_TRACE stbi_avif__trace
 #endif
 
 /*
@@ -138,14 +126,35 @@ void stb_avif_dbgprint(const char *format, ...) {
 #define STBI_AVIF_CHANNELS 4
 #define STBI_AVIF_MAX_ASSOCIATIONS 32
 
-#ifdef _MSC_VER
-#define STBI_AVIF_LONGLONG __int64
+/* 64-bit integer types.  C89 has no native 64-bit int, so we typedef one
+ * via the host compiler's extension.  The typedef approach (rather than a
+ * `long long` macro) lets us use `__extension__` to silence -Wlong-long
+ * warnings under -std=c89 -pedantic-errors on GCC/clang. */
+#if defined(_MSC_VER)
+typedef __int64           stbi_avif__i64;
+typedef unsigned __int64  stbi_avif__u64;
 #define STBI_AVIF_PRI64 "I64d"
 #define STBI_AVIF_PRIu64 "I64u"
 #define STBI_AVIF_LL(x) x ## i64
 #define STBI_AVIF_ULL(x) x ## ui64
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#include <stdint.h>
+typedef int64_t           stbi_avif__i64;
+typedef uint64_t          stbi_avif__u64;
+#define STBI_AVIF_PRI64 "lld"
+#define STBI_AVIF_PRIu64 "llu"
+#define STBI_AVIF_LL(x) x ## LL
+#define STBI_AVIF_ULL(x) x ## ULL
+#elif defined(__GNUC__) || defined(__clang__)
+__extension__ typedef long long          stbi_avif__i64;
+__extension__ typedef unsigned long long stbi_avif__u64;
+#define STBI_AVIF_PRI64 "lld"
+#define STBI_AVIF_PRIu64 "llu"
+#define STBI_AVIF_LL(x) __extension__ (x ## LL)
+#define STBI_AVIF_ULL(x) __extension__ (x ## ULL)
 #else
-#define STBI_AVIF_LONGLONG long long
+typedef long long          stbi_avif__i64;
+typedef unsigned long long stbi_avif__u64;
 #define STBI_AVIF_PRI64 "lld"
 #define STBI_AVIF_PRIu64 "llu"
 #define STBI_AVIF_LL(x) x ## LL
@@ -11725,13 +11734,26 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
             } else if (palette_y_size == 0) {
                /* Per-TX regular intra prediction. Required so the 2nd+ TX in a
                 * multi-TX intra block reads the locally-reconstructed pixels of
-                * the previous TX as its left/top neighbor (matches dav1d). */
+                * the previous TX as its left/top neighbor (matches dav1d).
+                *
+                * Edge flags within block (assuming block-level sb_has_tr=sb_has_bl=0,
+                * matching dav1d's conservative default):
+                *  have_top_right = (tx_col + tx_w < pw): another TX exists to our
+                *    right inside this block. When tx_row==0 the above-right pixels
+                *    are in an already-decoded neighbor block above; when tx_row>0
+                *    they're in TXs of this block decoded earlier in raster order.
+                *  have_bottom_left = (tx_col == 0 && tx_row + tx_h < ph): a TX below
+                *    us in the leftmost column exists, and its left column comes from
+                *    the already-decoded neighbor block to the block's left. */
                unsigned int eff_w = (tx_col + tx_w <= pw) ? tx_w : (pw - tx_col);
                unsigned int eff_h = (tx_row + tx_h <= ph) ? tx_h : (ph - tx_row);
-               stbi_avif__av1_predict_block(ctx->planes->y, ctx->planes->width,
+               int have_tr = (tx_col + tx_w < pw) ? 1 : 0;
+               int have_bl = (tx_col == 0u && tx_row + tx_h < ph) ? 1 : 0;
+               stbi_avif__av1_predict_block_ex(ctx->planes->y, ctx->planes->width,
                   ctx->planes->width, ctx->planes->height,
                   px + tx_col, py + tx_row, eff_w, eff_h,
-                  ctx->planes->bit_depth, y_mode, y_angle_delta);
+                  ctx->planes->bit_depth, y_mode, y_angle_delta,
+                  have_tr, have_bl);
             }
             txb_skip = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                ctx->txb_skip_cdf[ts_skip][txb_skip_ctx], 2);
