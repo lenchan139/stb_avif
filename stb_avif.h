@@ -7685,22 +7685,15 @@ static int stbi_avif__av1_get_lower_levels_ctx_1d(const unsigned char *levels,
    int col = coeff_idx >> bhl;
    int row = coeff_idx - (col << bhl);
    int padded_pos = col * stride + row;
-   int y = row < 2 ? row : 2;
-   int offset = 26 + y * 5;
-   int a = (int)levels[padded_pos + 1];
-   int bn = (int)levels[padded_pos + stride];
-   int c = (int)levels[padded_pos + 2];
-   int d = (int)levels[padded_pos + 3];
-   int e = (int)levels[padded_pos + 4];
+   int offset = 26 + (row > 1 ? 10 : row * 5);
+   int a = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 1]);
+   int bn = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + stride]);
+   int c = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 2]);
+   int d = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 3]);
+   int e = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 4]);
    int mag, ctx;
-   if (a > 3) a = 3;
-   if (bn > 3) bn = 3;
-   if (c > 3) c = 3;
-   if (d > 3) d = 3;
-   if (e > 3) e = 3;
    mag = a + bn + c + d + e;
-   ctx = (mag + 1) >> 1;
-   if (ctx > 4) ctx = 4;
+   ctx = (mag > 512) ? 4 : ((mag + 64) >> 7);
    return ctx + offset;
 }
 
@@ -7741,16 +7734,13 @@ static int stbi_avif__av1_get_br_ctx_1d(const unsigned char *levels,
    int col = coeff_idx >> bhl;
    int row = coeff_idx - (col << bhl);
    int padded_pos = col * stride + row;
-   int a = (int)levels[padded_pos + 1];
-   int b = (int)levels[padded_pos + stride];
-   int c = (int)levels[padded_pos + 2];
+   int a = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 1]);
+   int b = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + stride]);
+   int c = stbi_avif__av1_level_to_mag_byte((int)levels[padded_pos + 2]);
    int mag, y;
-   if (a > 15) a = 15;
-   if (b > 15) b = 15;
-   if (c > 15) c = 15;
    mag = a + b + c;
-   mag = (mag + 1) >> 1;
-   if (mag > 6) mag = 6;
+   mag &= 63;
+   mag = (mag > 12) ? 6 : ((mag + 1) >> 1);
    y = row;
    return mag + (y > 0 ? 14 : 7);
 }
