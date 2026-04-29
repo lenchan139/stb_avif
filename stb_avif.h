@@ -7769,6 +7769,19 @@ static int stbi_avif__av1_get_br_ctx_dc(const unsigned char *levels, int bhl)
    return mag;
 }
 
+/* AV1 tx context mapping for skip/coeff CDFs.
+ * Matches dav1d TxfmInfo.ctx semantics, not plain max(log2w,log2h).
+ * For 1:4 ratio rectangles (diff > 1), ctx is one less than max_log2:
+ * 4x16/16x4 -> 1, 8x32/32x8 -> 2, 16x64/64x16 -> 3. */
+static int stbi_avif__av1_get_tx_ctx_from_log2(unsigned int tx_log2w, unsigned int tx_log2h)
+{
+   unsigned int max_log2 = tx_log2w > tx_log2h ? tx_log2w : tx_log2h;
+   unsigned int min_log2 = tx_log2w < tx_log2h ? tx_log2w : tx_log2h;
+   int ctx = (int)max_log2;
+   if (max_log2 > min_log2 + 1u && ctx > 0)
+      ctx--;
+   return ctx;
+}
 /* Skip flag CDF [3 ctx][3] */
 /* AOM default_skip_cdfs[3], AOM_CDF2 values */
 static unsigned short stbi_avif__av1_skip_cdf[3][3] = {
@@ -11174,6 +11187,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
          unsigned int cdef_val;
          cdef_val = stbi_avif__av1_read_literal(&ctx->rd, (unsigned int)ctx->cdef_bits);
          ctx->cdef_transmitted[cdef_index] = 1;
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1)
+            fprintf((FILE *)ctx->dbg_blocks_fp, "Post-cdef_idx[%u]: r=%u\n", cdef_val, ctx->rd.rng);
          /* Store CDEF index in the grid */
          if (ctx->cdef_idx != NULL) {
             unsigned int cdef_grid_r = mi_row / 16u;
@@ -11719,8 +11734,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
       /* tx2dszctx = min(txw_log2,3) + min(txh_log2,3) for eob_bin CDF selection */
       int tx2dszctx = (int)(tx_log2w < 3u ? tx_log2w : 3u)
                     + (int)(tx_log2h < 3u ? tx_log2h : 3u);
-      /* tx_ctx = max(log2w, log2h), used for skip/coeff_base/coeff_br CDFs */
-      int tx_ctx = (int)(tx_log2w > tx_log2h ? tx_log2w : tx_log2h);
+      /* tx_ctx uses dav1d TxfmInfo.ctx mapping (1:4 rects are one ctx lower). */
+      int tx_ctx = stbi_avif__av1_get_tx_ctx_from_log2(tx_log2w, tx_log2h);
       unsigned int sb_mi_val = ctx->use_128 ? 32u : 16u;
       static const signed char dc_signs[3] = { 0, -1, 1 };
       static const signed char dc_sign_contexts[65] = {
@@ -11987,8 +12002,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                   int uv_log2w_tx = (uv_tx_szw==32?3:uv_tx_szw==16?2:uv_tx_szw==8?1:0);
                   int uv_log2h_tx = (uv_tx_szh==32?3:uv_tx_szh==16?2:uv_tx_szh==8?1:0);
                   int uv_tx2dszctx = (uv_log2w_tx<3?uv_log2w_tx:3) + (uv_log2h_tx<3?uv_log2h_tx:3);
-                  int uv_tx_ctx = uv_log2w_tx > uv_log2h_tx ? uv_log2w_tx : uv_log2h_tx;
-                  int uv_ts = uv_tx_ctx; /* max(log2w,log2h) for txb_skip CDF index */
+                  int uv_tx_ctx = stbi_avif__av1_get_tx_ctx_from_log2((unsigned int)uv_log2w_tx, (unsigned int)uv_log2h_tx);
+                  int uv_ts = uv_tx_ctx;
                   eob = stbi_avif__av1_read_coeffs(ctx, p, uv_ts, 0,
                      uv_tx2dszctx,
                      uv_tx_ctx,
@@ -12063,6 +12078,35 @@ static void stbi_avif__update_partition_ctx(stbi_avif__av1_decode_ctx *ctx,
       ctx->above_partition_ctx[mi_col + i] = above_val;
    for (i = 0; i < bh && (mi_row % sb_mi) + i < sb_mi; i++)
       ctx->left_partition_ctx[(mi_row % sb_mi) + i] = left_val;
+}
+
+/* Experimental conformance gate for PARTITION_HORZ_4 / PARTITION_VERT_4.
+ * Default keeps legacy behavior for stability. Set env var
+ * STBI_AVIF_PART4_SPEC=1 to use spec-correct 1:4 sub-sizes.
+ * C89 note: keep this getenv-based and stateless to avoid thread-safety
+ * concerns from mutable global caches in a single-header library. */
+static int stbi_avif__av1_part4_spec_enabled(void)
+{
+   const char *p = getenv("STBI_AVIF_PART4_SPEC");
+   return (p && p[0] == '1');
+}
+
+static int stbi_avif__av1_horz4_subsize(int block_size, int fallback_subsize)
+{
+   if (!stbi_avif__av1_part4_spec_enabled()) return fallback_subsize;
+   if (block_size == STBI_AVIF_BLOCK_16X16) return 17; /* 16x4 */
+   if (block_size == STBI_AVIF_BLOCK_32X32) return 19; /* 32x8 */
+   if (block_size == STBI_AVIF_BLOCK_64X64) return 21; /* 64x16 */
+   return fallback_subsize;
+}
+
+static int stbi_avif__av1_vert4_subsize(int block_size, int fallback_subsize)
+{
+   if (!stbi_avif__av1_part4_spec_enabled()) return fallback_subsize;
+   if (block_size == STBI_AVIF_BLOCK_16X16) return 16; /* 4x16 */
+   if (block_size == STBI_AVIF_BLOCK_32X32) return 18; /* 8x32 */
+   if (block_size == STBI_AVIF_BLOCK_64X64) return 20; /* 16x64 */
+   return fallback_subsize;
 }
 
 static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
@@ -12223,33 +12267,28 @@ static int stbi_avif__av1_decode_partition(stbi_avif__av1_decode_ctx *ctx,
 
       case STBI_AVIF_PARTITION_HORZ_4:
          {
-            /* TODO: spec-correct sub block_size for HORZ_4 of 16x16/32x32/64x64
-             * is BLOCK_16X4(17) / BLOCK_32X8(19) / BLOCK_64X16(21).
-             * Using sub_size = block_size - 3 gives 8x8/16x16/32x32 instead.
-             * Switching to spec-correct values (verified) made overall MAE
-             * worse because downstream code paths (intra-pred / IDCT /
-             * coeff-context for non-square 1:4 ratio blocks) are not yet
-             * fully implemented. Keep the broken-but-survivable path until
-             * those pipelines are audited. See repo memory entry 2026-04-28
-             * "HORZ_4/VERT_4 sub-size bug". */
+            int sub4 = stbi_avif__av1_horz4_subsize(block_size, sub_size);
             unsigned int q4 = bh4 / 4u;
             unsigned int qi;
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1 && sub4 != sub_size)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "  PART4-spec HORZ_4 sub=%d (legacy=%d)\n", sub4, sub_size);
             for (qi = 0; qi < 4u; ++qi)
-               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row + qi * q4, mi_col, sub_size)) return 0;
+               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row + qi * q4, mi_col, sub4)) return 0;
+            stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, sub4, block_size);
          }
-         stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, sub_size, block_size);
          return 1;
 
       case STBI_AVIF_PARTITION_VERT_4:
          {
-            /* TODO: see HORZ_4 above. Spec sub size is BLOCK_4X16(16) /
-             * BLOCK_8X32(18) / BLOCK_16X64(20). */
+            int sub4 = stbi_avif__av1_vert4_subsize(block_size, sub_size);
             unsigned int q4 = bw4 / 4u;
             unsigned int qi;
+            if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1 && sub4 != sub_size)
+               fprintf((FILE *)ctx->dbg_blocks_fp, "  PART4-spec VERT_4 sub=%d (legacy=%d)\n", sub4, sub_size);
             for (qi = 0; qi < 4u; ++qi)
-               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row, mi_col + qi * q4, sub_size)) return 0;
+               if (!stbi_avif__av1_decode_coding_unit(ctx, mi_row, mi_col + qi * q4, sub4)) return 0;
+            stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, sub4, block_size);
          }
-         stbi_avif__update_partition_ctx(ctx, mi_row, mi_col, sub_size, block_size);
          return 1;
 
       default:
