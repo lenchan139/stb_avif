@@ -8486,21 +8486,17 @@ static const unsigned char stbi_avif__sm_weights[128] = {
       7,   6,   6,   5,   5,   4,   4,   4
 };
 
-/* AV1 directional intra prediction derivative table.
- * dr_intra_derivative[a] = round(64 / tan(a * PI / 180)) for a = 1..89.
- * Units: sub-pixel steps (in 1/64ths of a pixel) per row/column.
- * Index 0 is unused (angle=0 is undefined). */
-static const int stbi_avif__dr_intra_derivative[90] = {
-   0,
-    3667,  1833,  1221,   915,   732,   609,   521,   455,   404,   363,
-     329,   301,   277,   257,   239,   223,   209,   197,   186,   176,
-     167,   158,   151,   144,   137,   131,   126,   120,   115,   111,
-     107,   102,    99,    95,    91,    88,    85,    82,    79,    76,
-      74,    71,    69,    66,    64,    62,    60,    58,    56,    54,
-      52,    50,    48,    46,    45,    43,    42,    40,    38,    37,
-      35,    34,    33,    31,    30,    28,    27,    26,    25,    23,
-      22,    21,    20,    18,    17,    16,    15,    14,    12,    11,
-      10,     9,     8,     7,     6,     4,     3,     2,     1
+/* AV1 directional intra prediction derivative table per spec §7.11.2.
+ * dr_intra_derivative[i] for angle = i*2+1 (odd angles 1..87).
+ * Values are round(64 / tan(angle * PI / 180)).
+ * Index 0 corresponds to angle=1, index 43 to angle=87.
+ * Zero entries indicate angles that use upsampling instead. */
+static const int stbi_avif__dr_intra_derivative[44] = {
+      0, 1023,    0,  547,  372,    0,    0,  273,  215,    0,
+    178,  151,    0,  132,  116,    0,  102,    0,   90,   80,
+      0,   71,   64,    0,   57,   51,    0,   45,    0,   40,
+     35,    0,   31,   27,    0,   23,   19,    0,   15,    0,
+     11,    0,    7,    3
 };
 
 /* AV1 nominal angle for each intra mode (1-8). Index 0 unused. */
@@ -8629,12 +8625,12 @@ static void stbi_avif__av1_predict_block_ex(unsigned short *p,
    if (mode >= 1u && mode <= 8u) {
       angle = stbi_avif__mode_to_angle[mode] + angle_delta * 3;
       if (angle > 0 && angle < 90) {
-         dx = stbi_avif__dr_intra_derivative[angle];
+         dx = stbi_avif__dr_intra_derivative[angle >> 1];
       } else if (angle > 90 && angle < 180) {
-         dx = stbi_avif__dr_intra_derivative[180 - angle];
-         dy = stbi_avif__dr_intra_derivative[angle - 90];
+         dx = stbi_avif__dr_intra_derivative[(180 - angle) >> 1];
+         dy = stbi_avif__dr_intra_derivative[(angle - 90) >> 1];
       } else if (angle > 180 && angle < 270) {
-         dy = stbi_avif__dr_intra_derivative[270 - angle];
+         dy = stbi_avif__dr_intra_derivative[(270 - angle) >> 1];
       }
    }
 
@@ -10425,19 +10421,15 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    }
 
    /* row_shift (intermediate shift after row transforms) per AV1 spec.
-    * dav1d: inv_txfm_fn84/32/16 shift parameter. */
+    * dav1d: inv_txfm_fn84/32/16 shift parameter.
+    * Correct formula: lw=log2(txw), lh=log2(txh)
+    * row_shift = (lw>=4 && lh>=4 && lw==lh) ? 2 : (lw>=4 || lh>=4) ? 1 : 0
+    * This properly distinguishes 16x16 (shift=2) from 8x32 (shift=1) */
    {
-      int lw = 0, lh = 0, t = txw; while (t > 1) { ++lw; t >>= 1; }
+      int lw = 0, lh = 0, t = txw;
+      while (t > 1) { ++lw; t >>= 1; }
       t = txh; while (t > 1) { ++lh; t >>= 1; }
-      /* sum of log2(w)+log2(h): 4→0,5→0,6→1,7→1,8→2,9→1,10→2,11→1,12→2 */
-      switch (lw + lh) {
-         case 4: row_shift = 0; break;
-         case 5: row_shift = 0; break;
-         case 6: row_shift = 1; break;
-         case 7: row_shift = 1; break;
-         case 9: row_shift = 1; break;
-         default: row_shift = 2; break;
-      }
+      row_shift = (lw >= 4 && lh >= 4 && lw == lh) ? 2 : ((lw >= 4 || lh >= 4) ? 1 : 0);
    }
 
    {
@@ -10459,13 +10451,29 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
             for (j = 0; j < txw; ++j) temp[i * txw + j] = out[j];
          }
       }
+      /* Post-row-transform clipping: prevents 10-bit overflow in column stage */
+      for (i = 0; i < txh; ++i) {
+         for (j = 0; j < txw; ++j) {
+            int v = temp[i * txw + j];
+            if (v > stbi_avif__inv_clip_max) v = stbi_avif__inv_clip_max;
+            if (v < stbi_avif__inv_clip_min) v = stbi_avif__inv_clip_min;
+            temp[i * txw + j] = v;
+         }
+      }
    }
 
    /* Column transforms: for each column j (0..txw-1), apply txh-point col transform */
    for (j = 0; j < txw; ++j) {
       int out[64];
       int src_col = lr_flip ? (txw - 1 - j) : j;
-      for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
+      /* rect2 scaling for tall TX: txh == 2*txw requires (x*181+128)>>8 on column inputs */
+      if (txh == txw * 2) {
+         for (i = 0; i < txh; ++i) buf[i] = (temp[i * txw + src_col] * 181 + 128) >> 8;
+      } else if (txw == txh * 2) {
+         for (i = 0; i < txh; ++i) buf[i] = (temp[i * txw + src_col] * 181 + 128) >> 8;
+      } else {
+         for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
+      }
       col_fn(buf, out);
       if (ud_flip) {
          for (i = 0; i < txh; ++i) coeffs[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[txh - 1 - i], 4);
@@ -10793,14 +10801,19 @@ static int stbi_avif__av1_read_coeffs_after_skip(
           * entry, so at this point qmatrix scaling is always a no-op. */
          dequant_val = (lvl * qstep) & 0xffffff;
          /* Apply TX scale per AV1 spec §7.12.3 BEFORE the cf_max clamp.
-          * dq_shift = max(0, max(log2(txw), log2(txh)) - 4)
-          * 4..16px → >>0; 32px max → >>1; 64px max → >>2.
+          * dq_shift = max(0, max(log2(txw>>2), log2(txh>>2)) - 1)
+          * Correct formula: lw=log2(txw>>2), lh=log2(txh>>2)
+          * dq_shift = max(lw,lh) > 2 ? max(lw,lh)-1 : (max(lw,lh) > 1 ? 1 : 0)
+          * Result: 4x4-16x16:0, 32x32:1, 64x64:2, 8x32:0, 16x32:1, etc.
           * Cannot use tx2dszctx here because min(log2w,3)+min(log2h,3)
           * saturates at 6 for both 32×32 (needs >>1) and 64×64 (needs >>2). */
          {
-            int max_dim = (txw > txh) ? txw : txh;
-            if (max_dim >= 64)      dequant_val >>= 2;
-            else if (max_dim >= 32) dequant_val >>= 1;
+            int lw = 0, lh = 0, tempw = txw >> 2, temph = txh >> 2, max_ctx, dq_shift;
+            while (tempw > 1) { lw++; tempw >>= 1; }
+            while (temph > 1) { lh++; temph >>= 1; }
+            max_ctx = (lw > lh) ? lw : lh;
+            dq_shift = (max_ctx > 2) ? (max_ctx - 1) : ((max_ctx > 1) ? 1 : 0);
+            if (dq_shift > 0) dequant_val >>= dq_shift;
          }
          /* Clamp to valid coefficient range per AV1 spec: cf_max = (1 << (bpc+7)) - 1.
           * 8-bit→32767, 10-bit→131071, 12-bit→524287. dav1d uses umin(dq, cf_max)
