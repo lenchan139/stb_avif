@@ -10392,7 +10392,6 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    int buf[64];
    int *temp;
    int i, j;
-   int row_shift;
    void (*row_fn)(const int *, int *);
    void (*col_fn)(const int *, int *);
    int ud_flip = 0, lr_flip = 0;
@@ -10463,43 +10462,61 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
          break;
    }
 
-   /* row_shift (intermediate shift after row transforms) per AV1 spec.
-    * dav1d: inv_txfm_fn84/32/16 shift parameter.
-    * Correct formula: lw=log2(txw), lh=log2(txh)
-    * row_shift = (lw>=4 && lh>=4 && lw==lh) ? 2 : (lw>=4 || lh>=4) ? 1 : 0
-    * This properly distinguishes 16x16 (shift=2) from 8x32 (shift=1) */
+   /* Row transforms with rowShift per AV1 spec §7.13.3 Transform_Row_Shift.
+    * After each row transform, output is right-shifted by rowShift. */
    {
-      int lw = 0, lh = 0, t = txw;
-      while (t > 1) { ++lw; t >>= 1; }
-      t = txh; while (t > 1) { ++lh; t >>= 1; }
-      row_shift = (lw >= 4 && lh >= 4 && lw == lh) ? 2 : ((lw >= 4 || lh >= 4) ? 1 : 0);
-   }
+      /* Compute rowShift from AV1 spec Transform_Row_Shift[txSz].
+       * 4×4:0  8×8:1  16×16:2  32×32:2  64×64:2
+       * 4×8,8×4:0  8×16,16×8:1  16×32,32×16:1  32×64,64×32:1
+       * 4×16,16×4:1  8×32,32×8:2  16×64,64×16:2 */
+      int row_shift;
+      int lw = 0, lh = 0, tw2 = txw, th2 = txh;
+      int col_clamp_max, col_clamp_min;
+      while (tw2 > 1) { lw++; tw2 >>= 1; }
+      while (th2 > 1) { lh++; th2 >>= 1; }
+      /* Formula derived from AV1 spec Transform_Row_Shift table:
+       * sum<=5:0  sum=6,7:1  sum>=8: 2 if |lw-lh|!=1 else 1 */
+      {
+         int sum = lw + lh;
+         int diff = (lw > lh) ? (lw - lh) : (lh - lw);
+         if (sum <= 5)       row_shift = 0; /* 4×4, 4×8, 8×4 */
+         else if (sum <= 7)  row_shift = 1; /* 8×8, 4×16, 16×4, 8×16, 16×8 */
+         else                row_shift = (diff == 1) ? 1 : 2;
+      }
 
-   {
-      /* rect2 scaling: non-square 2:1 ratio requires (x*181+128)>>8 on input */
-      int is_rect2 = (txw == txh * 2) || (txh == txw * 2);
+      /* colClampRange per spec: max(BitDepth + 6, 16) */
+      {
+         int ccr = bit_depth + 6;
+         if (ccr < 16) ccr = 16;
+         col_clamp_max = (1 << (ccr - 1)) - 1;
+         col_clamp_min = -(1 << (ccr - 1));
+      }
+
       /* Row transforms: for each row i of the txh×txw coeff block,
-         read txw values, apply rect2 scale if needed, then txw-point row transform */
+         read txw values, apply rect2 scale for 2:1 ratio TX,
+         then txw-point row transform, then apply rowShift */
       for (i = 0; i < txh; ++i) {
          int out[64];
-         if (is_rect2) {
+         if (txw == txh * 2 || txh == txw * 2) {
             for (j = 0; j < txw; ++j) buf[j] = (coeffs[i * txw + j] * 181 + 128) >> 8;
          } else {
             for (j = 0; j < txw; ++j) buf[j] = coeffs[i * txw + j];
          }
          row_fn(buf, out);
          if (row_shift > 0) {
-            for (j = 0; j < txw; ++j) temp[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[j], row_shift);
+            for (j = 0; j < txw; ++j)
+               temp[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[j], row_shift);
          } else {
-            for (j = 0; j < txw; ++j) temp[i * txw + j] = out[j];
+            for (j = 0; j < txw; ++j)
+               temp[i * txw + j] = out[j];
          }
       }
-      /* Post-row-transform clipping: prevents 10-bit overflow in column stage */
+      /* Post-row-transform clipping per spec colClampRange */
       for (i = 0; i < txh; ++i) {
          for (j = 0; j < txw; ++j) {
             int v = temp[i * txw + j];
-            if (v > stbi_avif__inv_clip_max) v = stbi_avif__inv_clip_max;
-            if (v < stbi_avif__inv_clip_min) v = stbi_avif__inv_clip_min;
+            if (v > col_clamp_max) v = col_clamp_max;
+            if (v < col_clamp_min) v = col_clamp_min;
             temp[i * txw + j] = v;
          }
       }
@@ -10509,14 +10526,7 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    for (j = 0; j < txw; ++j) {
       int out[64];
       int src_col = lr_flip ? (txw - 1 - j) : j;
-      /* rect2 scaling for tall TX: txh == 2*txw requires (x*181+128)>>8 on column inputs */
-      if (txh == txw * 2) {
-         for (i = 0; i < txh; ++i) buf[i] = (temp[i * txw + src_col] * 181 + 128) >> 8;
-      } else if (txw == txh * 2) {
-         for (i = 0; i < txh; ++i) buf[i] = (temp[i * txw + src_col] * 181 + 128) >> 8;
-      } else {
-         for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
-      }
+      for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
       col_fn(buf, out);
       if (ud_flip) {
          for (i = 0; i < txh; ++i) coeffs[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[txh - 1 - i], 4);
@@ -10881,19 +10891,16 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             
             dequant_val = (dequant_val * (unsigned int)qm_level + 16u) >> 5; /* QM weight in [16..32], identity=32 */
          }
-         /* Apply TX scale per AV1 spec §7.12.3 BEFORE the cf_max clamp.
-          * dq_shift = max(0, max(log2(txw>>2), log2(txh>>2)) - 1)
-          * Correct formula: lw=log2(txw>>2), lh=log2(txh>>2)
-          * dq_shift = max(lw,lh) > 2 ? max(lw,lh)-1 : (max(lw,lh) > 1 ? 1 : 0)
-          * Result: 4x4-16x16:0, 32x32:1, 64x64:2, 8x32:0, 16x32:1, etc.
-          * Cannot use tx2dszctx here because min(log2w,3)+min(log2h,3)
-          * saturates at 6 for both 32×32 (needs >>1) and 64×64 (needs >>2). */
+         /* Apply TX scale per AV1 spec §7.12.3 dqDenom.
+          * dqDenom=2 (shift 1): 32×32, 16×32, 32×16, 16×64, 64×16
+          * dqDenom=4 (shift 2): 64×64, 32×64, 64×32
+          * dqDenom=1 (shift 0): everything else */
          {
-            int lw = 0, lh = 0, tempw = txw >> 2, temph = txh >> 2, max_ctx, dq_shift;
-            while (tempw > 1) { lw++; tempw >>= 1; }
-            while (temph > 1) { lh++; temph >>= 1; }
-            max_ctx = (lw > lh) ? lw : lh;
-            dq_shift = (max_ctx > 2) ? (max_ctx - 1) : ((max_ctx > 1) ? 1 : 0);
+            int max_dim = (txw > txh) ? txw : txh;
+            int min_dim = (txw < txh) ? txw : txh;
+            int dq_shift = 0;
+            if (max_dim >= 64 && min_dim >= 32)      dq_shift = 2; /* 64×64, 64×32, 32×64 */
+            else if (max_dim >= 32)                   dq_shift = 1; /* 32×32, 32×16, 16×32, 64×16, 16×64 */
             if (dq_shift > 0) dequant_val >>= dq_shift;
          }
          /* Clamp to valid coefficient range per AV1 spec: cf_max = (1 << (bpc+7)) - 1.
@@ -12475,6 +12482,20 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                for (ti = 0; ti < tx_h_mi && (mi_tx_row % sb_mi_val) + ti < sb_mi_val; ti++)
                   ctx->left_entropy[0][(mi_tx_row % sb_mi_val) + ti] = (unsigned char)cul_level;
                if (eob > 0) {
+#ifdef STBI_AVIF_DUMP_FIRST_COEFFS
+                  {
+                     static int stbi_avif__coeff_dumped = 0;
+                     if (!stbi_avif__coeff_dumped && (px+tx_col)==0 && (py+tx_row)==0 && tx_w==16 && tx_h==16) {
+                        stbi_avif__coeff_dumped = 1;
+                        { int _r,_c; FILE *_f=fopen("/tmp/fox_dq_coeffs.txt","w");
+                          if(_f){ fprintf(_f,"DQ coeffs 16x16 bx=%u by=%u eob=%d txtp=%d\n",
+                              px+tx_col,py+tx_row,eob,tx_type_actual);
+                            for(_r=0;_r<16;_r++){ fprintf(_f,"r%2d:",_r);
+                              for(_c=0;_c<16;_c++) fprintf(_f," %5d",coeffs[_r*16+_c]);
+                              fprintf(_f,"\n"); } fclose(_f); } }
+                     }
+                  }
+#endif
                   stbi_avif__av1_reconstruct_tx_block(ctx->planes->y, ctx->planes->width,
                      ctx->planes->width, ctx->planes->height,
                      px + tx_col, py + tx_row, tx_w, tx_h, coeffs,
