@@ -10619,12 +10619,13 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    memset(levels, 0, sizeof(levels));
    memset(coeffs_out, 0, (size_t)area * sizeof(int));
    
-   /* Debug: verify levels is zeroed at mi=(0,16) */
-   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1
-       && ctx->mi_row == 0 && ctx->mi_col == 16) {
+   /* Debug: verify levels is zeroed */
+   if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1) {
       int sum = 0;
       for (int i = 0; i < 100; i++) sum += levels[i];
-      fprintf((FILE*)ctx->dbg_blocks_fp, "  LEVELS_INIT[mi=(0,16)]: sum_first_100=%d (should be 0)\n", sum);
+      if (sum != 0) {
+         fprintf((FILE*)ctx->dbg_blocks_fp, "  WARNING: levels not zeroed, sum=%d\n", sum);
+      }
    }
 
    /* Pick scan order: use static tables for square TX; generate diagonal scan for rect */
@@ -10777,18 +10778,16 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             : stbi_avif__av1_get_lower_levels_ctx_2d(levels, pos, bhl, txw);
          int level;
          if (coeff_ctx >= 42) coeff_ctx = 41;
-         /* Debug coeff_ctx at mi=(0,16) */
-         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1
-             && ctx->mi_row == 0 && ctx->mi_col == 16
-             && plane_type == 0) {
+         /* Debug coeff_ctx and levels */
+         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void *)1) {
             /* Calculate padded position to show neighbor levels */
             int x_dbg = pos >> bhl;
             int padded_dbg = pos + (x_dbg << 2);
             int stride_dbg = (1 << bhl) + 4;
-            fprintf((FILE*)ctx->dbg_blocks_fp, "  COEFF_CTX_DBG[mi=(0,16)]: c=%d pos=%d coeff_ctx=%d\n",
+            fprintf((FILE*)ctx->dbg_blocks_fp, "  COEFF_DBG: c=%d pos=%d coeff_ctx=%d\n",
                c, pos, coeff_ctx);
-            if (tx_class == 0) {
-               fprintf((FILE*)ctx->dbg_blocks_fp, "    LEVELS[mi=(0,16)]: pos=%d pad=%d stride=%d neighbors=[%d,%d,%d,%d,%d]\n",
+            if (tx_class == 0 && plane_type == 0) {
+               fprintf((FILE*)ctx->dbg_blocks_fp, "    LEVELS: pos=%d pad=%d stride=%d neighbors=[%d,%d,%d,%d,%d]\n",
                   pos, padded_dbg, stride_dbg,
                   (int)levels[padded_dbg+1], (int)levels[padded_dbg+stride_dbg],
                   (int)levels[padded_dbg+stride_dbg+1], (int)levels[padded_dbg+2],
