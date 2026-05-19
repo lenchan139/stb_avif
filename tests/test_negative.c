@@ -115,6 +115,95 @@ static void check_cdf_update_rate_cases(void)
    }
 }
 
+static void check_obu_stream_parses(const char *name,
+                                    const unsigned char *buf, int len,
+                                    int require_sequence_header,
+                                    int expect_frame_header)
+{
+   stbi_avif__av1_headers headers;
+   int ok;
+
+   memset(&headers, 0, sizeof(headers));
+   ok = stbi_avif__parse_av1_obu_stream(buf, (size_t)len, &headers, require_sequence_header);
+   if (!ok)
+   {
+      printf("FAIL [obu_parse %s]: expected success, got failure: %s\n",
+             name, stbi_avif_failure_reason());
+      ++failures;
+      return;
+   }
+
+   if (expect_frame_header && !headers.saw_frame_header)
+   {
+      printf("FAIL [obu_parse %s]: parse succeeded but no frame header observed\n", name);
+      ++failures;
+      return;
+   }
+
+   printf("PASS [obu_parse %s]\n", name);
+}
+
+static void check_obu_stream_fails(const char *name,
+                                   const unsigned char *buf, int len,
+                                   int require_sequence_header)
+{
+   stbi_avif__av1_headers headers;
+   int ok;
+
+   memset(&headers, 0, sizeof(headers));
+   ok = stbi_avif__parse_av1_obu_stream(buf, (size_t)len, &headers, require_sequence_header);
+   if (ok)
+   {
+      printf("FAIL [obu_parse %s]: expected failure, got success\n", name);
+      ++failures;
+   }
+   else if (!stbi_avif_failure_reason() || stbi_avif_failure_reason()[0] == '\0')
+   {
+      printf("FAIL [obu_parse %s]: failure had empty reason\n", name);
+      ++failures;
+   }
+   else
+   {
+      printf("PASS [obu_parse %s]: %s\n", name, stbi_avif_failure_reason());
+   }
+}
+
+static void check_frame_index_parses(const char *name,
+                                     const unsigned char *buf, int len,
+                                     int expect_combined)
+{
+   stbi_avif__av1_frame_index index;
+   int ok;
+
+   memset(&index, 0, sizeof(index));
+   ok = stbi_avif__index_av1_frame_obus(buf, (size_t)len, &index);
+   if (!ok)
+   {
+      printf("FAIL [frame_index %s]: expected success, got failure: %s\n",
+             name, stbi_avif_failure_reason());
+      ++failures;
+      return;
+   }
+
+   if (!index.saw_frame_header || !index.saw_tile_group)
+   {
+      printf("FAIL [frame_index %s]: missing frame_header=%d tile_group=%d\n",
+             name, index.saw_frame_header, index.saw_tile_group);
+      ++failures;
+      return;
+   }
+
+   if ((expect_combined ? 1 : 0) != (index.frame_is_combined_obu ? 1 : 0))
+   {
+      printf("FAIL [frame_index %s]: combined=%d expected=%d\n",
+             name, index.frame_is_combined_obu, expect_combined);
+      ++failures;
+      return;
+   }
+
+   printf("PASS [frame_index %s]\n", name);
+}
+
 /* --------------------------------------------------------------------- */
 /*  Shared test data buffers                                               */
 /* --------------------------------------------------------------------- */
@@ -177,6 +266,28 @@ int main(void)
    unsigned char zeros[64];
    unsigned char garbage[64];
    unsigned char truncated_ftyp[10];
+   /* OBU headers: (obu_type << 3) | has_size_field(0x02), zero payload size. */
+   static const unsigned char k_obu_unknown_then_frame_header[] = {
+      0x42, 0x00, /* unknown/unhandled obu_type=8, size=0 */
+      0x1a, 0x00  /* frame_header obu_type=3, size=0 */
+   };
+   static const unsigned char k_obu_redundant_then_frame_header[] = {
+      0x3a, 0x00, /* redundant_frame_header obu_type=7, size=0 */
+      0x1a, 0x00  /* frame_header obu_type=3, size=0 */
+   };
+   static const unsigned char k_obu_tile_group_before_frame_header[] = {
+      0x22, 0x00  /* tile_group obu_type=4, size=0 */
+   };
+   static const unsigned char k_payload_unknown_then_fh_tg[] = {
+      0x42, 0x00, /* unknown/unhandled obu_type=8, size=0 */
+      0x1a, 0x00, /* frame_header obu_type=3, size=0 */
+      0x22, 0x00  /* tile_group obu_type=4, size=0 */
+   };
+   static const unsigned char k_payload_redundant_then_fh_tg[] = {
+      0x3a, 0x00, /* redundant_frame_header obu_type=7, size=0 */
+      0x1a, 0x00, /* frame_header obu_type=3, size=0 */
+      0x22, 0x00  /* tile_group obu_type=4, size=0 */
+   };
    int i;
 
    memset(zeros, 0, sizeof(zeros));
@@ -194,6 +305,28 @@ int main(void)
    printf("==> Negative / robustness tests\n");
 
    check_cdf_update_rate_cases();
+
+   /* --- AV1 OBU parser forward-compat behavior ----------------------- */
+   check_obu_stream_parses("unknown_obu_is_skipped",
+                           k_obu_unknown_then_frame_header,
+                           (int)sizeof(k_obu_unknown_then_frame_header),
+                           0, 1);
+   check_obu_stream_parses("redundant_frame_header_is_skipped",
+                           k_obu_redundant_then_frame_header,
+                           (int)sizeof(k_obu_redundant_then_frame_header),
+                           0, 1);
+   check_obu_stream_fails("tile_group_before_frame_header_still_fails",
+                          k_obu_tile_group_before_frame_header,
+                          (int)sizeof(k_obu_tile_group_before_frame_header),
+                          0);
+   check_frame_index_parses("payload_unknown_obu_is_skipped",
+                            k_payload_unknown_then_fh_tg,
+                            (int)sizeof(k_payload_unknown_then_fh_tg),
+                            0);
+   check_frame_index_parses("payload_redundant_obu_is_skipped",
+                            k_payload_redundant_then_fh_tg,
+                            (int)sizeof(k_payload_redundant_then_fh_tg),
+                            0);
 
    /* --- NULL / empty input ------------------------------------------- */
    check_decode_fails("null_buffer",  NULL, 0);

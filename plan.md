@@ -1,3 +1,26 @@
+# Missing AV1 Features: Plan + Implementation Status (2026-04-25)
+
+## Goal
+- Close the highest-value gaps between stb_avif's still-image subset and broader AV1-in-AVIF streams while keeping strict, clean rejection for truly unsupported decode tools.
+
+## Implemented In This Pass
+- AV1 OBU pre-parse is now forward-compatible for non-critical OBUs:
+   - Redundant frame header OBU is skipped (not fatal).
+   - Unknown/unhandled OBU types are skipped by size (not fatal).
+- This removes a known "missing behavior" where valid streams could fail before decode due to strict OBU-type rejection.
+
+## Remaining Missing Features (Prioritized)
+1. Multi-frame / animation sequencing (item + frame timeline handling).
+2. Inter-frame prediction (P/B) and reference frame state.
+3. IntraBC decode path (`allow_intrabc`) for screen-content tools.
+4. QMatrix-enabled decode path (`using_qmatrix`) rather than entry reject.
+5. Temporal/spatial layered streams (currently single-layer only).
+
+## Next Implementation Steps
+1. Add focused trace fixtures that exercise non-critical/unknown OBUs and ensure decode continues.
+2. Implement minimal animation plumbing (frame iteration + disposal/blend behavior) behind a compile-time guard.
+3. Keep hard-fail guards for inter-frame tools until full ref/motion pipeline is added.
+
 # AVIF → PNG Decoder: Detailed Implementation Plan
 
 ## 1. Architecture Overview
