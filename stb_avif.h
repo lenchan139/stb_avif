@@ -7533,15 +7533,15 @@ static const unsigned short stbi_avif__av1_scan_32x32[1024] = {
 #define STBI_AVIF_TX_64X64 4
 
 /* Mapping from TX size to ext_tx_set for intra */
-/* Set 0: only DCT_DCT, Set 1: 7 types (DTT4_IDTX_1DDCT), Set 2: 5 types (DTT4_IDTX) */
+/* Set 0: only DCT_DCT, Set 1: 6 types (dav1d Intra1), Set 2: 4 types (dav1d Intra2) */
 static const int stbi_avif__av1_ext_tx_set_intra[5] = { 1, 1, 2, 0, 0 };
-/* Number of TX types per set: set0=1, set1=7, set2=5 */
-static const int stbi_avif__av1_num_tx_types[3] = { 1, 7, 5 };
-/* av1_ext_tx_inv: CDF symbol → TX_TYPE for each ext_tx_set
- * Set 1 (DTT4_IDTX_1DDCT, 7 syms): from av1_ext_tx_inv[3]
- * Set 2 (DTT4_IDTX, 5 syms): from av1_ext_tx_inv[2] */
-static const int stbi_avif__av1_ext_tx_inv_set1[7] = { 9, 0, 10, 11, 3, 1, 2 };
-static const int stbi_avif__av1_ext_tx_inv_set2[5] = { 9, 0, 3, 1, 2 };
+/* Number of TX types per set (dav1d convention): set0=1, set1=6, set2=4 */
+static const int stbi_avif__av1_num_tx_types[3] = { 1, 6, 4 };
+/* av1_ext_tx_inv: CDF symbol → TX_TYPE for each ext_tx_set (dav1d ordering)
+ * Set 1 (Intra1, 6 syms): dav1d_tx_types_per_set[5..10] = IDTX,DCT_DCT,V_DCT,H_DCT,ADST_ADST,ADST_DCT
+ * Set 2 (Intra2, 4 syms): dav1d_tx_types_per_set[0..3]  = IDTX,DCT_DCT,ADST_ADST,ADST_DCT */
+static const int stbi_avif__av1_ext_tx_inv_set1[6] = { 9, 0, 10, 11, 3, 1 };
+static const int stbi_avif__av1_ext_tx_inv_set2[4] = { 9, 0, 3, 1 };
 
 /* Map base_q_idx to TOKEN_CDF_Q_CTX (0-3) */
 static int stbi_avif__av1_get_q_ctx(unsigned int base_q_idx)
@@ -12552,7 +12552,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                         ? (unsigned int)stbi_avif__filter_mode_to_y_mode_local[fi_mode]
                         : (y_mode < 13u ? y_mode : 0u);
                      if (ctx->reduced_tx_set || min_log2 >= 2u) {
-                        /* use txtp_intra2 (nsyms=5) */
+                        /* use txtp_intra2 (nsyms=4) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
                          if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
                             fprintf(stderr, "TXTP_INTRA2 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
@@ -12560,14 +12560,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 #endif
                         { unsigned int r_pre2 = ctx->rd.rng;
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 5);
-                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 5 ? tx_type_sym : 0];
+                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 4);
+                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 4 ? tx_type_sym : 0];
                         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void*)1)
                            fprintf((FILE*)ctx->dbg_blocks_fp, "  Post-txtp_set2[sym=%u,tp=%d,ml=%u,ym=%u]: r_pre=%u r=%u cdf0=%u\n",
                               tx_type_sym, tx_type_actual, min_log2, y_mode_nofilt, r_pre2, ctx->rd.rng,
                               (unsigned)ctx->intra_tx_cdf_set2[min_log2<4u?min_log2:3u][y_mode_nofilt][0]); }
                      } else {
-                        /* use txtp_intra1 (nsyms=7) */
+                        /* use txtp_intra1 (nsyms=6) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
                          if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
                             fprintf(stderr, "TXTP_INTRA1 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
@@ -12575,8 +12575,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 #endif
                         { unsigned int r_pre1 = ctx->rd.rng;
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 7);
-                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 7 ? tx_type_sym : 0];
+                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 6);
+                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 6 ? tx_type_sym : 0];
                         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void*)1)
                            fprintf((FILE*)ctx->dbg_blocks_fp, "  Post-txtp_set1[sym=%u,tp=%d,ml=%u,ym=%u]: r_pre=%u r=%u cdf0=%u\n",
                               tx_type_sym, tx_type_actual, min_log2, y_mode_nofilt, r_pre1, ctx->rd.rng,
