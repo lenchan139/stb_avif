@@ -2925,129 +2925,129 @@ static unsigned short stbi_avif__av1_angle_delta_cdf[8][8] = {
  * cdf[0..4] = real probs, cdf[5]=32768 (sentinel/last-symbol catch-all), cdf[6]=0 (count) */
 static unsigned short stbi_avif__av1_intra_tx_cdf_set1[4][13][8] = {
    {
-      {1535u, 8035u, 9461u, 12751u, 23467u, 32768u, 0u, 0u},
-      {564u, 3335u, 9709u, 10870u, 18143u, 32768u, 0u, 0u},
-      {672u, 3247u, 3676u, 11982u, 19415u, 32768u, 0u, 0u},
-      {5279u, 13885u, 15487u, 18044u, 23527u, 32768u, 0u, 0u},
-      {4423u, 6074u, 7985u, 10416u, 25693u, 32768u, 0u, 0u},
-      {1486u, 4241u, 9460u, 10662u, 16456u, 32768u, 0u, 0u},
-      {439u, 2838u, 3522u, 6737u, 18058u, 32768u, 0u, 0u},
-      {1190u, 4233u, 4855u, 11670u, 20281u, 32768u, 0u, 0u},
-      {1045u, 4312u, 8647u, 10159u, 18644u, 32768u, 0u, 0u},
-      {202u, 3734u, 4747u, 7298u, 17127u, 32768u, 0u, 0u},
-      {447u, 4312u, 6819u, 8884u, 16010u, 32768u, 0u, 0u},
-      {277u, 4369u, 5255u, 8905u, 16465u, 32768u, 0u, 0u},
-      {3409u, 5436u, 10599u, 15599u, 19687u, 32768u, 0u, 0u},
+      {1535u, 8035u, 9461u, 12751u, 23467u, 27825u, 32768u, 0u},
+      {564u, 3335u, 9709u, 10870u, 18143u, 28094u, 32768u, 0u},
+      {672u, 3247u, 3676u, 11982u, 19415u, 23127u, 32768u, 0u},
+      {5279u, 13885u, 15487u, 18044u, 23527u, 30252u, 32768u, 0u},
+      {4423u, 6074u, 7985u, 10416u, 25693u, 29298u, 32768u, 0u},
+      {1486u, 4241u, 9460u, 10662u, 16456u, 27694u, 32768u, 0u},
+      {439u, 2838u, 3522u, 6737u, 18058u, 23754u, 32768u, 0u},
+      {1190u, 4233u, 4855u, 11670u, 20281u, 24377u, 32768u, 0u},
+      {1045u, 4312u, 8647u, 10159u, 18644u, 29335u, 32768u, 0u},
+      {202u, 3734u, 4747u, 7298u, 17127u, 24016u, 32768u, 0u},
+      {447u, 4312u, 6819u, 8884u, 16010u, 23858u, 32768u, 0u},
+      {277u, 4369u, 5255u, 8905u, 16465u, 22271u, 32768u, 0u},
+      {3409u, 5436u, 10599u, 15599u, 19687u, 24040u, 32768u, 0u},
    },
    {
-      {1870u, 13742u, 14530u, 16498u, 23770u, 32768u, 0u, 0u},
-      {326u, 8796u, 14632u, 15079u, 19272u, 32768u, 0u, 0u},
-      {484u, 7576u, 7712u, 14443u, 19159u, 32768u, 0u, 0u},
-      {1126u, 15340u, 15895u, 17023u, 20896u, 32768u, 0u, 0u},
-      {655u, 4854u, 5249u, 5913u, 22099u, 32768u, 0u, 0u},
-      {1299u, 6458u, 8885u, 9290u, 14851u, 32768u, 0u, 0u},
-      {311u, 5295u, 5552u, 6885u, 16107u, 32768u, 0u, 0u},
-      {883u, 8059u, 8270u, 11258u, 17289u, 32768u, 0u, 0u},
-      {741u, 7580u, 9318u, 10345u, 16688u, 32768u, 0u, 0u},
-      {110u, 7406u, 7915u, 9195u, 16041u, 32768u, 0u, 0u},
-      {363u, 7974u, 9357u, 10673u, 15629u, 32768u, 0u, 0u},
-      {153u, 7647u, 8112u, 9936u, 15307u, 32768u, 0u, 0u},
-      {3511u, 6332u, 11165u, 15335u, 19323u, 32768u, 0u, 0u},
+      {1870u, 13742u, 14530u, 16498u, 23770u, 27698u, 32768u, 0u},
+      {326u, 8796u, 14632u, 15079u, 19272u, 27486u, 32768u, 0u},
+      {484u, 7576u, 7712u, 14443u, 19159u, 22591u, 32768u, 0u},
+      {1126u, 15340u, 15895u, 17023u, 20896u, 30279u, 32768u, 0u},
+      {655u, 4854u, 5249u, 5913u, 22099u, 27138u, 32768u, 0u},
+      {1299u, 6458u, 8885u, 9290u, 14851u, 25497u, 32768u, 0u},
+      {311u, 5295u, 5552u, 6885u, 16107u, 22672u, 32768u, 0u},
+      {883u, 8059u, 8270u, 11258u, 17289u, 21549u, 32768u, 0u},
+      {741u, 7580u, 9318u, 10345u, 16688u, 29046u, 32768u, 0u},
+      {110u, 7406u, 7915u, 9195u, 16041u, 23329u, 32768u, 0u},
+      {363u, 7974u, 9357u, 10673u, 15629u, 24474u, 32768u, 0u},
+      {153u, 7647u, 8112u, 9936u, 15307u, 19996u, 32768u, 0u},
+      {3511u, 6332u, 11165u, 15335u, 19323u, 23594u, 32768u, 0u},
    },
    {
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
    },
    {
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
-      {4681u, 9362u, 14043u, 18725u, 23406u, 32768u, 0u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
+      {4681u, 9362u, 14043u, 18725u, 23406u, 28087u, 32768u, 0u},
    },
 };
 
-/* Intra TX type CDF set 2: [4 tx_sizes][13 modes][6] (4 symbols, dav1d txtp_intra2)
- * cdf[0..2] = real probs, cdf[3]=32768 (sentinel/last-symbol catch-all), cdf[4]=0 (count) */
+/* Intra TX type CDF set 2: [4 tx_sizes][13 modes][6] (5 symbols, AOM_CDF5 = 4 args + sentinel)
+ * cdf[0..3] = real probs, cdf[4]=32768 (sentinel), cdf[5]=0 (count), nsyms=5 */
 static unsigned short stbi_avif__av1_intra_tx_cdf_set2[4][13][6] = {
    {
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
    },
    {
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
    },
    {
-      {1127u, 12814u, 22772u, 32768u, 0u, 0u},
-      {145u, 6761u, 11980u, 32768u, 0u, 0u},
-      {362u, 5887u, 11678u, 32768u, 0u, 0u},
-      {385u, 15213u, 18587u, 32768u, 0u, 0u},
-      {25u, 2914u, 23134u, 32768u, 0u, 0u},
-      {60u, 4470u, 11749u, 32768u, 0u, 0u},
-      {37u, 3332u, 14511u, 32768u, 0u, 0u},
-      {157u, 6320u, 13036u, 32768u, 0u, 0u},
-      {119u, 6719u, 12906u, 32768u, 0u, 0u},
-      {47u, 5537u, 12576u, 32768u, 0u, 0u},
-      {269u, 6076u, 11258u, 32768u, 0u, 0u},
-      {83u, 5615u, 12001u, 32768u, 0u, 0u},
-      {1968u, 5556u, 12023u, 32768u, 0u, 0u},
+      {1127u, 12814u, 22772u, 27483u, 32768u, 0u},
+      {145u, 6761u, 11980u, 26667u, 32768u, 0u},
+      {362u, 5887u, 11678u, 16725u, 32768u, 0u},
+      {385u, 15213u, 18587u, 30693u, 32768u, 0u},
+      {25u, 2914u, 23134u, 27903u, 32768u, 0u},
+      {60u, 4470u, 11749u, 23991u, 32768u, 0u},
+      {37u, 3332u, 14511u, 21448u, 32768u, 0u},
+      {157u, 6320u, 13036u, 17439u, 32768u, 0u},
+      {119u, 6719u, 12906u, 29396u, 32768u, 0u},
+      {47u, 5537u, 12576u, 21499u, 32768u, 0u},
+      {269u, 6076u, 11258u, 23115u, 32768u, 0u},
+      {83u, 5615u, 12001u, 17228u, 32768u, 0u},
+      {1968u, 5556u, 12023u, 18547u, 32768u, 0u},
    },
    {
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
-      {6554u, 13107u, 19661u, 32768u, 0u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
+      {6554u, 13107u, 19661u, 26214u, 32768u, 0u},
    },
 };
 
@@ -7540,11 +7540,11 @@ static const unsigned short stbi_avif__av1_scan_32x32[1024] = {
 static const int stbi_avif__av1_ext_tx_set_intra[5] = { 1, 1, 2, 0, 0 };
 /* Number of TX types per set (dav1d convention): set0=1, set1=6, set2=4 */
 static const int stbi_avif__av1_num_tx_types[3] = { 1, 6, 4 };
-/* av1_ext_tx_inv: CDF symbol → TX_TYPE for each ext_tx_set (dav1d ordering)
- * Set 1 (Intra1, 6 syms): dav1d_tx_types_per_set[5..10] = IDTX,DCT_DCT,V_DCT,H_DCT,ADST_ADST,ADST_DCT
- * Set 2 (Intra2, 4 syms): dav1d_tx_types_per_set[0..3]  = IDTX,DCT_DCT,ADST_ADST,ADST_DCT */
-static const int stbi_avif__av1_ext_tx_inv_set1[6] = { 9, 0, 10, 11, 3, 1 };
-static const int stbi_avif__av1_ext_tx_inv_set2[4] = { 9, 0, 3, 1 };
+/* av1_ext_tx_inv: CDF symbol → TX_TYPE for each ext_tx_set (AOM/dav1d ordering)
+ * Set 1 (Intra1, 7 syms, AOM_CDF7): IDTX,DCT_DCT,V_DCT,H_DCT,ADST_ADST,ADST_DCT,DCT_ADST
+ * Set 2 (Intra2, 5 syms, AOM_CDF5): IDTX,DCT_DCT,ADST_ADST,ADST_DCT,DCT_ADST */
+static const int stbi_avif__av1_ext_tx_inv_set1[7] = { 9, 0, 10, 11, 3, 1, 2 };
+static const int stbi_avif__av1_ext_tx_inv_set2[5] = { 9, 0, 3, 1, 2 };
 
 /* Map base_q_idx to TOKEN_CDF_Q_CTX (0-3) */
 static int stbi_avif__av1_get_q_ctx(unsigned int base_q_idx)
@@ -10463,21 +10463,17 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
       /* Compute rowShift from AV1 spec Transform_Row_Shift[txSz].
        * 4×4:0  8×8:1  16×16:2  32×32:2  64×64:2
        * 4×8,8×4:0  8×16,16×8:1  16×32,32×16:1  32×64,64×32:1
-       * 4×16,16×4:1  8×32,32×8:2  16×64,64×16:2 */
+       * 4×16,16×4:1  8×32,32×8:2  16×64,64×16:2
+       *
+       * Per dav1d: lw=log2(txw/4), lh=log2(txh/4)
+       * row_shift = (lw>=2 && lh>=2 && lw==lh) ? 2 : (lw>=2 || lh>=2) ? 1 : 0 */
       int row_shift;
-      int lw = 0, lh = 0, tw2 = txw, th2 = txh;
       int col_clamp_max, col_clamp_min;
+      int lw = 0, lh = 0, tw2 = txw >> 2, th2 = txh >> 2; /* divide by 4 first */
       while (tw2 > 1) { lw++; tw2 >>= 1; }
       while (th2 > 1) { lh++; th2 >>= 1; }
-      /* Formula derived from AV1 spec Transform_Row_Shift table:
-       * sum<=5:0  sum=6,7:1  sum>=8: 2 if |lw-lh|!=1 else 1 */
-      {
-         int sum = lw + lh;
-         int diff = (lw > lh) ? (lw - lh) : (lh - lw);
-         if (sum <= 5)       row_shift = 0; /* 4×4, 4×8, 8×4 */
-         else if (sum <= 7)  row_shift = 1; /* 8×8, 4×16, 16×4, 8×16, 16×8 */
-         else                row_shift = (diff == 1) ? 1 : 2;
-      }
+      /* lw,lh now = log2(txw/4), log2(txh/4): 4->0, 8->1, 16->2, 32->3, 64->4 */
+      row_shift = (lw >= 2 && lh >= 2 && lw == lh) ? 2 : (lw >= 2 || lh >= 2) ? 1 : 0;
 
       /* colClampRange per spec: max(BitDepth + 6, 16) */
       {
@@ -10521,7 +10517,12 @@ static void stbi_avif__av1_inverse_transform_2d_rect(int *coeffs, int txw, int t
    for (j = 0; j < txw; ++j) {
       int out[64];
       int src_col = lr_flip ? (txw - 1 - j) : j;
-      for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
+      /* Rect2 scaling for tall transforms (2:1 ratio): scale by 181/256 */
+      if (txh == txw * 2) {
+         for (i = 0; i < txh; ++i) buf[i] = (temp[i * txw + src_col] * 181 + 128) >> 8;
+      } else {
+         for (i = 0; i < txh; ++i) buf[i] = temp[i * txw + src_col];
+      }
       col_fn(buf, out);
       if (ud_flip) {
          for (i = 0; i < txh; ++i) coeffs[i * txw + j] = STBI_AVIF_ROUND_SHIFT(out[txh - 1 - i], 4);
@@ -10906,8 +10907,10 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          qstep = (pos == 0) ? dc_qstep : ac_qstep;
          /* AV1 spec §7.12.3 quantization matrix scaling:
           *   dequant = (level * qstep * qmLevel[scan_pos]) / 32
-          * where qmLevel comes from QM_X[tx_size][scan_pos] with X ∈ {qm_y,qm_u,qm_v}. */
-         dequant_val = (lvl * qstep) & 0xffffff;
+          * where qmLevel comes from QM_X[tx_size][scan_pos] with X ∈ {qm_y,qm_u,qm_v}.
+          * When QM is disabled, qmLevel=32 (identity), so dequant = level * qstep.
+          * When QM is enabled, qmLevel varies [16..32], so we apply (dequant * qmLevel) / 32. */
+         dequant_val = ((unsigned int)lvl * (unsigned int)qstep) & 0xffffff;
          
          /* Apply quantization matrix scaling if enabled */
          if (ctx->fhdr->using_qmatrix) {
@@ -10923,18 +10926,27 @@ static int stbi_avif__av1_read_coeffs_after_skip(
             else if (plane == 1) qm_level = stbi_avif__av1_get_qm_level(ctx->fhdr->qm_u, tx_size_idx, pos);
             else qm_level = stbi_avif__av1_get_qm_level(ctx->fhdr->qm_v, tx_size_idx, pos);
             
-            dequant_val = (dequant_val * (unsigned int)qm_level + 16u) >> 5; /* QM weight in [16..32], identity=32 */
+            /* When QM is enabled: apply (dequant * qm_level) / 32 */
+            dequant_val = (dequant_val * (unsigned int)qm_level + 16u) >> 5;
          }
          /* Apply TX scale per AV1 spec §7.12.3 dqDenom.
           * dqDenom=2 (shift 1): 32×32, 16×32, 32×16, 16×64, 64×16
           * dqDenom=4 (shift 2): 64×64, 32×64, 64×32
           * dqDenom=1 (shift 0): everything else */
          {
-            int max_dim = (txw > txh) ? txw : txh;
-            int min_dim = (txw < txh) ? txw : txh;
+            /* dqDenom per AV1 spec §7.12.3:
+             *   dqDenom=4 (shift 2): 64×64
+             *   dqDenom=2 (shift 1): 32×32, 32×16, 16×32
+             *   dqDenom=1 (shift 0): everything else
+             * Key: 8×32 and 32×8 must NOT be shifted (dq_shift=0) */
+            int lw = 0, lh = 0, tw2 = txw >> 2, th2 = txh >> 2;
             int dq_shift = 0;
-            if (max_dim >= 64 && min_dim >= 32)      dq_shift = 2; /* 64×64, 64×32, 32×64 */
-            else if (max_dim >= 32)                   dq_shift = 1; /* 32×32, 32×16, 16×32, 64×16, 16×64 */
+            while (tw2 > 1) { lw++; tw2 >>= 1; }
+            while (th2 > 1) { lh++; th2 >>= 1; }
+            /* lw,lh = log2(txw/4), log2(txh/4): 4->0, 8->1, 16->2, 32->3, 64->4 */
+            if (lw >= 4 && lh >= 4) dq_shift = 2;           /* 64×64 */
+            else if (lw >= 3 && lh >= 2) dq_shift = 1;      /* 32×16, 32×32 */
+            else if (lh >= 3 && lw >= 2) dq_shift = 1;      /* 16×32, 32×32 */
             if (dq_shift > 0) dequant_val >>= dq_shift;
          }
          /* Clamp to valid coefficient range per AV1 spec: cf_max = (1 << (bpc+7)) - 1.
@@ -12555,7 +12567,7 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
                         ? (unsigned int)stbi_avif__filter_mode_to_y_mode_local[fi_mode]
                         : (y_mode < 13u ? y_mode : 0u);
                      if (ctx->reduced_tx_set || min_log2 >= 2u) {
-                        /* use txtp_intra2 (nsyms=4) */
+                        /* use txtp_intra2 (nsyms=5) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
                          if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
                             fprintf(stderr, "TXTP_INTRA2 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
@@ -12563,14 +12575,14 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 #endif
                         { unsigned int r_pre2 = ctx->rd.rng;
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 4);
-                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 4 ? tx_type_sym : 0];
+                           ctx->intra_tx_cdf_set2[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 5);
+                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set2[tx_type_sym < 5 ? tx_type_sym : 0];
                         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void*)1)
                            fprintf((FILE*)ctx->dbg_blocks_fp, "  Post-txtp_set2[sym=%u,tp=%d,ml=%u,ym=%u]: r_pre=%u r=%u cdf0=%u\n",
                               tx_type_sym, tx_type_actual, min_log2, y_mode_nofilt, r_pre2, ctx->rd.rng,
                               (unsigned)ctx->intra_tx_cdf_set2[min_log2<4u?min_log2:3u][y_mode_nofilt][0]); }
                      } else {
-                        /* use txtp_intra1 (nsyms=6) */
+                        /* use txtp_intra1 (nsyms=7) */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
                          if (stbi_avif__trace_symbols_allow_aux(&ctx->rd))
                             fprintf(stderr, "TXTP_INTRA1 y_mode=%u y_mode_nofilt=%u min_log2=%u max_log2=%u reduced=%d\n",
@@ -12578,8 +12590,8 @@ static int stbi_avif__av1_decode_coding_unit(stbi_avif__av1_decode_ctx *ctx,
 #endif
                         { unsigned int r_pre1 = ctx->rd.rng;
                         tx_type_sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
-                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 6);
-                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 6 ? tx_type_sym : 0];
+                           ctx->intra_tx_cdf_set1[min_log2 < 4u ? min_log2 : 3u][y_mode_nofilt], 7);
+                        tx_type_actual = stbi_avif__av1_ext_tx_inv_set1[tx_type_sym < 7 ? tx_type_sym : 0];
                         if (ctx->dbg_blocks_fp && ctx->dbg_blocks_fp != (void*)1)
                            fprintf((FILE*)ctx->dbg_blocks_fp, "  Post-txtp_set1[sym=%u,tp=%d,ml=%u,ym=%u]: r_pre=%u r=%u cdf0=%u\n",
                               tx_type_sym, tx_type_actual, min_log2, y_mode_nofilt, r_pre1, ctx->rd.rng,

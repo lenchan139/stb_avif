@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
     unsigned char* data = stbi_avif_load(input, &x, &y, &c, 3);
     
     if (!data) {
-        printf("Failed: %s\n", stbi_failure_reason());
+        printf("Failed: %s\n", stbi_avif_failure_reason());
         return 1;
     }
     
@@ -45,6 +45,6 @@ int main(int argc, char** argv) {
         printf("\nOutput written to: /tmp/test_output.ppm\n");
     }
     
-    stbi_image_free(data);
+    stbi_avif_image_free(data);
     return 0;
 }
