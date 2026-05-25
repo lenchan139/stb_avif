@@ -405,6 +405,7 @@ typedef struct
    /* Per-superblock delta Q/LF (AV1 spec §5.9.13/14) */
    int delta_q_present;       /* frame-level flag: per-SB delta_q encoded */
    int delta_q_res_log2;      /* delta_q_res (0..3) — shift applied to decoded delta */
+   int disable_cdf_update;  /* 1 = CDFs are not updated during frame decode */
    int delta_lf_present;      /* frame-level flag: per-SB delta_lf encoded */
    int delta_lf_res_log2;     /* delta_lf_res (0..3) */
    int delta_lf_multi;        /* 0 = single delta for all planes; 1 = per-plane deltas */
@@ -476,6 +477,7 @@ typedef struct
    int                  cnt;       /* number of unconsumed bits buffered */
    int                  initialized;
    int                  failed;    /* sticky impossible-state guard */
+   int                  disable_cdf_update; /* 1 = don't update CDFs during decode */
 #ifdef STBI_AVIF_TRACE_SYMBOLS
    int                  trace_symbols_event_count;
    int                  trace_symbols_active_line;
@@ -1506,6 +1508,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       int have_render_size;
       if (!stbi_avif__bit_read_flag(&bits, &disable_cdf_update_val))
          return 0;
+      frame->disable_cdf_update = disable_cdf_update_val;
       if (!stbi_avif__bit_read_flag(&bits, &allow_screen_content_tools_val))
          return 0;
       /* force_integer_mv: read when allow_screen_content_tools==1 (ADAPTIVE in seq) */
@@ -1595,6 +1598,7 @@ static int stbi_avif__parse_av1_frame_header(const unsigned char *data, size_t s
       /* disable_cdf_update */
       if (!stbi_avif__bit_read_flag(&bits, &disable_cdf_update))
          return 0;
+      frame->disable_cdf_update = disable_cdf_update;
 
       /* allow_screen_content_tools */
       if (seq->seq_force_screen_content_tools == 2) {
@@ -2697,7 +2701,8 @@ static unsigned int stbi_avif__av1_read_symbol_adapt_trace(stbi_avif__av1_range_
 #endif
    if (rd->failed)
       return 0u;
-   stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
+   if (!rd->disable_cdf_update)
+      stbi_avif__av1_update_cdf(cdf, (int)sym, nsyms);
    return sym;
 }
 #define stbi_avif__av1_read_symbol_adapt(rd, cdf, nsyms) \
@@ -10758,7 +10763,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
          else if (tx_class != 0 ? (row != 0) : ((row | col) < 2)) br_ctx = 7;
          else br_ctx = 14;
          {
-            int ts2 = tx_ctx < 4 ? tx_ctx : 3;
+            int ts2 = tx_ctx < 4 ? tx_ctx : 4;
             for (k = 0; k < 4; ++k) {
                sym = stbi_avif__av1_read_symbol_adapt(&ctx->rd,
                         ctx->coeff_br_cdf[ts2][plane_type][br_ctx], 4);
@@ -10774,7 +10779,7 @@ static int stbi_avif__av1_read_coeffs_after_skip(
    /* 4b. Read remaining coefficients (scan indices eob-2 down to 1) */
    if (eob > 1) {
       int ts = tx_ctx < 4 ? tx_ctx : 4;
-      int ts2 = tx_ctx < 4 ? tx_ctx : 3;
+      int ts2 = tx_ctx < 4 ? tx_ctx : 4;
       for (c = eob - 2; c >= 1; --c) {
          int pos = (int)scan[c];
          int coeff_ctx = (tx_class != 0)
@@ -15441,6 +15446,7 @@ static unsigned char *stbi_avif__av1_decode(
          STBI_AVIF_FREE(ctx.cdef_idx); { int _lri; for (_lri=0;_lri<3;++_lri) STBI_AVIF_FREE(ctx.lr_grid[_lri]); }
          stbi_avif__av1_free_planes(&planes); return NULL;
       }
+      ctx.rd.disable_cdf_update = fhdr->disable_cdf_update;
 
       memset(ctx.above_modes, 0, ctx.mi_cols);
       memset(ctx.left_modes, 0, ctx.mi_rows);
