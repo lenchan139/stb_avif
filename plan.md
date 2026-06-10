@@ -56,21 +56,61 @@ the full dav1d OBU parsing + header parsing + tile decoding to use the MSAC.
 
 These files are in `dav1d_ref/` ready for C89 porting.
 
-### C89-ification Rules
-- Replace `// comments` with `/* */`
-- Move all declarations to top of blocks
-- Replace `uint8_t` → `unsigned char` (or `stbv_u8`)
-- Replace `uint16_t` → `unsigned short` (or `stbv_u16`)
-- Replace `uint32_t` → `unsigned int` (or `stbv_u32`)
-- Replace `int64_t` → `signed long long` (or `stbv_s64`)
-- Remove `inline` keyword
-- Remove `restrict` keyword
-- Remove function pointer casts between incompatible types
-- Replace `for (int i = 0; ...)` → `int i; for (i = 0; ...)`
-- Remove ASM-specific code paths
-- Compound literals → manual struct init
-- Designated initializers → sequential initializers
-- `static_assert` → runtime assert or remove
+### C89 Port Task Breakdown
+
+Each task produces a C89 `.c` file in `dav1d_ref/`. The final step integrates them
+into `stb_avif.h` and replaces the old decoder entirely.
+
+| # | Task | File | Lines | Depends On | C89 Changes Needed |
+|---|------|------|-------|------------|-------------------|
+| 1 | **Types & enums** | `levels.h` | 289 | — | `//`→`/* */`, `uint8_t`→`unsigned char`, rename enums |
+| 2 | **Internal header** | `internal.h` | 471 | 1 | `//`→`/* */`, `inline`→remove, `restrict`→remove |
+| 3 | **Context/Env** | `ctx.h`+`ctx.c`+`env.h` | 674 | 1 | `//`→`/* */`, declarations to top |
+| 4 | **Tables header** | `tables.h` | 125 | 1 | `//`→`/* */` |
+| 5 | **Tables data** | `tables.c` | 1,020 | 4 | Designated init→sequential |
+| 6 | **Scan tables** | `scan.c` | 375 | 1 | Designated init→sequential |
+| 7 | **Dequant tables** | `dequant_tables.c` | 229 | 1 | `//`→`/* */` |
+| 8 | **QM tables** | `qm.c` | 1,693 | 1 | `//`→`/* */`, designated init→sequential |
+| 9 | **MSAC** | `msac.h`+`msac.c` | 330 | — | ✅ Already done in `msac_c89.h` |
+| 10 | **CDF tables** | `cdf.c` | 4,065 | 1,3 | Designated init→sequential (largest task) |
+| 11 | **Intra edge** | `intra_edge.c` | 148 | 1 | `//`→`/* */` |
+| 12 | **1D transforms** | `itx_1d.c` | 1,082 | 1 | `//`→`/* */`, `for` declarations |
+| 13 | **ITX template** | `itx_tmpl.c` | 311 | 12 | `//`→`/* */`, `for` declarations |
+| 14 | **LF mask** | `lf_mask.c` | 468 | 1 | `//`→`/* */` |
+| 15 | **CDEF apply** | `cdef_apply_tmpl.c` | 308 | 14 | `//`→`/* */` |
+| 16 | **Loop restoration** | `looprestoration_tmpl.c` | 1,384 | 1 | `//`→`/* */`, `for` declarations |
+| 17 | **Reconstruction** | `recon_tmpl.c` | 2,310 | 11,12 | `//`→`/* */`, `for` declarations, `inline` |
+| 18 | **OBU parser** | `obu.c` | 1,695 | 1,2,3 | `//`→`/* */`, `for` declarations |
+| 19 | **Main decoder** | `decode.c` | 3,746 | 3,10,17,18 | `//`→`/* */`, `for` declarations (largest logic) |
+
+**Total: ~19,000 lines across 19 tasks.**
+
+### Integration Plan (after all tasks complete)
+
+1. Each C89-ified `.c` file becomes a section in `stb_avif.h` behind `STB_AVIF_USE_C89_DAV1D`
+2. The old decoder (`stb_av1_bool_reader` etc.) is completely removed
+3. `struct stb_av1_msac` replaces ALL bit reading, from OBU header to tile pixel
+4. The CDF tables initialize all decoder contexts before first use
+5. `dav1d_` and `Dav1d` prefixes become `stb_av1_` and `StbAv1`
+
+### Key Porting Rules
+- The MSAC MUST be the only decoder — no mixing with old Boolean decoder
+- Every `//` comment → `/* */`
+- Every `inline` → remove
+- Every `restrict` → remove
+- Every `for (int i = 0;` → `int i; for (i = 0;`
+- Every `uint8_t` → `unsigned char`, `uint16_t` → `unsigned short`, etc.
+- Every designated initializer `[idx] = val` → sequential `val, val, ...`
+- Every `sizeof(_Bool)` → `sizeof(unsigned char)`
+
+### When Porting a File
+```
+1. Copy dav1d_ref/FILE.c → FILE.c89.c
+2. Apply mechanical C89 transformations
+3. Prefix all public symbols: dav1d_ → stb_av1_
+4. Remove all #include "dav1d/*.h" references (types are defined in stb_avif.h)
+5. Compile with cc -std=c89 -fsyntax-only FILE.c89.c to verify
+```
 
 ## Architecture
 
