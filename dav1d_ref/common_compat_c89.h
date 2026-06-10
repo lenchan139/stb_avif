@@ -23,6 +23,15 @@ static int ulog2(const unsigned v) {
 #include "dav1d_ref/ctx_c89.h"
 #endif
 
-/* memset_pow2 extern (declared in ctx_c89.h) */
+/* Clipping function (from intops.h) */
+static int iclip(const int v, const int min, const int max) {
+    return v < min ? min : v > max ? max : v;
+}
+
+/* NOINLINE */
+#define NOINLINE
+
+/* Assert (remove for release) */
+#define assert(x) ((void)0)
 
 #endif /* STB_AV1_COMMON_COMPAT_H */
