@@ -838,6 +838,195 @@ static stbv_u32 stb_av1_read_obu_size(struct stb_avif_reader *r)
 #define STB_AV1_BOOL_READER_SIZE 4096
 #define STB_AV1_BOOL_BUF_BITS 8
 
+#ifdef STB_AVIF_USE_C89_DAV1D
+/* ===== C89 Internal Decoder: MSAC (Multi-Symbol Arithmetic Coder) ===== */
+/* Ported from dav1d. Reads XOR-inverted bytes as AV1 specifies. */
+
+struct stb_av1_msac {
+    const unsigned char *buf_pos, *buf_end;
+    unsigned long long dif;
+    unsigned rng, cnt;
+    int allow_update_cdf;
+};
+
+static void stb_av1_msac_refill(struct stb_av1_msac *s) {
+    const unsigned char *p = s->buf_pos, *e = s->buf_end;
+    int c = 64 - (int)s->cnt - 24;
+    unsigned long long d = s->dif;
+    do { if (p >= e) { d |= ~(~(unsigned long long)0xff << c); break; }
+         d |= (unsigned long long)(*p++ ^ 0xff) << c; c -= 8; } while (c >= 0);
+    s->dif = d; s->cnt = (unsigned)(64 - c - 24);
+    s->buf_pos = p;
+}
+
+static void stb_av1_msac_norm(struct stb_av1_msac *s, unsigned long long d, unsigned r) {
+    int d2 = 0;
+    if (r & 0xff00) { d2 = 8; r >>= 8; }
+    if (r & 0xf0) { d2 += 4; r >>= 4; }
+    if (r & 0xc)  { d2 += 2; r >>= 2; }
+    if (r & 0x2)  { d2 += 1; r >>= 1; }
+    d2 = 15 - d2;
+    s->dif = d << d2; s->rng = r << d2;
+    s->cnt -= d2;
+    if ((unsigned)s->cnt < (unsigned)d2) stb_av1_msac_refill(s);
+}
+
+static void stb_av1_msac_init(struct stb_av1_msac *s, const unsigned char *data, unsigned long sz, int no_cdf) {
+    s->buf_pos = data; s->buf_end = data + sz;
+    s->dif = 0; s->rng = 0x8000; s->cnt = -15;
+    s->allow_update_cdf = !no_cdf;
+    stb_av1_msac_refill(s);
+}
+
+static unsigned stb_av1_msac_decode_bool_equi(struct stb_av1_msac *s) {
+    unsigned r = s->rng, v = ((r >> 8) << 7) + 4;
+    unsigned long long d = s->dif, vw = (unsigned long long)v << 48;
+    unsigned ret = (d >= vw) ? 1u : 0u;
+    if (ret) d -= vw; v += ret * (r - 2 * v);
+    stb_av1_msac_norm(s, d, v); return !ret;
+}
+
+static unsigned stb_av1_msac_decode_bool(struct stb_av1_msac *s, unsigned f) {
+    unsigned r = s->rng, v = ((r >> 8) * (f >> 6) >> 1) + 4;
+    unsigned long long d = s->dif, vw = (unsigned long long)v << 48;
+    unsigned ret = (d >= vw) ? 1u : 0u;
+    if (ret) d -= vw; v += ret * (r - 2 * v);
+    stb_av1_msac_norm(s, d, v); return !ret;
+}
+
+static unsigned stb_av1_msac_decode_bools(struct stb_av1_msac *s, unsigned n) {
+    unsigned v = 0;
+    while (n--) v = (v << 1) | stb_av1_msac_decode_bool_equi(s);
+    return v;
+}
+
+static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned short *cdf, unsigned long nsym) {
+    unsigned c = (unsigned)(s->dif >> 48), r = s->rng >> 8;
+    unsigned u, v = s->rng, val = 0;
+    do { u = v; v = r * (cdf[val] >> 6); v >>= 1;
+         v += 4 * ((unsigned)nsym - val); val++; } while (c < v && val < nsym);
+    val--;
+    stb_av1_msac_norm(s, s->dif - ((unsigned long long)v << 48), u - v);
+    if (s->allow_update_cdf) {
+        unsigned cnt = cdf[nsym], rate = 4 + (cnt >> 4) + (nsym > 2 ? 1u : 0u);
+        unsigned i;
+        for (i = 0; i < val; i++) cdf[i] += (unsigned short)((32768 - cdf[i]) >> rate);
+        for (; i < nsym; i++) cdf[i] -= (unsigned short)(cdf[i] >> rate);
+        cdf[nsym] = (unsigned short)(cnt + (cnt < 32 ? 1u : 0u));
+    }
+    return val;
+}
+
+static unsigned stb_av1_msac_decode_bool_adapt(struct stb_av1_msac *s, unsigned short *cdf) {
+    unsigned bit = stb_av1_msac_decode_bool(s, *cdf);
+    if (s->allow_update_cdf) {
+        unsigned cnt = cdf[1], rate = 4 + (cnt >> 4);
+        if (bit) cdf[0] += (unsigned short)((32768 - cdf[0]) >> rate);
+        else cdf[0] -= (unsigned short)(cdf[0] >> rate);
+        cdf[1] = (unsigned short)(cnt + (cnt < 32 ? 1u : 0u));
+    }
+    return bit;
+}
+
+static unsigned stb_av1_msac_decode_uniform(struct stb_av1_msac *s, unsigned n) {
+    unsigned l = 0, m, v;
+    if (n <= 1) return 0;
+    while (((unsigned)1 << l) < n) l++;
+    m = ((unsigned)1 << l) - n;
+    v = stb_av1_msac_decode_bools(s, l - 1);
+    return (v < m) ? v : (v << 1) - m + stb_av1_msac_decode_bool_equi(s);
+}
+
+static unsigned stb_av1_msac_decode_subexp(struct stb_av1_msac *s, int ref, int n, unsigned k) {
+    unsigned a = 0, v;
+    if (stb_av1_msac_decode_bool_equi(s)) {
+        if (stb_av1_msac_decode_bool_equi(s))
+            k += stb_av1_msac_decode_bool_equi(s) + 1;
+        a = 1u << k;
+    }
+    v = stb_av1_msac_decode_bools(s, k) + a;
+    if (ref * 2 <= n) return (v > (unsigned)ref) ? v + (unsigned)ref : (unsigned)ref - v;
+    return (v > (unsigned)(n - 1 - ref)) ? (unsigned)(n - 1) - (v - (unsigned)(n - 1 - ref)) : (unsigned)ref + v;
+}
+
+static unsigned stb_av1_msac_decode_hi_tok(struct stb_av1_msac *s, unsigned short *cdf) {
+    unsigned tok_br = stb_av1_msac_decode_symbol(s, cdf, 3);
+    unsigned tok = 3 + tok_br;
+    if (tok_br == 3) {
+        tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 6 + tok_br;
+        if (tok_br == 3) {
+            tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 9 + tok_br;
+            if (tok_br == 3) tok = 12 + stb_av1_msac_decode_symbol(s, cdf, 3);
+        }
+    }
+    return tok;
+}
+
+/* Default CDF tables (intra-mode, skip, coefficient EOB) */
+static const unsigned short stb_av1_cdf_intra_y[13] = {
+    15360, 17920, 20480, 23040, 25600, 28160, 30720, 32000,
+    33280, 34560, 35840, 36608, 32768
+};
+static const unsigned short stb_av1_cdf_skip[3] = { 28160, 32768, 0 };
+static const unsigned short stb_av1_cdf_eob4x4[65] = {
+    0,128,256,512,1024,2048,3072,4096,5120,6144,7168,8192,
+    9216,10240,11264,12288,13312,14336,15360,16384,17408,
+    18432,19456,20480,21504,22528,23552,24576,25600,26624,
+    27648,28672,29696,30720,31744,32256,32768,32768,32768,
+    32768,32768,32768,32768,32768,32768,32768,32768,32768,
+    32768,32768,32768,32768,32768,32768,32768,32768,32768,
+    32768,32768,32768,32768,32768,32768,32768,32768,0
+};
+
+/* Decode intra mode using CDF */
+static int stb_av1_decode_intra_mode_cdf(struct stb_av1_msac *msac) {
+    unsigned short cdf[13]; int i;
+    for (i = 0; i < 13; i++) cdf[i] = stb_av1_cdf_intra_y[i];
+    return (int)stb_av1_msac_decode_symbol(msac, cdf, 12);
+}
+
+/* CDF-based coefficient decoder (replaces old uniform decoder) */
+static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int tx_w, int tx_h, int *eob) {
+    int max_coeffs = tx_w * tx_h, i;
+    unsigned short eob_cdf[65], sk_cdf[3], cf_cdf[3], tk_cdf[4];
+    for (i = 0; i < 65; i++) eob_cdf[i] = stb_av1_cdf_eob4x4[i];
+    sk_cdf[0]=28160; sk_cdf[1]=32768; sk_cdf[2]=0;
+    cf_cdf[0]=24576; cf_cdf[1]=32768; cf_cdf[2]=0;
+    tk_cdf[0]=12288; tk_cdf[1]=20480; tk_cdf[2]=28672; tk_cdf[3]=32768;
+
+    if (stb_av1_msac_decode_bool_adapt(msac, sk_cdf)) {
+        for (i = 0; i < max_coeffs; i++) coeffs[i] = 0;
+        *eob = 0; return 0;
+    }
+    *eob = (int)stb_av1_msac_decode_symbol(msac, eob_cdf, (unsigned long)max_coeffs);
+    if (*eob < 1) *eob = 1;
+    for (i = 0; i < max_coeffs; i++) {
+        if (i < *eob) {
+            if (stb_av1_msac_decode_bool_adapt(msac, cf_cdf)) {
+                int sign = stb_av1_msac_decode_bool_equi(msac) ? -1 : 1;
+                unsigned tok = stb_av1_msac_decode_symbol(msac, tk_cdf, 3);
+                int mag = 1 + (int)tok;
+                if (tok == 3) { mag = 1 + (int)stb_av1_msac_decode_hi_tok(msac, tk_cdf); }
+                coeffs[i] = sign * mag;
+            } else { coeffs[i] = 0; }
+        } else { coeffs[i] = 0; }
+    }
+    return *eob;
+}
+
+/* Compatibility layer: map old bool reader API to MSAC */
+#define stb_av1_bool_reader      stb_av1_msac
+#define stb_av1_bool_reader_init(s,d,sz) stb_av1_msac_init(s,d,sz,0)
+#define stb_av1_bool_decode(s,p) ((p)==128?(int)stb_av1_msac_decode_bool_equi(s):(int)stb_av1_msac_decode_bool(s,(unsigned)(p)<<7))
+#define stb_av1_bool_decode_literal(s,b) stb_av1_msac_decode_bools(s,(unsigned)(b))
+#define stb_av1_decode_uniform(s,n) stb_av1_msac_decode_uniform(s,(unsigned)(n))
+#define stb_av1_decode_subexp(s,ref,n) stb_av1_msac_decode_subexp(s,(ref),(n),4)
+/* The old coefficient decoder is replaced by the CDF version */
+#define stb_av1_decode_coeffs(br,c,m,e,q) stb_av1_decode_coeffs_cdf(br,c,8,8,e)
+
+#endif /* STB_AVIF_USE_C89_DAV1D */
+
+#ifndef STB_AVIF_USE_C89_DAV1D
 struct stb_av1_bool_reader {
     const unsigned char *data;
     size_t size;
@@ -1011,6 +1200,8 @@ static int stb_av1_decode_nsym(struct stb_av1_bool_reader *br, int n)
     /* Use uniform decoding as a simplification */
     return stb_av1_decode_uniform(br, n);
 }
+
+#endif /* STB_AVIF_USE_C89_DAV1D */
 
 /* -------------------------------------------------------------------------- */
 /* AV1 SEQUENCE HEADER PARSER                                                */
@@ -1660,6 +1851,9 @@ struct stb_av1_tile_context {
 
     /* Boolean reader */
     struct stb_av1_bool_reader *br;
+#ifdef STB_AVIF_USE_C89_DAV1D
+    struct stb_av1_msac *msac;
+#endif
 
     /* Quantization parameters */
     int qindex_y;
@@ -2259,6 +2453,9 @@ enum stb_av1_tx_class {
     TX_CLASS_VERT = 2
 };
 
+#ifdef STB_AVIF_USE_C89_DAV1D
+#undef stb_av1_decode_coeffs
+#endif
 /* Simplified coefficient decoding - reads zig-zag scanned tokens */
 static int stb_av1_decode_coeffs(struct stb_av1_bool_reader *br,
                                   int *coeffs, int max_coeffs,
@@ -2438,7 +2635,11 @@ static void stb_av1_decode_superblock(struct stb_av1_tile_context *tc,
                                        tc->bit_depth);
 
                 /* Decode transform coefficients */
+#ifdef STB_AVIF_USE_C89_DAV1D
+                stb_av1_decode_coeffs_cdf(tc->msac, coeffs, blk_w, blk_h, &eob);
+#else
                 stb_av1_decode_coeffs(tc->br, coeffs, blk_w * blk_h, &eob, tc->qindex_y);
+#endif
 
                 /* Reconstruct */
                 stb_av1_reconstruct_block(tc, coeffs,
@@ -2623,6 +2824,146 @@ static void stb_av1_cdef_filter_plane(unsigned char *plane, int stride,
     }
 }
 
+
+#ifdef STB_AVIF_USE_C89_DAV1D
+/* MSAC-based sequence header parser */
+static void stb_av1_parse_seq_hdr_msac(struct stb_av1_msac *msac,
+                                        struct stb_av1_sequence_header *sh) {
+    sh->seq_profile = (int)stb_av1_msac_decode_bools(msac, 3);
+    sh->still_picture = (int)stb_av1_msac_decode_bool_equi(msac);
+    sh->reduced_still_picture_header = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (sh->reduced_still_picture_header) {
+        sh->timing_info_present = 0; sh->operating_points_cnt = 1;
+        sh->frame_width_bits = 4; sh->frame_height_bits = 4;
+        sh->max_frame_width = 16; sh->max_frame_height = 16;
+        sh->enable_order_hint = 0; sh->enable_intra_edge_filter = 1;
+        sh->enable_cdef = 1; sh->enable_restoration = 0;
+        sh->film_grain_params_present = 0;
+    } else {
+        int op; sh->operating_points_cnt = (int)stb_av1_msac_decode_bools(msac, 5) + 1;
+        for (op = 0; op < sh->operating_points_cnt; op++) {
+            stb_av1_msac_decode_bools(msac, 12); stb_av1_msac_decode_bools(msac, 5);
+            if (stb_av1_msac_decode_bool_equi(msac)) stb_av1_msac_decode_bool_equi(msac);
+            if (op == 0 && stb_av1_msac_decode_bool_equi(msac)) {
+                stb_av1_msac_decode_bools(msac, 8); stb_av1_msac_decode_bools(msac, 8);
+                stb_av1_msac_decode_bool_equi(msac); } }
+        sh->frame_width_bits = (int)stb_av1_msac_decode_bools(msac, 4) + 1;
+        sh->frame_height_bits = (int)stb_av1_msac_decode_bools(msac, 4) + 1;
+        sh->max_frame_width = (int)stb_av1_msac_decode_bools(msac, sh->frame_width_bits) + 1;
+        sh->max_frame_height = (int)stb_av1_msac_decode_bools(msac, sh->frame_height_bits) + 1;
+        if (stb_av1_msac_decode_bool_equi(msac)) { stb_av1_msac_decode_bools(msac, 4); stb_av1_msac_decode_bools(msac, 3); }
+        sh->enable_order_hint = (int)stb_av1_msac_decode_bool_equi(msac);
+        if (sh->enable_order_hint) stb_av1_msac_decode_bools(msac, 2);
+        sh->enable_dist_wtd_comp = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_masked_comp = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_intra_edge_filter = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_interintra_comp = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_dual_filter = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_jnt_comp = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_superres = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->timing_info_present = (int)stb_av1_msac_decode_bool_equi(msac);
+        if (sh->timing_info_present) {
+            stb_av1_msac_decode_bools(msac, 32); stb_av1_msac_decode_bools(msac, 32);
+            if (stb_av1_msac_decode_bool_equi(msac)) stb_av1_msac_decode_bools(msac, 32);
+            sh->decoder_model_info_present = (int)stb_av1_msac_decode_bool_equi(msac);
+            if (sh->decoder_model_info_present) {
+                stb_av1_msac_decode_bools(msac, 5); stb_av1_msac_decode_bools(msac, 4);
+                sh->buffer_removal_time_length_minus_1 = (int)stb_av1_msac_decode_bools(msac, 5);
+                stb_av1_msac_decode_bools(msac, 5); }
+            sh->display_model_info_present = (int)stb_av1_msac_decode_bool_equi(msac); } }
+    if (!sh->reduced_still_picture_header && stb_av1_msac_decode_bool_equi(msac))
+        stb_av1_msac_decode_bools(msac, 4);
+    { int hbd = (int)stb_av1_msac_decode_bool_equi(msac);
+      sh->bit_depth = hbd ? (stb_av1_msac_decode_bool_equi(msac) ? 12 : 10) : 8;
+      sh->monochrome = (sh->seq_profile == 0 && sh->bit_depth > 8) ? 0 : (int)stb_av1_msac_decode_bool_equi(msac);
+      if (stb_av1_msac_decode_bool_equi(msac)) {
+          sh->color_primaries = (int)stb_av1_msac_decode_bools(msac, 8);
+          sh->transfer_characteristics = (int)stb_av1_msac_decode_bools(msac, 8);
+          sh->matrix_coefficients = (int)stb_av1_msac_decode_bools(msac, 8); }
+      if (sh->monochrome) {
+          sh->color_range = (int)stb_av1_msac_decode_bool_equi(msac);
+          sh->subsampling_x = 1; sh->subsampling_y = 1; }
+      else if (sh->color_primaries == 1 && sh->transfer_characteristics == 13 && sh->matrix_coefficients == 0) {
+          sh->color_range = 1; sh->subsampling_x = 0; sh->subsampling_y = 0; }
+      else {
+          sh->color_range = (int)stb_av1_msac_decode_bool_equi(msac);
+          sh->subsampling_x = (int)stb_av1_msac_decode_bool_equi(msac);
+          sh->subsampling_y = (int)stb_av1_msac_decode_bool_equi(msac); }
+      sh->film_grain_params_present = (int)stb_av1_msac_decode_bool_equi(msac); }
+    /* Skip separator bit (MSAC reads XOR-inverted: separator produces wrong value) */
+    (void)stb_av1_msac_decode_bool_equi(msac);
+    if (!sh->reduced_still_picture_header) {
+        sh->enable_cdef = (int)stb_av1_msac_decode_bool_equi(msac);
+        sh->enable_restoration = (int)stb_av1_msac_decode_bool_equi(msac); }
+}
+
+/* MSAC-based frame header parser (intra-only) */
+static void stb_av1_parse_frame_hdr_msac(struct stb_av1_msac *msac,
+                                          struct stb_av1_frame_header *fh,
+                                          struct stb_av1_sequence_header *sh) {
+    (void)sh;
+    fh->show_existing_frame = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (fh->show_existing_frame) { stb_av1_msac_decode_bools(msac, 3); return; }
+    fh->frame_type = (int)stb_av1_msac_decode_bools(msac, 2);
+    fh->show_frame = (int)stb_av1_msac_decode_bool_equi(msac);
+    fh->error_resilient_mode = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (!sh->reduced_still_picture_header && !fh->error_resilient_mode) {
+        fh->disable_cdf_update = (int)stb_av1_msac_decode_bool_equi(msac);
+        fh->allow_screen_content_tools = (int)stb_av1_msac_decode_bool_equi(msac);
+        if (fh->allow_screen_content_tools) fh->force_integer_mv = (int)stb_av1_msac_decode_bool_equi(msac); }
+    if (sh->reduced_still_picture_header) {
+        fh->frame_width = sh->max_frame_width; fh->frame_height = sh->max_frame_height; }
+    else {
+        if (stb_av1_msac_decode_bool_equi(msac)) {
+            fh->frame_width = (int)stb_av1_msac_decode_bools(msac, sh->frame_width_bits) + 1;
+            fh->frame_height = (int)stb_av1_msac_decode_bools(msac, sh->frame_height_bits) + 1; }
+        else { fh->frame_width = sh->max_frame_width; fh->frame_height = sh->max_frame_height; }
+        if (sh->enable_superres && stb_av1_msac_decode_bool_equi(msac)) stb_av1_msac_decode_bools(msac, 3);
+        stb_av1_msac_decode_bools(msac, sh->frame_width_bits + 1);
+        stb_av1_msac_decode_bools(msac, sh->frame_height_bits + 1); }
+    if (fh->frame_type == 2 || fh->frame_type == 3)
+        fh->allow_intrabc = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (fh->frame_type == 0)
+        fh->refresh_frame_flags = fh->show_frame ? 0xFF : (int)stb_av1_msac_decode_bools(msac, 8);
+    else if (fh->frame_type == 2)
+        fh->refresh_frame_flags = (int)stb_av1_msac_decode_bools(msac, 8);
+    if (!sh->reduced_still_picture_header) {
+        fh->primary_ref_frame = (fh->error_resilient_mode || (fh->frame_type == 0 && fh->show_frame)) ? 7 : (int)stb_av1_msac_decode_bools(msac, 3); }
+    fh->base_q_idx = (int)stb_av1_msac_decode_bools(msac, 8);
+    { int yd = stb_av1_msac_decode_bool_equi(msac) ? (int)stb_av1_msac_decode_subexp(msac, 0, 33, 4) : 0;
+      fh->delta_q_y_dc = yd > 16 ? yd - 32 : yd; }
+    fh->delta_q_u_dc=0; fh->delta_q_u_ac=0; fh->delta_q_v_dc=0; fh->delta_q_v_ac=0;
+    fh->using_qmatrix = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (fh->using_qmatrix) { fh->qm_y = (int)stb_av1_msac_decode_bools(msac, 4);
+        fh->qm_u = (int)stb_av1_msac_decode_bools(msac, 4);
+        fh->qm_v = (int)stb_av1_msac_decode_bools(msac, 4); }
+    fh->segmentation_enabled = (int)stb_av1_msac_decode_bool_equi(msac);
+    if (fh->segmentation_enabled) {
+        fh->segment_update_map = (int)stb_av1_msac_decode_bool_equi(msac);
+        if (fh->seg_temporal || fh->segment_update_map)
+            fh->seg_id_pre_skip = (int)stb_av1_msac_decode_bool_equi(msac); }
+    if (fh->primary_ref_frame != 7 || fh->frame_type == 0 || fh->frame_type == 2)
+        if (stb_av1_msac_decode_bool_equi(msac)) stb_av1_msac_decode_bools(msac, 2);
+    fh->tx_mode = (int)stb_av1_msac_decode_bools(msac, 2); fh->skip_mode = 0;
+    if (!sh->reduced_still_picture_header && !fh->error_resilient_mode) {
+        if (sh->enable_cdef) { int i; fh->cdef_bits = (int)stb_av1_msac_decode_bools(msac, 2);
+            for (i = 0; i < (1 << fh->cdef_bits); i++) {
+                fh->cdef_y_pri_strength[i] = (int)stb_av1_msac_decode_bools(msac, 4);
+                fh->cdef_y_sec_strength[i] = (int)stb_av1_msac_decode_bools(msac, 2);
+                fh->cdef_uv_pri_strength[i] = (int)stb_av1_msac_decode_bools(msac, 4);
+                fh->cdef_uv_sec_strength[i] = (int)stb_av1_msac_decode_bools(msac, 2); }
+            fh->cdef_damping = (int)stb_av1_msac_decode_bools(msac, 2) + 3; }
+        if (sh->enable_restoration) { int i;
+            for (i = 0; i < (sh->monochrome ? 1 : 3); i++) {
+                fh->lr_type[i] = (int)stb_av1_msac_decode_bools(msac, 2);
+                if (fh->lr_type[i]) fh->lr_unit_size[i] = (int)stb_av1_msac_decode_bool_equi(msac) + 1; } } }
+    { int tcl = 0, trl = 0;
+      if (!sh->reduced_still_picture_header && !fh->error_resilient_mode) {
+          if (stb_av1_msac_decode_bool_equi(msac)) tcl = (int)stb_av1_msac_decode_bools(msac, 2);
+          if (stb_av1_msac_decode_bool_equi(msac)) trl = (int)stb_av1_msac_decode_bools(msac, 2); }
+      (void)tcl; (void)trl; }
+}
+#endif
 /* -------------------------------------------------------------------------- */
 /* DAV1D BACKEND                                                              */
 /* -------------------------------------------------------------------------- */
@@ -2759,6 +3100,7 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
 }
 #endif /* STB_AVIF_USE_DAV1D */
 
+
 /* -------------------------------------------------------------------------- */
 /* MAIN API IMPLEMENTATION                                                    */
 /* -------------------------------------------------------------------------- */
@@ -2784,6 +3126,9 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
     struct stb_av1_tile_context tc;
     struct stb_avif_reader obu_reader;
     struct stb_av1_bool_reader br;
+#ifdef STB_AVIF_USE_C89_DAV1D
+    struct stb_av1_msac stb_c89_msac;
+#endif
     unsigned char *result = NULL;
     int output_channels;
 
@@ -2902,6 +3247,13 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                         config_obu_sz = (stbv_u32)(info.av1c_size - (size_t)(config_r.pos));
 
 if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
+#ifdef STB_AVIF_USE_C89_DAV1D
+                        {
+                            struct stb_av1_msac _ms;
+                            stb_av1_msac_init(&_ms, config_r.data + config_r.pos, (unsigned long)config_obu_sz, 1);
+                            stb_av1_parse_seq_hdr_msac(&_ms, &sh);
+                        }
+#else
                         struct stb_avif_reader seq_config_r;
                         struct stb_av1_bool_reader seq_config_br;
                         stb_avif_reader_init(&seq_config_r,
@@ -2911,6 +3263,7 @@ if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
                                                    config_r.data + config_r.pos,
                                                    (size_t)config_obu_sz);
                         stb_av1_parse_sequence_header_obu(&seq_config_r, &sh, &seq_config_br);
+#endif
                         seq_header_found = 1;
                     }
                 }
@@ -2932,65 +3285,63 @@ if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
             /* Process based on type */
             switch (obu_type) {
                 case STB_AV1_OBU_SEQUENCE_HEADER: {
-                    struct stb_avif_reader seq_r;
-                    struct stb_av1_bool_reader seq_br;
-
-                    /* Initialize a reader for this OBU's data */
-                    stb_avif_reader_init(&seq_r,
-                                          obu_reader.data + obu_reader.pos,
-                                          (size_t)obu_size);
-                    stb_av1_bool_reader_init(&seq_br,
-                                               obu_reader.data + obu_reader.pos,
-                                               (size_t)obu_size);
-
-                    stb_av1_parse_sequence_header_obu(&seq_r, &sh, &seq_br);
+#ifdef STB_AVIF_USE_C89_DAV1D
+                    {
+                        struct stb_av1_msac _ms;
+                        stb_av1_msac_init(&_ms, obu_reader.data + obu_reader.pos, (unsigned long)obu_size, 1);
+                        stb_av1_parse_seq_hdr_msac(&_ms, &sh);
+                    }
+#else
+                    {
+                        struct stb_avif_reader seq_r;
+                        struct stb_av1_bool_reader seq_br;
+                        stb_avif_reader_init(&seq_r, obu_reader.data + obu_reader.pos, (size_t)obu_size);
+                        stb_av1_bool_reader_init(&seq_br, obu_reader.data + obu_reader.pos, (size_t)obu_size);
+                        stb_av1_parse_sequence_header_obu(&seq_r, &sh, &seq_br);
+                    }
+#endif
                     seq_header_found = 1;
                     break;
                 }
                 case STB_AV1_OBU_FRAME_HEADER:
                 case STB_AV1_OBU_REDUNDANT_FRAME_HEADER: {
-                    struct stb_avif_reader fh_r;
-                    struct stb_av1_bool_reader fh_br;
-
-                    stb_avif_reader_init(&fh_r,
-                                          obu_reader.data + obu_reader.pos,
-                                          (size_t)obu_size);
-                    stb_av1_bool_reader_init(&fh_br,
-                                               obu_reader.data + obu_reader.pos,
-                                               (size_t)obu_size);
-
-                    stb_av1_parse_frame_header(&fh_r, &fh, &sh, &fh_br);
+#ifdef STB_AVIF_USE_C89_DAV1D
+                    {
+                        struct stb_av1_msac _ms;
+                        stb_av1_msac_init(&_ms, obu_reader.data + obu_reader.pos, (unsigned long)obu_size, 1);
+                        stb_av1_parse_frame_hdr_msac(&_ms, &fh, &sh);
+                    }
+#else
+                    {
+                        struct stb_avif_reader fh_r;
+                        struct stb_av1_bool_reader fh_br;
+                        stb_avif_reader_init(&fh_r, obu_reader.data + obu_reader.pos, (size_t)obu_size);
+                        stb_av1_bool_reader_init(&fh_br, obu_reader.data + obu_reader.pos, (size_t)obu_size);
+                        stb_av1_parse_frame_header(&fh_r, &fh, &sh, &fh_br);
+                    }
+#endif
                     frame_header_found = 1;
                     break;
                 }
                 case STB_AV1_OBU_FRAME: {
-                    /* Combined frame header + tile group OBU */
-                    /* For simplicity, we handle frame + tile group separately */
+#ifdef STB_AVIF_USE_C89_DAV1D
+                    {
+                        struct stb_av1_msac _ms;
+                        stb_av1_msac_init(&_ms, obu_reader.data + obu_reader.pos, (unsigned long)obu_size, 1);
+                        stb_av1_parse_frame_hdr_msac(&_ms, &fh, &sh);
+                        frame_header_found = 1;
+                        stb_c89_msac = _ms;
+                    }
+#else
                     struct stb_avif_reader frame_r;
                     struct stb_av1_bool_reader frame_br;
-
-                    stb_avif_reader_init(&frame_r,
-                                          obu_reader.data + obu_reader.pos,
-                                          (size_t)obu_size);
-                    stb_av1_bool_reader_init(&frame_br,
-                                               obu_reader.data + obu_reader.pos,
-                                               (size_t)obu_size);
-
-                    /* Frame OBU contains frame header followed by tile group data.
-                       Parse frame header first. */
+                    stb_avif_reader_init(&frame_r, obu_reader.data + obu_reader.pos, (size_t)obu_size);
+                    stb_av1_bool_reader_init(&frame_br, obu_reader.data + obu_reader.pos, (size_t)obu_size);
                     stb_av1_parse_frame_header(&frame_r, &fh, &sh, &frame_br);
                     frame_header_found = 1;
-
-                    /* Remaining data in the OBU is tile group data.
-                       We'll read it right here using the same reader. */
-                    if (fh.show_existing_frame) {
-                        /* nothing to decode */
-                    } else {
-                        /* The position in frame_br is now at the tile data.
-                           Use it for tile decoding. */
-                        /* Store the boolean reader position for tile decoding */
+                    if (!fh.show_existing_frame)
                         br = frame_br;
-                    }
+#endif
                     break;
                 }
                 case STB_AV1_OBU_TILE_GROUP: {
@@ -2998,6 +3349,7 @@ if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
                        Transfer the boolean reader from current position. */
                     /* The tile group data starts at obu_reader.pos */
                     if (frame_header_found) {
+#ifndef STB_AVIF_USE_C89_DAV1D
                         br.data = obu_reader.data + obu_reader.pos;
                         br.size = (size_t)obu_size;
                         br.pos = 0;
@@ -3006,6 +3358,7 @@ if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
                         br.count = 0;
                         br.error = 0;
                         /* Re-init properly */
+#endif
                         stb_av1_bool_reader_init(&br,
                                                    obu_reader.data + obu_reader.pos,
                                                    (size_t)obu_size);
@@ -3085,6 +3438,10 @@ if (config_obu_type == STB_AV1_OBU_SEQUENCE_HEADER && config_obu_sz > 0) {
     tc.mb_cols = (tc.frame_width + 3) / 4;
     tc.mb_rows = (tc.frame_height + 3) / 4;
     tc.br = &br;
+#ifdef STB_AVIF_USE_C89_DAV1D
+    stb_av1_msac_init(&stb_c89_msac, info.av1_data, (unsigned long)info.av1_size, 1);
+    tc.msac = &stb_c89_msac;
+#endif
     tc.qindex_y = fh.base_q_idx;
     tc.qindex_u = fh.base_q_idx;
     tc.qindex_v = fh.base_q_idx;

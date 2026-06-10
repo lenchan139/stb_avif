@@ -1018,25 +1018,25 @@ static void inv_identity32_1d_c(signed int *const c, const ptrdiff_t stride,
 
 const itx_1d_fn stb_av1_tx1d_fns[N_TX_SIZES][N_TX_1D_TYPES] = {
     [TX_4X4] = {
-        [DCT] = inv_dct4_1d_c,
-        [ADST] = inv_adst4_1d_c,
-        [FLIPADST] = inv_flipadst4_1d_c,
-        [IDENTITY] = inv_identity4_1d_c,
+        [DCT] = (itx_1d_fn)inv_dct4_1d_c,
+        [ADST] = (itx_1d_fn)inv_adst4_1d_c,
+        [FLIPADST] = (itx_1d_fn)inv_flipadst4_1d_c,
+        [IDENTITY] = (itx_1d_fn)inv_identity4_1d_c,
     }, [TX_8X8] = {
-        [DCT] = inv_dct8_1d_c,
-        [ADST] = inv_adst8_1d_c,
-        [FLIPADST] = inv_flipadst8_1d_c,
-        [IDENTITY] = inv_identity8_1d_c,
+        [DCT] = (itx_1d_fn)inv_dct8_1d_c,
+        [ADST] = (itx_1d_fn)inv_adst8_1d_c,
+        [FLIPADST] = (itx_1d_fn)inv_flipadst8_1d_c,
+        [IDENTITY] = (itx_1d_fn)inv_identity8_1d_c,
     }, [TX_16X16] = {
-        [DCT] = inv_dct16_1d_c,
-        [ADST] = inv_adst16_1d_c,
-        [FLIPADST] = inv_flipadst16_1d_c,
-        [IDENTITY] = inv_identity16_1d_c,
+        [DCT] = (itx_1d_fn)inv_dct16_1d_c,
+        [ADST] = (itx_1d_fn)inv_adst16_1d_c,
+        [FLIPADST] = (itx_1d_fn)inv_flipadst16_1d_c,
+        [IDENTITY] = (itx_1d_fn)inv_identity16_1d_c,
     }, [TX_32X32] = {
-        [DCT] = inv_dct32_1d_c,
-        [IDENTITY] = inv_identity32_1d_c,
+        [DCT] = (itx_1d_fn)inv_dct32_1d_c,
+        [IDENTITY] = (itx_1d_fn)inv_identity32_1d_c,
     }, [TX_64X64] = {
-        [DCT] = inv_dct64_1d_c,
+        [DCT] = (itx_1d_fn)inv_dct64_1d_c,
     },
 };
 
@@ -1080,3 +1080,6 @@ void stb_av1_inv_wht4_1d_c(signed int *const c, const ptrdiff_t stride) {
     c[3 * stride] = t2 + t1;
 }
 #endif
+
+/* Function pointer table - provided by itx_tmpl implementation */
+extern const itx_1d_fn stb_av1_itx_1d_fns[N_TX_1D_TYPES][5];
