@@ -11,6 +11,7 @@
 #include <stddef.h>  /* size_t */
 
 /* Forward declarations */
+struct StbAv1Msac;
 struct StbAv1TileState;
 struct StbAv1TaskContext;
 
@@ -57,7 +58,7 @@ typedef struct StbAv1Context {
 /* Per-tile state */
 typedef struct StbAv1TileState {
     void *cdf;           /* StbAv1CdfContext * */
-    struct StbAv1Msac msac;  /* Multi-symbol arithmetic coder */
+    struct StbAv1Msac *msac;  /* Multi-symbol arithmetic coder (pointer) */
 
     /* Tiling in 4px units */
     struct {
