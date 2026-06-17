@@ -2467,6 +2467,8 @@ struct stb_av1_frame_header {
     int tx_mode;
     int skip_mode;
     int skip_mode_frame[2];
+    int tile_cols;
+    int tile_rows;
 };
 
 /* Frame types */
@@ -2736,6 +2738,8 @@ static void stb_av1_parse_frame_header(struct stb_avif_reader *r,
 
         tile_cols = 1 << tile_cols_log2;
         tile_rows = 1 << tile_rows_log2;
+        fh->tile_cols = tile_cols;
+        fh->tile_rows = tile_rows;
 
         /* context_update_tile_id */
         context_update_tile_id = 0;
@@ -4794,6 +4798,13 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                             stb_av1_msac_init(&stb_c89_msac,
                                 obu_reader.data + obu_reader.pos,
                                 (unsigned long)(obu_size), 0);
+                            /* Consume TILE_GROUP raw header if multi-tile.
+                               Per AV1 spec section 5.9.2: the tile group header is
+                               only present when NumTilesInFrame > 1. */
+                            if (fh.tile_cols > 1 || fh.tile_rows > 1) {
+                                if (stb_av1_msac_decode_bool_equi(&stb_c89_msac))
+                                    stb_av1_msac_decode_bools(&stb_c89_msac, 10);
+                            }
                         }
 #endif
                     }
