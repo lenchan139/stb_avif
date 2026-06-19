@@ -1618,6 +1618,19 @@ static unsigned stb_av1_msac_decode_hi_tok(struct stb_av1_msac *s, unsigned shor
 }
 
 /* ===== CDF-based Decoder: Helpers, Tables, Block Decoder ===== */
+/* Transform type tables from dav1d tables_c89.c */
+static const unsigned char stb_av1_tx_types_per_set[40] = {
+    9, 0, 3, 1, 2, /* Intra2: IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST */
+    9, 0,10,11, 3, 1, 2, /* Intra1: IDTX, DCT_DCT, V_DCT, H_DCT, ADST_ADST, ADST_DCT, DCT_ADST */
+    9,10,11, 0, 1, 2, 4, 5, 3, 6, 7, 8, /* Inter2 */
+    9,10,11,12,13,14,15, 0, 1, 2, 4, 5, 3, 6, 7, 8, /* Inter1 */
+};
+
+/* UV->tx_type mapping for chroma intra blocks */
+static const unsigned char stb_av1_txtp_from_uvmode[13] = {
+    0, 1, 2, 0, 3, 1, 2, 2, 1, 3, 1, 2, 3,
+};
+
 /* Math helpers (from dav1d intops.h, C89 compatible) */
 static int stb_av1_imin(const int a, const int b) { return a < b ? a : b; }
 static int stb_av1_imax(const int a, const int b) { return a > b ? a : b; }
@@ -3747,6 +3760,15 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
             uvmode_cdf, 14 - !cfl_allowed);
         if (uv_mode >= 14) uv_mode = STB_AV1_DC_PRED;
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
+    }
+
+    /* Derive chroma tx_type from uv_mode (inverse transform already supports
+       DCT_DCT(0), ADST_DCT(1), DCT_ADST(2), ADST_ADST(3) for 2D transforms). */
+    if (!tc->sh->monochrome) {
+        int uv_tx_type = (int)stb_av1_txtp_from_uvmode[uv_mode];
+        /* Override tx_type for chroma: currently always DCT_DCT since the
+           chroma blocks share the same transform call */
+        (void)uv_tx_type;
     }
 
     {
