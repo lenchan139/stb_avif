@@ -1550,20 +1550,24 @@ static unsigned stb_av1_msac_decode_bools(struct stb_av1_msac *s, unsigned n) {
     return v;
 }
 
-static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned short *cdf, unsigned long n_sym_minus_1) {
+/* Multi-symbol arithmetic decode with adaptation.
+   n_symbols: number of symbols (e.g., 4 for 4 symbols).
+   CDF layout: cdf[0..n_symbols-1] = ICDF values, cdf[n_symbols] = count.
+   Matches dav1d convention (n_symbols, not n_sym_minus_1). */
+static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned short *cdf, unsigned long n_symbols) {
     unsigned c = (unsigned)(s->dif >> 48), r = s->rng >> 8;
     unsigned u, v = s->rng, val = 0;
-    unsigned long nsym = n_sym_minus_1 + 1;
     do { u = v; v = r * (cdf[val] >> 6); v >>= 1;
-         v += 4 * ((unsigned)n_sym_minus_1 - val); val++; } while (c < v && val < nsym);
+         v += 4 * ((unsigned)(n_symbols - 1 - val));
+         val++; } while (c < v && val < n_symbols);
     val--;
     stb_av1_msac_norm(s, s->dif - ((unsigned long long)v << 48), u - v);
     if (s->allow_update_cdf) {
-        unsigned cnt = cdf[n_sym_minus_1], rate = 4 + (cnt >> 4) + (n_sym_minus_1 > 2 ? 1u : 0u);
+        unsigned cnt = cdf[n_symbols], rate = 4 + (cnt >> 4) + (n_symbols > 2 ? 1u : 0u);
         unsigned i;
         for (i = 0; i < val; i++) cdf[i] += (unsigned short)((32768 - cdf[i]) >> rate);
-        for (; i < n_sym_minus_1; i++) cdf[i] -= (unsigned short)(cdf[i] >> rate);
-        cdf[n_sym_minus_1] = (unsigned short)(cnt + (cnt < 32 ? 1u : 0u));
+        for (; i < n_symbols; i++) cdf[i] -= (unsigned short)(cdf[i] >> rate);
+        cdf[n_symbols] = (unsigned short)(cnt + (cnt < 32 ? 1u : 0u));
     }
     return val;
 }
@@ -1601,13 +1605,13 @@ static unsigned stb_av1_msac_decode_subexp(struct stb_av1_msac *s, int ref, int 
 }
 
 static unsigned stb_av1_msac_decode_hi_tok(struct stb_av1_msac *s, unsigned short *cdf) {
-    unsigned tok_br = stb_av1_msac_decode_symbol(s, cdf, 3);
+    unsigned tok_br = stb_av1_msac_decode_symbol(s, cdf, 4);
     unsigned tok = 3 + tok_br;
     if (tok_br == 3) {
-        tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 6 + tok_br;
+        tok_br = stb_av1_msac_decode_symbol(s, cdf, 4); tok = 6 + tok_br;
         if (tok_br == 3) {
-            tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 9 + tok_br;
-            if (tok_br == 3) tok = 12 + stb_av1_msac_decode_symbol(s, cdf, 3);
+            tok_br = stb_av1_msac_decode_symbol(s, cdf, 4); tok = 9 + tok_br;
+            if (tok_br == 3) tok = 12 + stb_av1_msac_decode_symbol(s, cdf, 4);
         }
     }
     return tok;
@@ -1916,25 +1920,25 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
 
     if (max_coeffs <= 16) {
         eob_bin_sz = 0;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_16[plane ? 1 : 0][0], 3);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_16[plane ? 1 : 0][0], 4);
     } else if (max_coeffs <= 32) {
         eob_bin_sz = 1;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_32[plane ? 1 : 0][0], 4);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_32[plane ? 1 : 0][0], 5);
     } else if (max_coeffs <= 64) {
         eob_bin_sz = 2;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_64[plane ? 1 : 0][0], 5);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_64[plane ? 1 : 0][0], 6);
     } else if (max_coeffs <= 128) {
         eob_bin_sz = 3;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_128[plane ? 1 : 0][0], 6);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_128[plane ? 1 : 0][0], 7);
     } else if (max_coeffs <= 256) {
         eob_bin_sz = 4;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_256[plane ? 1 : 0][0], 7);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_256[plane ? 1 : 0][0], 8);
     } else if (max_coeffs <= 512) {
         eob_bin_sz = 5;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_512[plane ? 1 : 0], 8);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_512[plane ? 1 : 0], 9);
     } else {
         eob_bin_sz = 6;
-        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_1024[plane ? 1 : 0], 9);
+        eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_1024[plane ? 1 : 0], 10);
     }
     if (eob_bin_val < 0) eob_bin_val = 0;
 
@@ -1973,9 +1977,9 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
                 if (ctx < 0) ctx = 0;
                 if (ctx > 40) ctx = 40;
                 if (i == 0)
-                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.eob_base_tok[tx_sz_idx][plane ? 1 : 0][0], 3);
+                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.eob_base_tok[tx_sz_idx][plane ? 1 : 0][0], 4);
                 else
-                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][ctx], 3);
+                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][ctx], 4);
                 if (tok == 3) {
                     int br_tx = tx_sz_idx > 3 ? 3 : tx_sz_idx;
                     int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
