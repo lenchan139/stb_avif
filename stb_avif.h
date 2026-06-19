@@ -3762,14 +3762,10 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
     }
 
-    /* Derive chroma tx_type from uv_mode (inverse transform already supports
-       DCT_DCT(0), ADST_DCT(1), DCT_ADST(2), ADST_ADST(3) for 2D transforms). */
-    if (!tc->sh->monochrome) {
-        int uv_tx_type = (int)stb_av1_txtp_from_uvmode[uv_mode];
-        /* Override tx_type for chroma: currently always DCT_DCT since the
-           chroma blocks share the same transform call */
-        (void)uv_tx_type;
-    }
+    /* Set luma tx_type based on prediction mode (like dav1d's uv_mode->tx_type).
+       Uses the same mapping as stb_av1_txtp_from_uvmode for consistency.
+       ADST variants improve directional prediction for smooth/non-DC modes. */
+    tx_type = (int)stb_av1_txtp_from_uvmode[pred_mode < 13 ? pred_mode : 0];
 
     {
         unsigned char above_y[64], left_y[64];
