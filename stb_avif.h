@@ -3800,10 +3800,25 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
     }
 
-    /* Select tx_type from prediction mode LUT (avoids MSAC consumption).
-       Matches dav1d's uv_mode→tx_type mapping. For DC_PRED uses DCT_DCT,
-       directional modes use ADST variants for better residual coding. */
-    tx_type = (int)stb_av1_txtp_from_uvmode[pred_mode < 13 ? pred_mode : 0];
+    /* CDF-based tx_type decode from bitstream (all square intra blocks).
+       txtp_intra2: 4-symbol for 16x16+/reduced_tx_set.
+       txtp_intra1: 6-symbol for 4x4/8x8 full set.
+       Both CDF arrays initialized from correct dav1d Q0 defaults. */
+    if (!block_skip && tx_w == tx_h &&
+        (tc->fh->frame_type == STB_AV1_KEY_FRAME || tc->fh->frame_type == STB_AV1_INTRA_ONLY)) {
+        int _ts = 0;
+        while ((1 << (_ts + 2)) < tx_w) _ts++;
+        if (_ts > 4) _ts = 4;
+        if (tc->fh->reduced_tx_set || _ts >= 2) {
+            int _idx = (int)stb_av1_msac_decode_symbol(tc->msac,
+                tc->cdf->txtp_intra2[_ts > 2 ? 2 : _ts][pred_mode], 4);
+            tx_type = (int)stb_av1_tx_types_per_set[_idx + 0];
+        } else {
+            int _idx = (int)stb_av1_msac_decode_symbol(tc->msac,
+                tc->cdf->txtp_intra1[_ts][pred_mode], 6);
+            tx_type = (int)stb_av1_tx_types_per_set[_idx + 5];
+        }
+    }
 
     {
         unsigned char above_y[64], left_y[64];
