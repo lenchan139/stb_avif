@@ -1418,6 +1418,42 @@ static const unsigned short stb_av1_default_coef_br_tok[4][2][21][4] = {
 };
 
 /* Copy default CDF values into context struct, with Q-dependent adjustment */
+/* Correct txtp_intra1 CDF data from dav1d cdf.c (Q0 defaults for all 13 pred modes).
+   Stored as ICDF: ICDF[i] = 32768 - CDF_value[i]. Layout: [2][13][8] (8 entry/ctx: 6 ICDF + 1 count + 1 pad).
+   Replaces the wrong values in the 2258-entry default array. */
+static const unsigned short stb_av1_correct_txtp_intra1[2][13][8] = {
+ { /* TX_4X4 */
+  {31233,24733,23307,20017, 9301, 4943,    0,    0},
+  {32204,29433,23059,21898,14625, 4674,    0,    0},
+  {32096,29521,29092,20786,13353, 9641,    0,    0},
+  {27489,18883,17281,14724, 9241, 2516,    0,    0},
+  {28345,26694,24783,22352, 7075, 3470,    0,    0},
+  {31282,28527,23308,22106,16312, 5074,    0,    0},
+  {32329,29930,29246,26031,14710, 9014,    0,    0},
+  {31578,28535,27913,21098,12487, 8391,    0,    0},
+  {31723,28456,24121,22609,14124, 3433,    0,    0},
+  {32566,29034,28021,25470,15641, 8752,    0,    0},
+  {32321,28456,25949,23884,16758, 8910,    0,    0},
+  {32491,28399,27513,23863,16303,10497,    0,    0},
+  {29359,27332,22169,17169,13081, 8728,    0,    0},
+ },
+ { /* TX_8X8 */
+  {30898,19026,18238,16270, 8998, 5070,    0,    0},
+  {32442,23972,18136,17689,13496, 5282,    0,    0},
+  {32284,25192,25056,18325,13609,10177,    0,    0},
+  {31642,17428,16873,15745,11872, 2489,    0,    0},
+  {32113,27914,27519,26855,10669, 5630,    0,    0},
+  {31469,26310,23883,23478,17917, 7271,    0,    0},
+  {32457,27473,27216,25883,16661,10096,    0,    0},
+  {31885,24709,24498,21510,15479,10955,    0,    0},
+  {32027,25188,23450,22423,16080, 3722,    0,    0},
+  {32658,25362,24853,23573,16727, 9439,    0,    0},
+  {32405,24794,23411,22095,17139, 8294,    0,    0},
+  {32615,25121,24656,22832,17461,12772,    0,    0},
+  {29257,26436,21603,17433,13445, 9174,    0,    0},
+ },
+};
+
 void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
     unsigned short *dst = (unsigned short *)cdf;
     int i, j, k, m;
@@ -1427,6 +1463,8 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
     /* Copy default CDF data for mode/MV/kfym fields */
     for (i = 0; i < 2258; i++)
         dst[i] = stb_av1_cdf_default_data[i];
+    /* Override txtp_intra1 with correct dav1d Q0 data */
+    memcpy(cdf->txtp_intra1, stb_av1_correct_txtp_intra1, sizeof(stb_av1_correct_txtp_intra1));
     /* Initialize kfym from dav1d defaults (NOT included in 2258-entry data) */
     for (i = 0; i < 5; i++) for (j = 0; j < 5; j++) for (k = 0; k < 16; k++)
         cdf->kfym[i][j][k] = stb_av1_default_kfym[i][j][k];
@@ -3762,9 +3800,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
     }
 
-    /* Set luma tx_type based on prediction mode (like dav1d's uv_mode->tx_type).
-       Uses the same mapping as stb_av1_txtp_from_uvmode for consistency.
-       ADST variants improve directional prediction for smooth/non-DC modes. */
+    /* Select tx_type from prediction mode LUT (avoids MSAC consumption).
+       Matches dav1d's uv_mode→tx_type mapping. For DC_PRED uses DCT_DCT,
+       directional modes use ADST variants for better residual coding. */
     tx_type = (int)stb_av1_txtp_from_uvmode[pred_mode < 13 ? pred_mode : 0];
 
     {
