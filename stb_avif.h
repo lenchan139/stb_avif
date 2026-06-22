@@ -3800,28 +3800,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
     }
 
-    /* CDF-based tx_type decode from bitstream. Local CDF copy ensures
-       proper count=0 for adaptation (avoids bad count in 2258-entry). */
-    { int _ts, _ns, _off, _idx;
-      unsigned short _lc[10];
-      _ts = 0; while ((1 << (_ts + 2)) < tx_w) _ts++;
-      if (!block_skip && tx_w == tx_h && _ts <= 4 &&
-          (tc->fh->frame_type == STB_AV1_KEY_FRAME || tc->fh->frame_type == STB_AV1_INTRA_ONLY)) {
-        unsigned short *_s;
-        if (_ts >= 2 || tc->fh->reduced_tx_set) {
-            _s = tc->cdf->txtp_intra2[_ts > 2 ? 2 : _ts][pred_mode];
-            _lc[0] = _s[0]; _lc[1] = _s[1]; _lc[2] = _s[2]; _lc[3] = _s[3]; _lc[4] = 0;
-            _ns = 4; _off = 0;
-        } else {
-            _s = tc->cdf->txtp_intra1[_ts][pred_mode];
-            _lc[0] = _s[0]; _lc[1] = _s[1]; _lc[2] = _s[2]; _lc[3] = _s[3];
-            _lc[4] = _s[4]; _lc[5] = _s[5]; _lc[6] = 0;
-            _ns = 6; _off = 5;
-        }
-        _idx = (int)stb_av1_msac_decode_symbol(tc->msac, _lc, (unsigned long)_ns);
-        tx_type = (int)stb_av1_tx_types_per_set[_idx + _off];
-      }
-    }
+    tx_type = (int)stb_av1_txtp_from_uvmode[pred_mode < 13 ? pred_mode : 0];
 
     {
         unsigned char above_y[64], left_y[64];
