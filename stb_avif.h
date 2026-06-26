@@ -3470,6 +3470,24 @@ static void stb_av1_inv_transform_2d(int *block, int w, int h, int tx_type)
      topleft - pixel at (-1,-1)
      bit_depth - pixel bit depth
 */
+static void stb_av1_filter_intra_edge(unsigned char *edge, int sz,
+                                       int strong, int filter_bit) {
+    int i;
+    if (!filter_bit) return;
+    if (strong) {
+        int f[256];
+        f[0] = (3*edge[0] + 2*edge[1] + edge[2] + 3) / 6;
+        for (i = 1; i < sz - 1; i++)
+            f[i] = (edge[i-1] + 2*edge[i] + edge[i+1] + 2) / 4;
+        f[sz-1] = (edge[sz-2] + 2*edge[sz-1] + edge[sz+2] + 2) / 4;
+        for (i = 0; i < sz; i++) edge[i] = (unsigned char)f[i];
+    } else {
+        for (i = 1; i < sz - 1; i++) {
+            edge[i] = (unsigned char)((edge[i-1] + 2*edge[i] + edge[i+1] + 2) / 4);
+        }
+    }
+}
+
 static void stb_av1_intra_predict(unsigned char *dst, int stride,
                                    int w, int h, int mode,
                                    const unsigned char *above,
@@ -4048,6 +4066,10 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
             left_y[i] = abs_c > 0 ? tc->plane_y[(abs_r+i)*tc->stride_y+abs_c-1] : (unsigned char)127;
         topleft_y = (abs_r > 0 && abs_c > 0)
             ? tc->plane_y[(abs_r-1)*tc->stride_y+abs_c-1] : (unsigned char)127;
+        if (tc->sh->enable_intra_edge_filter && pred_mode > 0 && pred_mode < 9) {
+            stb_av1_filter_intra_edge(above_y, bw, 0, 1);
+            stb_av1_filter_intra_edge(left_y, bh, 0, 1);
+        }
         stb_av1_intra_predict(pred_buf, bw, bw, bh, pred_mode,
                                above_y, left_y, topleft_y, tc->bit_depth);
         if (!block_skip)
