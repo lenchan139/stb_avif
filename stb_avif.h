@@ -1803,6 +1803,42 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
     memcpy(cdf->coef.base_tok, stb_av1_default_coef_base_tok, sizeof(stb_av1_default_coef_base_tok));
     memcpy(cdf->coef.dc_sign, stb_av1_default_coef_dc_sign, sizeof(stb_av1_default_coef_dc_sign));
     memcpy(cdf->coef.br_tok, stb_av1_default_coef_br_tok, sizeof(stb_av1_default_coef_br_tok));
+    /* Fix count entries: the memcpys above copied ICDF values into count positions.
+       Zero them out so adaptation works correctly. */
+    {
+        int pl, ctx, i;
+        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 3; ctx++) cdf->coef.dc_sign[pl][ctx][1] = 0;
+        /* br_tok: [4][2][21][5] - count at [pl][ctx][i][4] */
+        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 21; ctx++) for (i = 0; i < 4; i++)
+            cdf->coef.br_tok[i][pl][ctx][4] = 0;
+        /* base_tok: [5][2][41][5] - count at [tx][pl][ctx][4] */
+        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 41; ctx++)
+            cdf->coef.base_tok[i][pl][ctx][4] = 0;
+        /* eob_base_tok: [5][2][4][5] - count at [tx][pl][ctx][4] */
+        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 4; ctx++)
+            cdf->coef.eob_base_tok[i][pl][ctx][4] = 0;
+        /* eob_bin_16/32/64/128: [2][2][8] - count at [pl][ctx][n_symbols] */
+        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 2; ctx++) {
+            cdf->coef.eob_bin_16[pl][ctx][4] = 0;  /* n=4 */
+            cdf->coef.eob_bin_32[pl][ctx][5] = 0;  /* n=5 */
+            cdf->coef.eob_bin_64[pl][ctx][6] = 0;  /* n=6 */
+            cdf->coef.eob_bin_128[pl][ctx][7] = 0; /* n=7 */
+        }
+        /* eob_bin_256: [2][2][16] - count at [pl][ctx][8] */
+        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 2; ctx++)
+            cdf->coef.eob_bin_256[pl][ctx][8] = 0;
+        /* eob_bin_512/1024: [2][16] - count at [pl][n_symbols] */
+        for (pl = 0; pl < 2; pl++) {
+            cdf->coef.eob_bin_512[pl][9] = 0;   /* n=9 */
+            cdf->coef.eob_bin_1024[pl][10] = 0; /* n=10 */
+        }
+        /* eob_hi_bit: [5][2][9][2] - binary, count at [tx][pl][ctx][1] */
+        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 9; ctx++)
+            cdf->coef.eob_hi_bit[i][pl][ctx][1] = 0;
+        /* skip: [5][13][2] - binary, count at [tx][ctx][1] */
+        for (i = 0; i < 5; i++) for (ctx = 0; ctx < 13; ctx++)
+            cdf->coef.skip[i][ctx][1] = 0;
+    }
     /* Initialize kfym CDFs for intra Y mode decoding (ICDF format from dav1d) */
     {
         static const unsigned short kfym_default[5][5][13] = {
@@ -1914,11 +1950,16 @@ static unsigned stb_av1_msac_decode_bools(struct stb_av1_msac *s, unsigned n) {
    Matches dav1d convention (n_symbols, not n_sym_minus_1). */
 static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned short *cdf, unsigned long n_symbols) {
     unsigned c = (unsigned)(s->dif >> 48), r = s->rng >> 8;
-    unsigned u, v = s->rng, val = 0;
-    do { u = v; v = r * (cdf[val] >> 6); v >>= 1;
-         v += 4 * ((unsigned)(n_symbols - 1 - val));
-         val++; } while (c < v && val < n_symbols);
-    val--;
+    unsigned u, v = s->rng, val = -1;
+
+    do {
+        val++;
+        u = v;
+        v = r * (cdf[val] >> 6);
+        v >>= 1;
+        v += 4 * ((unsigned)(n_symbols - val));
+    } while (c < v);
+
     stb_av1_msac_norm(s, s->dif - ((unsigned long long)v << 48), u - v);
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[n_symbols], rate = 4 + (cnt >> 4) + (n_symbols > 2 ? 1u : 0u);
@@ -5768,6 +5809,13 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                                 if (stb_av1_msac_decode_bool_equi(&stb_c89_msac))
                                     stb_av1_msac_decode_bools(&stb_c89_msac, 10);
                             }
+                            /* Consume TILE_GROUP raw header if multi-tile.
+                               Per AV1 spec section 5.9.2: the tile group header is
+                               only present when NumTilesInFrame > 1. */
+                            if (fh.tile_cols > 1 || fh.tile_rows > 1) {
+                                if (stb_av1_msac_decode_bool_equi(&stb_c89_msac))
+                                    stb_av1_msac_decode_bools(&stb_c89_msac, 10);
+                            }
                         }
 #endif
                     }
@@ -5810,6 +5858,9 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
 
     /* If we didn't find a frame header, use defaults for still picture */
     if (!fh.frame_width || !fh.frame_height) {
+        fprintf(stderr, "[DBG] frame dims fallback: fw=%d fh=%d sh_mfw=%d sh_mfh=%d info=%dx%d\n",
+            fh.frame_width, fh.frame_height, sh.max_frame_width, sh.max_frame_height,
+            info.width, info.height);
         fh.frame_width = (int)sh.max_frame_width;
         fh.frame_height = (int)sh.max_frame_height;
         fh.frame_type = STB_AV1_KEY_FRAME;
