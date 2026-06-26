@@ -1,58 +1,53 @@
 #define STB_AVIF_USE_C89_DAV1D
 #define STB_AVIF_IMPLEMENTATION
 #include "stb_avif.h"
-
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
-int main(void)
-{
-    const char *filename = "example_avif/fox.profile0.8bpc.yuv420.avif";
-    FILE *f = fopen(filename, "rb");
-    if (!f) { fprintf(stderr, "Cannot open %s\n", filename); return 1; }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+int main(void) {
+    const char *fn = "example_avif/fox.profile0.8bpc.yuv420.avif";
+    FILE *f = fopen(fn, "rb"); if (!f) return 1;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     unsigned char *data = (unsigned char *)malloc((size_t)sz);
-    fread(data, 1, (size_t)sz, f);
-    fclose(f);
-
+    fread(data, 1, (size_t)sz, f); fclose(f);
     int w, h, ch;
     unsigned char *img = stb_avif_load_from_memory(data, (size_t)sz, &w, &h, &ch, 4);
-    if (!img) { fprintf(stderr, "decode failed\n"); return 1; }
-    fprintf(stderr, "Decoded: %dx%d ch=%d\n", w, h, ch);
+    if (!img) { fprintf(stderr, "FAIL: %s\n", stb_avif_failure_reason()); return 1; }
+    fprintf(stderr, "C89: %dx%d ch=%d\n", w, h, ch);
 
-    /* first row Y from RGBA (R=G=B=Y) */
-    int x;
-    for (x = 0; x < 32 && x < w; x++)
-        printf("%d ", img[x*4]);
-    printf("\n");
+    /* Read dav1d reference PPM (RGB) */
+    FILE *fd = fopen("output_ppm_dav1d/fox.profile0.8bpc.yuv420.ppm", "rb");
+    if (!fd) { fprintf(stderr, "no ref\n"); return 1; }
+    char hdr[256]; fgets(hdr,256,fd); fgets(hdr,256,fd);
+    sscanf(hdr, "%d %d", &w, &h); fgets(hdr,256,fd);
+    unsigned char *ref_rgb = (unsigned char *)malloc((size_t)(w*h*3));
+    fread(ref_rgb, 1, (size_t)(w*h*3), fd); fclose(fd);
 
-    /* dump raw planes */
-    /* The planes are stored as RGBA interleaved, but we can extract YUV if available */
-    /* For now just check if first 100 pixels are all grey */
-    int grey = 1;
-    for (x = 0; x < w*h; x++)
-        if (img[x*4] != img[x*4+1] || img[x*4+1] != img[x*4+2]) { grey = 0; break; }
-    fprintf(stderr, "All grey: %s\n", grey ? "YES" : "NO");
-    if (!grey) {
-        /* find first non-grey pixel */
-        for (x = 0; x < w*h; x++)
-            if (img[x*4] != img[x*4+1] || img[x*4+1] != img[x*4+2])
-                break;
-        fprintf(stderr, "First non-grey at pixel %d: R=%d G=%d B=%d\n",
-                x, img[x*4], img[x*4+1], img[x*4+2]);
+    /* Compare Y channel (luma): C89 RGBA[0] vs BT.601 Y from dav1d RGB */
+    int i, y_diff = 0, y_max = 0, y_bad = 0;
+    long long y_ssd = 0;
+    for (i = 0; i < w * h; i++) {
+        int cy = img[i*4 + 0]; /* C89: R = Y (since we decode to RGBA) */
+        int dy = (77*ref_rgb[i*3] + 150*ref_rgb[i*3+1] + 29*ref_rgb[i*3+2] + 128) / 256;
+        int d = cy - dy; if (d < 0) d = -d;
+        if (d) y_bad++;
+        if (d > y_max) y_max = d;
+        y_ssd += d * d;
+        /* Print first 48 Y values */
+        if (i < 48) fprintf(stderr, "%3d%c", cy, i%12==11?'\n':' ');
     }
+    fprintf(stderr, "\nC89 Y: %d/%d diff (%.1f%%), max=%d, MSE=%.1f\n",
+        y_bad, w*h, 100.0*y_bad/(w*h), y_max, (double)y_ssd/(w*h));
 
-    /* Check unique values in R channel */
-    int hist[256] = {0};
-    for (x = 0; x < w*h; x++)
-        if (img[x*4] < 256) hist[img[x*4]]++;
-    int nuniq = 0;
-    for (x = 0; x < 256; x++) if (hist[x]) nuniq++;
-    fprintf(stderr, "Unique R values: %d\n", nuniq);
+    /* Compare dav1d Y (first 48) */
+    for (i = 0; i < 48; i++) {
+        int dy = (77*ref_rgb[i*3] + 150*ref_rgb[i*3+1] + 29*ref_rgb[i*3+2] + 128) / 256;
+        fprintf(stderr, "%3d%c", dy, i%12==11?'\n':' ');
+    }
+    fprintf(stderr, "\nDAV Y: reference Y values above\n");
 
-    free(img);
-    free(data);
-    return 0;
+    free(img); free(data); free(ref_rgb);
+    return y_max < 50 ? 0 : 1;
 }

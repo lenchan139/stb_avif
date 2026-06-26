@@ -4477,13 +4477,35 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
             int val = coeffs[i];
             if (val) {
                 int deq = (i == 0) ? dequant_dc : dequant_ac;
-                dq_coeffs[sy * tx_w + sx] = val * deq;
+                /* AV1 dequant: (deq * val) >> dq_shift
+                   dq_shift = imax(0, lw+lh-2) where lw=log2(tx_w)-2, lh=log2(tx_h)-2 */
+                {
+                    int lw = 0, lh = 0, dq_shift;
+                    while ((1 << (lw + 2)) < tx_w) lw++;
+                    while ((1 << (lh + 2)) < tx_h) lh++;
+                    if (lw + lh > 2) dq_shift = lw + lh - 2; else dq_shift = 0;
+                    dq_coeffs[sy * tx_w + sx] = (val * deq) >> dq_shift;
+                }
             }
         }
     }
 
     /* Apply inverse transform */
     stb_av1_inv_transform_2d(dq_coeffs, tx_w, tx_h, tx_type);
+
+    /* Apply size-dependent shift (inv_shift = imin(lw,1) + imin(lh,1)).
+       This matches dav1d's inv_txfm_add_c behavior after the 2D transform. */
+    {
+        int lw = 0, lh = 0, inv_shift;
+        while ((1 << (lw + 2)) < tx_w) lw++;
+        while ((1 << (lh + 2)) < tx_h) lh++;
+        inv_shift = (lw > 0 ? 1 : 0) + (lh > 0 ? 1 : 0);
+        if (inv_shift > 0) {
+            int rnd = 1 << (inv_shift - 1);
+            for (i = 0; i < max_coeffs; i++)
+                dq_coeffs[i] = (dq_coeffs[i] + rnd) >> inv_shift;
+        }
+    }
 
     /* Reconstruct: pred + residual, clamp to [0, 255] */
     for (i = 0; i < tx_h; i++) {
