@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "thread_id": "main",
+  "goal_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "objective": "Port remaining dav1d C89 files into stb_avif.h to fix the internal AV1 decoder.",
+  "status": "active",
+  "created_at": "2026-06-26T00:00:00Z",
+  "updated_at": "2026-06-26T03:00:00Z",
+  "history": [
+    {
+      "turn": 1,
+      "ts": "2026-06-26T01:00:00Z",
+      "actions": [
+        "Replaced floating-point cos/sin DCT/ADST transforms with dav1d fixed-point integer transforms (DCT 4/8/16/32, ADST 4/8/16, FLIPADST 4/8/16, Identity 4/8/16/32)",
+        "Added proper FLIPADST support (was dead-code void casts)",
+        "Added H_DCT, V_DCT, H_ADST, V_ADST, H_FLIPADST, V_FLIPADST, IDTX transform types",
+        "Fixed compilation: moved stb_av1_iclip/scan tables to shared scope",
+        "Both C89/dav1d builds compile with 0 errors"
+      ],
+      "outcome": "Fixed-point integer transforms integrated from dav1d. Both builds compile clean."
+    },
+    {
+      "turn": 2,
+      "ts": "2026-06-26T02:00:00Z",
+      "actions": [
+        "Replaced simplified 8-bit dequant tables with proper stb_av1_dq_tbl[3][256][2] (8/10/12-bit)",
+        "Updated stb_av1_get_dequant() to use bit_depth index properly",
+        "Both C89/dav1d builds compile with 0 errors"
+      ],
+      "outcome": "Proper dequant tables from dav1d integrated."
+    },
+    {
+      "turn": 3,
+      "ts": "2026-06-26T03:00:00Z",
+      "actions": [
+        "Instrumented decoder to debug pixel output issues",
+        "Confirmed MSAC correctly initialized (FRAME_HEADER + TILE_GROUP split OBU structure)",
+        "Confirmed EOB values are non-zero (coefficients ARE decoded, e.g. EOB=57 for 16x16 block)",
+        "Confirmed OBU parsing, partition tree, intra prediction all work (structured output produced)",
+        "Confirmed both C89 and dav1d builds compile with 0 errors",
+        "Created pixel comparison test (test_c89_ppm.c) measuring PSNR against dav1d reference",
+        "Diagnosed remaining root cause: dequant math doesn't match dav1d pipeline"
+      ],
+      "outcome": "The C89 decoder infrastructure works (MSAC, partition tree, CDF coefficient decode all function). The pixel output diverges from dav1d because of the dequant → transform → reconstruction pipeline. The current code does 'val * deq' without the AV1-spec dequant shift '>> (bit_depth-1)', and the inverse transform doesn't apply size-dependent shifts. Previous attempts to add these shifts over-corrected (all coefficients became 0). The correct dequant formula requires careful integration matching how dav1d's recon_tmpl.c processes coefficients."
+    }
+  ],
+  "blockers": [
+    "Dequant misses '>> (bit_depth-1)' shift — adding it causes all small coefficients to round to 0, suggesting CDF token values may be incorrect magnitude",
+    "Transform misses size-dependent shift — difference between small-tx (4x4) and large-tx (32x32) output scaling",
+    "Chroma U/V blocks bypass reconstruct_block entirely — raw coeff tokens added to prediction pixels without dequant or inverse transform",
+    "CDF count entries get overwritten by memcpy (ICDF values written to count positions, corrupting adaptation rate)"
+  ]
+}
