@@ -5,55 +5,90 @@
   "objective": "Port dav1d to C89 — implement all remaining components until the internal AV1 decoder works correctly.",
   "status": "active",
   "created_at": "2026-06-26T00:00:00Z",
-  "updated_at": "2026-06-27T00:00:00Z",
+  "updated_at": "2026-07-01T12:41:10Z",
   "history": [
     {
       "turn": 1,
       "ts": "2026-06-26T01:00:00Z",
-      "actions": [
-        "Ported itx_1d_c89.c + itx_tmpl_c89.c: fixed-point integer transforms (DCT/ADST/FLIPADST/Identity 4×4-32×32)",
-        "Fixed stb_av1_iclip/scan table scope issues"
-      ],
-      "outcome": "Fixed-point integer transforms integrated. Both C89/dav1d builds compile with 0 errors."
+      "actions": ["Ported itx_1d_c89.c + itx_tmpl_c89.c", "Fixed stb_av1_iclip/scan table scope"],
+      "outcome": "Fixed-point integer transforms integrated."
     },
     {
       "turn": 2,
       "ts": "2026-06-26T02:00:00Z",
-      "actions": [
-        "Ported dequant_tables_c89.c: stb_av1_dq_tbl[3][256][2] with 8/10/12-bit support",
-        "Completed truncated 12-bit table"
-      ],
+      "actions": ["Ported dequant_tables_c89.c"],
       "outcome": "Proper dequant tables from dav1d integrated."
     },
     {
       "turn": 3,
       "ts": "2026-06-26T03:00:00Z",
-      "actions": [
-        "Added AV1 dequant shift: dq_shift = imax(0, lw+lh-2)",
-        "Added transform shift: inv_shift = imin(lw,1)+imin(lh,1)",
-        "Fixed CDF count entries: zeroed after memcpy"
-      ],
-      "outcome": "Dequant/transform shifts per dav1d recon_tmpl.c. CDF counts fixed."
+      "actions": ["Added AV1 dequant/transform shifts", "Fixed CDF count entries"],
+      "outcome": "Dequant/transform shifts correct."
     },
     {
       "turn": 4,
       "ts": "2026-06-26T22:00:00Z",
+      "actions": ["Fixed MSAC decode_symbol val=-1 loop and penalty"],
+      "outcome": "MSAC matches dav1d. PSNR ~10.4dB."
+    },
+    {
+      "turn": 5,
+      "ts": "2026-06-26T18:21:14Z",
+      "actions": ["Refactored reconstruct_block to accept qindex", "Fixed UV reconstruction"],
+      "outcome": "PSNR 10.47dB."
+    },
+    {
+      "turn": 6,
+      "ts": "2026-06-28T17:15:51Z",
       "actions": [
-        "Fixed MSAC decode_symbol: val=-1 (was val=0) loop structure matching dav1d",
-        "Fixed MSAC decode_symbol: penalty n_symbols-val (was n_symbols-1-val)",
-        "Verified norm/refill/init match dav1d msac.c exactly",
-        "Both C89/dav1d builds compile with 0 errors, PSNR ~10.4dB"
+        "ROOT CAUSE: frame header read through MSAC instead of raw bits",
+        "Added StbAv1GetBits raw bit reader",
+        "Wrote getbits-based frame+seq header parsers",
+        "Fixed superblock size to use sh.sb128",
+        "Fixed reconstruct_block to use static buffer",
+        "Added av1C save/restore around seq header OBU parse"
       ],
-      "outcome": "MSAC decode_symbol now matches dav1d reference. PSNR unchanged at ~10.4dB."
+      "outcome": "PSNR 10.47 -> 11.35 dB."
+    },
+    {
+      "turn": 7,
+      "ts": "2026-06-30T16:34:17Z",
+      "actions": [
+        "Fixed coefficient +1 bug", "Fixed scan order: eob→0",
+        "Fixed eob_base_tok: n_symbols=2", "Fixed base_tok: n_symbols=3",
+        "Fixed br_tok/hi_tok: n_symbols=3", "Fixed DC decoded separately",
+        "Fixed levels pointer type", "Fixed CDF count positions",
+        "Fixed inverse transform intermediate shift", "Fixed final shift (+8)>>4"
+      ],
+      "outcome": "PSNR 11.35 -> 11.50 dB."
+    },
+    {
+      "turn": 8,
+      "ts": "2026-07-01T12:41:10Z",
+      "actions": [
+        "Added dav1d-compatible intra transform type decoding from txtp_intra1/txtp_intra2 CDFs (was hardcoded via stb_av1_txtp_from_uvmode)",
+        "Fixed corrupted txtp_intra2 CDF data in 2258-entry flat array — added stb_av1_correct_txtp_intra2 override table",
+        "Added av1C save/restore for color_range and matrix_coefficients",
+        "ROOT CAUSE IDENTIFIED: coefficient CDFs use qcat=0 but fox needs qcat=2 (qidx=72 => qcat = (72>20)+(72>60)+(72>120) = 2)",
+        "Extracted qcat=2 ICDF values from dav1d_ref/cdf.c (2133 values across 13 coefficient CDF tables)"
+      ],
+      "outcome": "PSNR 11.50 -> 11.44 dB. The qcat CDF mismatch is the single dominant remaining error. qcat=0 CDFs at qcat=2 quantization cause the MSAC to decode wrong symbols, corrupting every block."
     }
   ],
-  "total_integrated": "~9,000 lines across 9 components",
-  "remaining_not_integrated": [
-    "qm_c89.c (1,656) — quantization matrices, needs dav1d DSP framework",
-    "cdef_apply_tmpl_c89.c (308) — directional CDEF filter, needs DSP framework",
-    "looprestoration_tmpl_c89.c (1,384) — Wiener/SGR filters, needs DSP framework",
-    "lf_mask_c89.c (468) — deblocking filter masks, needs DSP framework",
-    "recon_tmpl_c89.h (103) — reconstruction template",
-    "decode_c89.c (630) — full decoder logic"
+  "blockers": [
+    "qcat CDF mismatch: need to restructure coefficient CDF tables to support 4 qcats (0-3) and select at init via qcat = (qidx>20)+(qidx>60)+(qidx>120). ~22KB of new table data needed, extracted from dav1d and ready to add.",
+    "UV plane reconstruction wrong — secondary, may be fixed by qcat correction",
+    "Angle delta decoding not implemented for directional intra modes",
+    "TX size decoding not implemented when txfm_mode=SWITCHABLE",
+    "Skip context computation doesn't match dav1d's get_skip_ctx"
+  ]
+}
+  ],
+  "blockers": [
+    "Coefficient CDFs use qcat=0 but fox needs qcat=2. Need to extract qcat=1 and qcat=2 data from dav1d's cdf.c and add qcat-dependent selection (~11000 ushorts of data needed). This is the dominant remaining error.",
+    "UV plane reconstruction still wrong — may be related to qcat issue or separate UV CDF problem",
+    "Angle delta decoding not implemented for directional intra modes",
+    "TX size decoding not implemented when txfm_mode=SWITCHABLE",
+    "Skip context computation doesn't match dav1d's get_skip_ctx"
   ]
 }

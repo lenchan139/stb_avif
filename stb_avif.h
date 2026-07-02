@@ -1774,6 +1774,56 @@ static const unsigned short stb_av1_correct_txtp_intra1[2][13][8] = {
  },
 };
 
+/* Corrected txtp_intra2 CDF data from dav1d cdf.c.
+   [3][13][8]: 16x16 uniform, 32x32 per-mode, 64x64 per-mode. */
+static const unsigned short stb_av1_correct_txtp_intra2[3][13][8] = {
+ { /* TX_16X16 (uniform CDF4(6554,13107,19661,26214)) */
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+  {26214,19661,13107, 6554,    0,    0,    0,    0},
+ },
+ { /* TX_32X32 (per-mode CDF4 from dav1d) */
+  {31641,19954, 9996, 5285,    0,    0,    0,    0}, /* CDF4(1127,12814,22772,27483) */
+  {32623,26007,20788, 6101,    0,    0,    0,    0}, /* CDF4(145,6761,11980,26667) */
+  {32406,26881,21090,16043,    0,    0,    0,    0}, /* CDF4(362,5887,11678,16725) */
+  {32383,17555,14181, 2075,    0,    0,    0,    0}, /* CDF4(385,15213,18587,30693) */
+  {32743,29854, 9634, 4865,    0,    0,    0,    0}, /* CDF4(25,2914,23134,27903) */
+  {32708,28298,21019, 8777,    0,    0,    0,    0}, /* CDF4(60,4470,11749,23991) */
+  {32731,29436,18257,11320,    0,    0,    0,    0}, /* CDF4(37,3332,14511,21448) */
+  {32611,26448,19732,15329,    0,    0,    0,    0}, /* CDF4(157,6320,13036,17439) */
+  {32649,26049,19862, 3372,    0,    0,    0,    0}, /* CDF4(119,6719,12906,29396) */
+  {32721,27231,20192,11269,    0,    0,    0,    0}, /* CDF4(47,5537,12576,21499) */
+  {32499,26692,21510, 9653,    0,    0,    0,    0}, /* CDF4(269,6076,11258,23115) */
+  {32685,27153,20767,15540,    0,    0,    0,    0}, /* CDF4(83,5615,12001,17228) */
+  {30800,27212,20745,14221,    0,    0,    0,    0}, /* CDF4(1968,5556,12023,18547) */
+ },
+ { /* TX_64X64 (per-mode CDF4 from dav1d) */
+  {30922,25749,21950,14391,    0,    0,    0,    0}, /* CDF4(1846,7019,10818,18377) */
+  {32470,16192,10323, 6508,    0,    0,    0,    0}, /* CDF4(298,16576,22445,26260) */
+  {32598,19701, 7473, 4466,    0,    0,    0,    0}, /* CDF4(170,13067,25295,28302) */
+  {32697,19530,15863, 8385,    0,    0,    0,    0}, /* CDF4(71,13238,16905,24383) */
+  {32743,28304,13159, 9056,    0,    0,    0,    0}, /* CDF4(25,4464,19609,23712) */
+  {32741,27100,16277, 9192,    0,    0,    0,    0}, /* CDF4(27,5668,16491,23576) */
+  {32745,27781,17231,12161,    0,    0,    0,    0}, /* CDF4(23,4987,15537,20607) */
+  {32702,19890,13497, 9740,    0,    0,    0,    0}, /* CDF4(66,12878,19271,23028) */
+  {32732,26269,16713, 7302,    0,    0,    0,    0}, /* CDF4(36,6499,16055,25466) */
+  {32733,21343,15543, 9664,    0,    0,    0,    0}, /* CDF4(35,11425,17225,23104) */
+  {32710,20966,15674, 9926,    0,    0,    0,    0}, /* CDF4(58,11802,17094,22842) */
+  {32730,23112,14865, 8442,    0,    0,    0,    0}, /* CDF4(38,9656,17903,24326) */
+  {31634,23305,16522, 9933,    0,    0,    0,    0}, /* CDF4(1134,9463,16246,22835) */
+ },
+};
+
 void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
     unsigned short *dst = (unsigned short *)cdf;
     int i, j, k, m;
@@ -1785,6 +1835,8 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
         dst[i] = stb_av1_cdf_default_data[i];
     /* Override txtp_intra1 with correct dav1d Q0 data */
     memcpy(cdf->txtp_intra1, stb_av1_correct_txtp_intra1, sizeof(stb_av1_correct_txtp_intra1));
+    /* Override txtp_intra2 with correct dav1d Q0 data */
+    memcpy(cdf->txtp_intra2, stb_av1_correct_txtp_intra2, sizeof(stb_av1_correct_txtp_intra2));
     /* Initialize kfym from dav1d defaults (NOT included in 2258-entry data) */
     for (i = 0; i < 5; i++) for (j = 0; j < 5; j++) for (k = 0; k < 16; k++)
         cdf->kfym[i][j][k] = stb_av1_default_kfym[i][j][k];
@@ -1803,20 +1855,29 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
     memcpy(cdf->coef.base_tok, stb_av1_default_coef_base_tok, sizeof(stb_av1_default_coef_base_tok));
     memcpy(cdf->coef.dc_sign, stb_av1_default_coef_dc_sign, sizeof(stb_av1_default_coef_dc_sign));
     memcpy(cdf->coef.br_tok, stb_av1_default_coef_br_tok, sizeof(stb_av1_default_coef_br_tok));
-    /* Fix count entries: the memcpys above copied ICDF values into count positions.
-       Zero them out so adaptation works correctly. */
+    /* Fix count entries: zero out positions used as adaptation counts.
+       dav1d uses n_symbols=2 for eob_base_tok (count at [2]),
+       n_symbols=3 for base_tok (count at [3]),
+       n_symbols=3 for br_tok (count at [3]). */
     {
         int pl, ctx, i;
         for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 3; ctx++) cdf->coef.dc_sign[pl][ctx][1] = 0;
-        /* br_tok: [4][2][21][5] - count at [pl][ctx][i][4] */
-        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 21; ctx++) for (i = 0; i < 4; i++)
-            cdf->coef.br_tok[i][pl][ctx][4] = 0;
-        /* base_tok: [5][2][41][5] - count at [tx][pl][ctx][4] */
-        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 41; ctx++)
-            cdf->coef.base_tok[i][pl][ctx][4] = 0;
-        /* eob_base_tok: [5][2][4][5] - count at [tx][pl][ctx][4] */
-        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 4; ctx++)
-            cdf->coef.eob_base_tok[i][pl][ctx][4] = 0;
+        /* br_tok: [4][2][21][5] - count at [3] for n_symbols=3 */
+        for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 21; ctx++) for (i = 0; i < 4; i++) {
+            cdf->coef.br_tok[i][pl][ctx][3] = 0; /* count for n_symbols=3 */
+            cdf->coef.br_tok[i][pl][ctx][4] = 0; /* unused */
+        }
+        /* base_tok: [5][2][41][5] - count at [3] for n_symbols=3 */
+        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 41; ctx++) {
+            cdf->coef.base_tok[i][pl][ctx][3] = 0; /* count for n_symbols=3 */
+            cdf->coef.base_tok[i][pl][ctx][4] = 0; /* unused */
+        }
+        /* eob_base_tok: [5][2][4][5] - count at [2] for n_symbols=2 */
+        for (i = 0; i < 5; i++) for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 4; ctx++) {
+            cdf->coef.eob_base_tok[i][pl][ctx][2] = 0; /* count for n_symbols=2 */
+            cdf->coef.eob_base_tok[i][pl][ctx][3] = 0; /* unused */
+            cdf->coef.eob_base_tok[i][pl][ctx][4] = 0; /* unused */
+        }
         /* eob_bin_16/32/64/128: [2][2][8] - count at [pl][ctx][n_symbols] */
         for (pl = 0; pl < 2; pl++) for (ctx = 0; ctx < 2; ctx++) {
             cdf->coef.eob_bin_16[pl][ctx][4] = 0;  /* n=4 */
@@ -1838,6 +1899,12 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
         /* skip: [5][13][2] - binary, count at [tx][ctx][1] */
         for (i = 0; i < 5; i++) for (ctx = 0; ctx < 13; ctx++)
             cdf->coef.skip[i][ctx][1] = 0;
+        /* txtp_intra1: [2][13][8] - n_symbols=6, count at [mode][mf][6] */
+        for (i = 0; i < 2; i++) for (ctx = 0; ctx < 13; ctx++)
+            cdf->txtp_intra1[i][ctx][6] = 0;
+        /* txtp_intra2: [3][13][8] - n_symbols=4, count at [tx][mode][4] */
+        for (i = 0; i < 3; i++) for (ctx = 0; ctx < 13; ctx++)
+            cdf->txtp_intra2[i][ctx][4] = 0;
     }
     /* Initialize kfym CDFs for intra Y mode decoding (ICDF format from dav1d) */
     {
@@ -2004,13 +2071,13 @@ static unsigned stb_av1_msac_decode_subexp(struct stb_av1_msac *s, int ref, int 
 }
 
 static unsigned stb_av1_msac_decode_hi_tok(struct stb_av1_msac *s, unsigned short *cdf) {
-    unsigned tok_br = stb_av1_msac_decode_symbol(s, cdf, 4);
+    unsigned tok_br = stb_av1_msac_decode_symbol(s, cdf, 3);
     unsigned tok = 3 + tok_br;
     if (tok_br == 3) {
-        tok_br = stb_av1_msac_decode_symbol(s, cdf, 4); tok = 6 + tok_br;
+        tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 6 + tok_br;
         if (tok_br == 3) {
-            tok_br = stb_av1_msac_decode_symbol(s, cdf, 4); tok = 9 + tok_br;
-            if (tok_br == 3) tok = 12 + stb_av1_msac_decode_symbol(s, cdf, 4);
+            tok_br = stb_av1_msac_decode_symbol(s, cdf, 3); tok = 9 + tok_br;
+            if (tok_br == 3) tok = 12 + stb_av1_msac_decode_symbol(s, cdf, 3);
         }
     }
     return tok;
@@ -2292,49 +2359,117 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
         int mask = (1 << shift) - 1;
         int stride = (tx_sz_idx == 4) ? 34 : (tx_w + 2);
         unsigned char levels[34 * 34];
-        memset(levels, 0, (size_t)(stride * ((tx_sz_idx == 4) ? 34 : (tx_h + 2))));
+        int lw, lh, slw, slh, tx2dszctx, br_tx;
+        int eob_ctx, dc_ctx;
+        int eob_tok, tok;
+        unsigned rc_eob, sx_eob, sy_eob;
+        unsigned char *pl_eob;
 
-        for (i = 0; i < max_coeffs; i++) {
-            if (i <= *eob) {
-                unsigned tok;
-                int rc = scan[i];
-                int sx = rc >> shift;
-                int sy = rc & mask;
-                int *pl = (int *)&levels[(sy + 1) * stride + (sx + 1)];
-                int mag = pl[0 * stride + 1] + pl[1 * stride + 0]
-                        + pl[1 * stride + 1] + pl[0 * stride + 2]
-                        + pl[2 * stride + 0];
-                int mag_adj = (mag > 512) ? 4 : (mag + 64) >> 7;
-                int ctx = (int)stb_av1_lo_ctx_offsets[sy > 4 ? 4 : sy][sx > 4 ? 4 : sx] + mag_adj;
-                if (ctx < 0) ctx = 0;
-                if (ctx > 40) ctx = 40;
-                if (i == 0)
-                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.eob_base_tok[tx_sz_idx][plane ? 1 : 0][0], 4);
-                else
-                    tok = stb_av1_msac_decode_symbol(msac, cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][ctx], 4);
-                if (tok == 3) {
-                    int br_tx = tx_sz_idx > 3 ? 3 : tx_sz_idx;
-                    int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
-                    int ctx_br;
-                    if (i == 0)
-                        ctx_br = (hi_mag > 12) ? 6 : (hi_mag + 1) >> 1;
-                    else
-                        ctx_br = (sy > 1 ? 14 : 7) + ((hi_mag > 12) ? 6 : (hi_mag + 1) >> 1);
-                    if (ctx_br < 0) ctx_br = 0;
-                    if (ctx_br > 20) ctx_br = 20;
-                    coeffs[i] = 1 + (int)stb_av1_msac_decode_hi_tok(msac, cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
-                } else {
-                    coeffs[i] = 1 + (int)tok;
-                }
-                if (coeffs[i] != 0) {
-                    unsigned char level = (unsigned char)(coeffs[i] < 0 ? -coeffs[i] : coeffs[i]);
-                    if (level > 63) level = 63;
-                    pl[0] = level;
-                    if (stb_av1_msac_decode_bool_equi(msac))
-                        coeffs[i] = -coeffs[i];
-                }
-            } else {
-                coeffs[i] = 0;
+        memset(levels, 0, (size_t)(stride * ((tx_sz_idx == 4) ? 34 : (tx_h + 2))));
+        memset(coeffs, 0, (size_t)(max_coeffs * sizeof(int)));
+
+        lw = 0; while ((1 << (lw + 2)) < tx_w) lw++;
+        lh = 0; while ((1 << (lh + 2)) < tx_h) lh++;
+        slw = (lw < 3) ? lw : 3; /* min(lw, TX_32X32) */
+        slh = (lh < 3) ? lh : 3;
+        tx2dszctx = slw + slh;
+        br_tx = (tx_sz_idx > 3) ? 3 : tx_sz_idx;
+
+        /* EOB base token context: 1 + (eob > 2<<tx2dszctx) + (eob > 4<<tx2dszctx) */
+        eob_ctx = 1 + (*eob > (2 << tx2dszctx) ? 1 : 0) + (*eob > (4 << tx2dszctx) ? 1 : 0);
+        if (eob_ctx > 3) eob_ctx = 3;
+
+        /* Decode EOB position (scan position = eob) */
+        rc_eob = scan[*eob];
+        sx_eob = rc_eob >> shift;
+        sy_eob = rc_eob & mask;
+        pl_eob = &levels[(sy_eob + 1) * stride + (sx_eob + 1)];
+
+        eob_tok = (int)stb_av1_msac_decode_symbol(msac,
+            cdf->coef.eob_base_tok[tx_sz_idx][plane ? 1 : 0][eob_ctx], 2);
+        tok = eob_tok + 1; /* eob position always has tok >= 1 */
+
+        if (eob_tok == 2) {
+            /* eob_tok == 2 means tok >= 3, decode hi_tok */
+            int hi_mag = pl_eob[0 * stride + 1] + pl_eob[1 * stride + 0] + pl_eob[1 * stride + 1];
+            int ctx_br = ((sx_eob | sy_eob) > 1 ? 14 : 7) + ((hi_mag > 12) ? 6 : (hi_mag + 1) >> 1);
+            if (ctx_br > 20) ctx_br = 20;
+            tok = (int)stb_av1_msac_decode_hi_tok(msac,
+                cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
+        }
+
+        coeffs[*eob] = tok;
+        if (tok > 0) {
+            unsigned char level = (unsigned char)(tok > 63 ? 63 : tok);
+            pl_eob[0] = level;
+            if (stb_av1_msac_decode_bool_equi(msac))
+                coeffs[*eob] = -tok;
+        }
+
+        /* Decode AC coefficients from eob-1 down to 1 */
+        for (i = *eob - 1; i > 0; i--) {
+            int rc = scan[i];
+            int sx = rc >> shift;
+            int sy = rc & mask;
+            unsigned char *pl = &levels[(sy + 1) * stride + (sx + 1)];
+            int mag = pl[0 * stride + 1] + pl[1 * stride + 0]
+                    + pl[1 * stride + 1] + pl[0 * stride + 2]
+                    + pl[2 * stride + 0];
+            int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
+            int mag_adj = (mag > 512) ? 4 : (mag + 64) >> 7;
+            int ctx = (int)stb_av1_lo_ctx_offsets[sy > 4 ? 4 : sy][sx > 4 ? 4 : sx] + mag_adj;
+            int sxy_or;
+            if (ctx < 0) ctx = 0;
+            if (ctx > 40) ctx = 40;
+
+            tok = (int)stb_av1_msac_decode_symbol(msac,
+                cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][ctx], 3);
+
+            if (tok == 3) {
+                int ctx_br;
+                hi_mag &= 63;
+                sxy_or = (sx | sy);
+                ctx_br = (sxy_or > 1 ? 14 : 7) + ((hi_mag > 12) ? 6 : (hi_mag + 1) >> 1);
+                if (ctx_br > 20) ctx_br = 20;
+                tok = (int)stb_av1_msac_decode_hi_tok(msac,
+                    cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
+            }
+
+            coeffs[i] = tok;
+            if (tok > 0) {
+                unsigned char level = (unsigned char)(tok > 63 ? 63 : tok);
+                pl[0] = level;
+                if (stb_av1_msac_decode_bool_equi(msac))
+                    coeffs[i] = -tok;
+            }
+        }
+
+        /* Decode DC (scan position 0) with ctx=0 for TX_CLASS_2D */
+        {
+            unsigned char *pl = &levels[1 * stride + 1];
+            int mag = pl[0 * stride + 1] + pl[1 * stride + 0]
+                    + pl[1 * stride + 1] + pl[0 * stride + 2]
+                    + pl[2 * stride + 0];
+            (void)mag;
+            dc_ctx = 0; /* TX_CLASS_2D: ctx = 0 */
+
+            tok = (int)stb_av1_msac_decode_symbol(msac,
+                cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][dc_ctx], 3);
+
+            if (tok == 3) {
+                int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
+                int ctx_br;
+                hi_mag &= 63;
+                ctx_br = (hi_mag > 12) ? 6 : (hi_mag + 1) >> 1;
+                if (ctx_br > 20) ctx_br = 20;
+                tok = (int)stb_av1_msac_decode_hi_tok(msac,
+                    cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
+            }
+
+            coeffs[0] = tok;
+            if (tok > 0) {
+                if (stb_av1_msac_decode_bool_equi(msac))
+                    coeffs[0] = -tok;
             }
         }
     }
@@ -2569,6 +2704,13 @@ struct stb_av1_sequence_header {
     int monochrome;
     int subsampling_x;
     int subsampling_y;
+    int sb128;
+    int filter_intra;
+    int separate_uv_delta_q;
+    int screen_content_tools; /* 0=ADAPTIVE, 1=ON, 2=OFF */
+    int force_integer_mv;     /* 0=ADAPTIVE, 1=ON, 2=OFF */
+    int frame_id_numbers_present;
+    int order_hint_n_bits;
 };
 
 static void stb_av1_parse_sequence_header_obu(struct stb_avif_reader *r,
@@ -4097,6 +4239,19 @@ static void stb_av1_inv_transform_2d(int *block, int w, int h, int tx_type)
             temp[i * w + j] = row[j];
     }
 
+    /* Intermediate shift between 1D transforms (matches dav1d's inv_txfm_add_c) */
+    {
+        int lw = 0, lh = 0, mid_shift, rnd;
+        while ((1 << (lw + 2)) < w) lw++;
+        while ((1 << (lh + 2)) < h) lh++;
+        mid_shift = (lw < 2) ? lw : 2; /* min(lw, 2) for square; matches dav1d */
+        if (mid_shift > 0) {
+            rnd = 1 << (mid_shift - 1);
+            for (i = 0; i < w * h; i++)
+                temp[i] = (temp[i] + rnd) >> mid_shift;
+        }
+    }
+
     /* Process columns */
     for (j = 0; j < w; j++) {
         for (i = 0; i < h; i++)
@@ -4479,6 +4634,7 @@ static int stb_av1_decode_coeffs(struct stb_av1_bool_reader *br,
    qindex: quantization index
    block: output reconstructed pixel block */
 static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
+                                       int qindex,
                                        int *coeffs, int tx_w, int tx_h,
                                        int tx_type,
                                        unsigned char *pred,
@@ -4488,17 +4644,15 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
 {
     int i, j;
     int dequant_dc, dequant_ac;
-    int *dq_coeffs;
+    static int dq_coeffs_buf[4096];
+    int *dq_coeffs = dq_coeffs_buf;
     int max_coeffs = tx_w * tx_h;
 
     if (max_coeffs > 4096)
         return;
 
-    dq_coeffs = (int *)stb_avif_malloc((size_t)max_coeffs * sizeof(int));
-    if (!dq_coeffs) return;
-
-    dequant_dc = stb_av1_get_dequant(tc->qindex_y, 1, tc->bit_depth);
-    dequant_ac = stb_av1_get_dequant(tc->qindex_y, 0, tc->bit_depth);
+    dequant_dc = stb_av1_get_dequant(qindex, 1, tc->bit_depth);
+    dequant_ac = stb_av1_get_dequant(qindex, 0, tc->bit_depth);
 
     /* Dequantize with scan-to-raster de-scanning.
        coeffs[i] is the coefficient at scan position i.
@@ -4534,18 +4688,11 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
     /* Apply inverse transform */
     stb_av1_inv_transform_2d(dq_coeffs, tx_w, tx_h, tx_type);
 
-    /* Apply size-dependent shift (inv_shift = imin(lw,1) + imin(lh,1)).
-       This matches dav1d's inv_txfm_add_c behavior after the 2D transform. */
+    /* Final shift: dav1d uses (+8) >> 4 after the 2D inverse transform.
+       The intermediate shift is already applied in stb_av1_inv_transform_2d. */
     {
-        int lw = 0, lh = 0, inv_shift;
-        while ((1 << (lw + 2)) < tx_w) lw++;
-        while ((1 << (lh + 2)) < tx_h) lh++;
-        inv_shift = (lw > 0 ? 1 : 0) + (lh > 0 ? 1 : 0);
-        if (inv_shift > 0) {
-            int rnd = 1 << (inv_shift - 1);
-            for (i = 0; i < max_coeffs; i++)
-                dq_coeffs[i] = (dq_coeffs[i] + rnd) >> inv_shift;
-        }
+        for (i = 0; i < max_coeffs; i++)
+            dq_coeffs[i] = (dq_coeffs[i] + 8) >> 4;
     }
 
     /* Reconstruct: pred + residual, clamp to [0, 255] */
@@ -4558,7 +4705,7 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
         }
     }
 
-    stb_avif_free_internal(dq_coeffs);
+    /* no free needed — dq_coeffs is stack-allocated */
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4743,7 +4890,24 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (uv_mode == 13) uv_mode = STB_AV1_DC_PRED;
     }
 
-    tx_type = (int)stb_av1_txtp_from_uvmode[pred_mode < 13 ? pred_mode : 0];
+    /* Decode transform type (dav1d's decode_txtp).
+       For intra blocks: use txtp_intra1 (4x4/8x8) or txtp_intra2 (16x16+). */
+    {
+        int tx_sz_idx = 0;
+        int t_dim_min, tx_idx;
+        while ((1 << (tx_sz_idx + 2)) < blk_w) tx_sz_idx++;
+        if (tx_sz_idx > 4) tx_sz_idx = 4;
+        t_dim_min = tx_sz_idx;
+        if (tc->fh->reduced_tx_set || t_dim_min == 2) {
+            tx_idx = (int)stb_av1_msac_decode_symbol(tc->msac,
+                tc->cdf->txtp_intra2[t_dim_min - 2][pred_mode < 13 ? pred_mode : 0], 4);
+            tx_type = (int)stb_av1_tx_types_per_set[tx_idx + 0];
+        } else {
+            tx_idx = (int)stb_av1_msac_decode_symbol(tc->msac,
+                tc->cdf->txtp_intra1[t_dim_min][pred_mode < 13 ? pred_mode : 0], 6);
+            tx_type = (int)stb_av1_tx_types_per_set[tx_idx + 5];
+        }
+    }
 
     {
         unsigned char above_y[64], left_y[64];
@@ -4764,7 +4928,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (!block_skip)
             stb_av1_decode_coeffs_cdf(tc->msac, coeffs, bw, bh, &eob,
                 tc->cdf, 0, above_nz_coeffs, left_nz_coeffs);
-        stb_av1_reconstruct_block(tc, coeffs, tx_w, tx_h, tx_type,
+        stb_av1_reconstruct_block(tc, tc->qindex_y, coeffs, tx_w, tx_h, tx_type,
                                    pred_buf, bw,
                                    tc->plane_y + abs_r * tc->stride_y + abs_c,
                                    tc->stride_y);
@@ -4787,61 +4951,51 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         if (u_h > 32) u_h = 32;
 
         {
+            int uv_mode_c = (uv_mode >= 0 && uv_mode <= 12) ? uv_mode : STB_AV1_DC_PRED;
+            int tx_type_uv = (int)stb_av1_txtp_from_uvmode[uv_mode_c];
             unsigned char pred_uv[1024], above_uv[64], left_uv[64];
             unsigned char topleft_uv;
+            int u_eob, u_coeffs[1024];
             for (uvi = 0; uvi < u_w && uvi < 64; uvi++)
                 above_uv[uvi] = u_r > 0 ? tc->plane_u[(u_r-1)*tc->stride_u+u_c+uvi] : (unsigned char)128;
             for (uvi = 0; uvi < u_h && uvi < 64; uvi++)
                 left_uv[uvi] = u_c > 0 ? tc->plane_u[(u_r+uvi)*tc->stride_u+u_c-1] : (unsigned char)128;
             topleft_uv = (u_r > 0 && u_c > 0)
                 ? tc->plane_u[(u_r-1)*tc->stride_u+u_c-1] : (unsigned char)128;
-            stb_av1_intra_predict(pred_uv, u_w, u_w, u_h,
-                                   uv_mode >= 0 && uv_mode <= 12 ? uv_mode : STB_AV1_DC_PRED,
+            stb_av1_intra_predict(pred_uv, u_w, u_w, u_h, uv_mode_c,
                                    above_uv, left_uv, topleft_uv, tc->bit_depth);
-            if (!block_skip) {
-                int u_eob, u_coeffs[1024];
+            for (uvi = 0; uvi < 1024; uvi++) u_coeffs[uvi] = 0;
+            if (!block_skip)
                 stb_av1_decode_coeffs_cdf(tc->msac, u_coeffs, u_w, u_h, &u_eob, tc->cdf, 1, NULL, NULL);
-                for (uvi = 0; uvi < u_w * u_h && uvi < 1024; uvi++) {
-                    int val = (int)pred_uv[uvi] + u_coeffs[uvi];
-                    if (val < 0) val = 0; if (val > 255) val = 255;
-                    tc->plane_u[(u_r+uvi/u_w)*tc->stride_u+u_c+uvi%u_w] = (unsigned char)val;
-                }
-            } else {
-                for (uvi = 0; uvi < u_h; uvi++) {
-                    int uj;
-                    for (uj = 0; uj < u_w; uj++)
-                        tc->plane_u[(u_r+uvi)*tc->stride_u+u_c+uj] = pred_uv[uvi*u_w+uj];
-                }
-            }
+            stb_av1_reconstruct_block(tc, tc->qindex_u, u_coeffs,
+                                       u_w, u_h, tx_type_uv,
+                                       pred_uv, u_w,
+                                       tc->plane_u + u_r * tc->stride_u + u_c,
+                                       tc->stride_u);
         }
 
         {
+            int uv_mode_c = (uv_mode >= 0 && uv_mode <= 12) ? uv_mode : STB_AV1_DC_PRED;
+            int tx_type_uv = (int)stb_av1_txtp_from_uvmode[uv_mode_c];
             unsigned char pred_v[1024], above_v[64], left_v[64];
             unsigned char topleft_v;
+            int v_eob, v_coeffs[1024];
             for (uvi = 0; uvi < u_w && uvi < 64; uvi++)
                 above_v[uvi] = u_r > 0 ? tc->plane_v[(u_r-1)*tc->stride_v+u_c+uvi] : (unsigned char)128;
             for (uvi = 0; uvi < u_h && uvi < 64; uvi++)
                 left_v[uvi] = u_c > 0 ? tc->plane_v[(u_r+uvi)*tc->stride_v+u_c-1] : (unsigned char)128;
             topleft_v = (u_r > 0 && u_c > 0)
                 ? tc->plane_v[(u_r-1)*tc->stride_v+u_c-1] : (unsigned char)128;
-            stb_av1_intra_predict(pred_v, u_w, u_w, u_h,
-                                   uv_mode >= 0 && uv_mode <= 12 ? uv_mode : STB_AV1_DC_PRED,
+            stb_av1_intra_predict(pred_v, u_w, u_w, u_h, uv_mode_c,
                                    above_v, left_v, topleft_v, tc->bit_depth);
-            if (!block_skip) {
-                int v_eob, v_coeffs[1024];
+            for (uvi = 0; uvi < 1024; uvi++) v_coeffs[uvi] = 0;
+            if (!block_skip)
                 stb_av1_decode_coeffs_cdf(tc->msac, v_coeffs, u_w, u_h, &v_eob, tc->cdf, 1, NULL, NULL);
-                for (uvi = 0; uvi < u_w * u_h && uvi < 1024; uvi++) {
-                    int val = (int)pred_v[uvi] + v_coeffs[uvi];
-                    if (val < 0) val = 0; if (val > 255) val = 255;
-                    tc->plane_v[(u_r+uvi/u_w)*tc->stride_v+u_c+uvi%u_w] = (unsigned char)val;
-                }
-            } else {
-                for (uvi = 0; uvi < u_h; uvi++) {
-                    int uj;
-                    for (uj = 0; uj < u_w; uj++)
-                        tc->plane_v[(u_r+uvi)*tc->stride_v+u_c+uj] = pred_v[uvi*u_w+uj];
-                }
-            }
+            stb_av1_reconstruct_block(tc, tc->qindex_v, v_coeffs,
+                                       u_w, u_h, tx_type_uv,
+                                       pred_v, u_w,
+                                       tc->plane_v + u_r * tc->stride_v + u_c,
+                                       tc->stride_v);
         }
     }
 }
@@ -4867,9 +5021,7 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
         return;
 
 
-    fflush(stderr);
         if (bl >= 4 || sz4 <= 2) {
-        /* Leaf block: 8x8 (sz4=2, blk_sz=8) or 4x4 (sz4=1, blk_sz=4) */
         stb_av1_decode_block(tc, abs_r, abs_c,
                               blk_sz, blk_sz,
                               bx4,
@@ -4989,16 +5141,9 @@ static void stb_av1_decode_superblock(struct stb_av1_tile_context *tc,
 /* main tile decoding routine using CDF-based context-adaptive decoding */
 static void stb_av1_decode_frame(struct stb_av1_tile_context *tc)
 {
-    int sb_size = 64;
+    int sb_size = 64 << (tc->sh->sb128 ? 1 : 0);
     int sb_cols, sb_rows;
     int sr, sc;
-
-
-    sb_size = 64;
-    if (tc->frame_width > 128 || tc->frame_height > 128)
-        sb_size = 128;
-    else if (tc->frame_width > 64 || tc->frame_height > 64)
-        sb_size = 64;
 
     sb_cols = (tc->frame_width + sb_size - 1) / sb_size;
     sb_rows = (tc->frame_height + sb_size - 1) / sb_size;
@@ -5097,7 +5242,7 @@ static void stb_av1_decode_superblock(struct stb_av1_tile_context *tc,
 
                 stb_av1_decode_coeffs(tc->br, coeffs, blk_w * blk_h, &eob, tc->qindex_y);
 
-                stb_av1_reconstruct_block(tc, coeffs,
+                stb_av1_reconstruct_block(tc, tc->qindex_y, coeffs,
                                            tx_w, tx_h, tx_type,
                                            pred_buf, blk_w,
                                            tc->plane_y + abs_r * tc->stride_y + abs_c,
@@ -5270,6 +5415,562 @@ static void stb_av1_cdef_filter_plane(unsigned char *plane, int stride,
 
 
 #ifdef STB_AVIF_USE_C89_DAV1D
+
+/* -------------------------------------------------------------------------- */
+/* RAW BIT READER (GetBits) — for OBU/sequence/frame headers                  */
+/* AV1 frame headers use raw bits (f(n)), NOT the arithmetic coder (MSAC).    */
+/* -------------------------------------------------------------------------- */
+
+struct StbAv1GetBits {
+    const unsigned char *ptr;
+    const unsigned char *ptr_end;
+    const unsigned char *ptr_start;
+    unsigned int state;
+    int bits_left;
+    int error;
+};
+
+static void stb_av1_gb_init(struct StbAv1GetBits *gb,
+                            const unsigned char *data, unsigned int size)
+{
+    gb->ptr_start = data;
+    gb->ptr = data;
+    gb->ptr_end = data + size;
+    gb->state = 0;
+    gb->bits_left = 0;
+    gb->error = 0;
+}
+
+static void stb_av1_gb_refill(struct StbAv1GetBits *gb)
+{
+    while (gb->bits_left <= 24 && gb->ptr < gb->ptr_end) {
+        gb->state = (gb->state << 8) | (unsigned int)(*gb->ptr);
+        gb->ptr++;
+        gb->bits_left += 8;
+    }
+}
+
+static int stb_av1_gb_bit(struct StbAv1GetBits *gb)
+{
+    if (gb->error) return 0;
+    if (gb->bits_left == 0) stb_av1_gb_refill(gb);
+    if (gb->bits_left == 0) { gb->error = 1; return 0; }
+    gb->bits_left--;
+    return (int)((gb->state >> gb->bits_left) & 1U);
+}
+
+static unsigned int stb_av1_gb_bits(struct StbAv1GetBits *gb, int n)
+{
+    unsigned int val = 0;
+    int i;
+    if (gb->error) return 0;
+    for (i = 0; i < n; i++)
+        val = (val << 1) | (unsigned int)stb_av1_gb_bit(gb);
+    return val;
+}
+
+static int stb_av1_gb_sbits(struct StbAv1GetBits *gb, int n)
+{
+    unsigned int u = stb_av1_gb_bits(gb, n);
+    if (n > 0 && u >= ((unsigned int)1 << (n - 1)))
+        u |= ~(((unsigned int)1 << n) - 1U);
+    return (int)u;
+}
+
+static void stb_av1_gb_bytealign(struct StbAv1GetBits *gb)
+{
+    int r = gb->bits_left % 8;
+    if (r) gb->bits_left -= r;
+}
+
+static unsigned int stb_av1_gb_pos_bytes(struct StbAv1GetBits *gb)
+{
+    int bit_pos = (int)((gb->ptr - gb->ptr_start) * 8) - gb->bits_left;
+    return (unsigned int)((bit_pos + 7) / 8);
+}
+
+static unsigned int stb_av1_gb_uniform(struct StbAv1GetBits *gb, unsigned int n)
+{
+    unsigned int l = 0, m, v;
+    if (n <= 1) return 0;
+    while (((unsigned)1 << l) < n) l++;
+    m = ((unsigned)1 << l) - n;
+    v = stb_av1_gb_bits(gb, (int)(l - 1));
+    if (v < m) return v;
+    return (v << 1) - m + (unsigned int)stb_av1_gb_bit(gb);
+}
+
+/* tile_log2: smallest k such that (sz << k) >= tgt */
+static int stb_av1_tile_log2(int sz, int tgt)
+{
+    int k = 0;
+    while ((sz << k) < tgt) k++;
+    return k;
+}
+
+/* GetBits-based sequence header parser (raw bits, not MSAC). */
+static void stb_av1_parse_seq_hdr_getbits(struct StbAv1GetBits *gb,
+                                          struct stb_av1_sequence_header *sh)
+{
+    int op;
+    sh->seq_profile = (int)stb_av1_gb_bits(gb, 3);
+    sh->still_picture = stb_av1_gb_bit(gb);
+    sh->reduced_still_picture_header = stb_av1_gb_bit(gb);
+
+    if (sh->reduced_still_picture_header) {
+        sh->timing_info_present = 0;
+        sh->decoder_model_info_present = 0;
+        sh->display_model_info_present = 0;
+        sh->operating_points_cnt = 1;
+        stb_av1_gb_bits(gb, 3); /* major_level */
+        stb_av1_gb_bits(gb, 2); /* minor_level */
+    } else {
+        sh->timing_info_present = stb_av1_gb_bit(gb);
+        if (sh->timing_info_present) {
+            stb_av1_gb_bits(gb, 32); stb_av1_gb_bits(gb, 32);
+            if (stb_av1_gb_bit(gb)) stb_av1_gb_bits(gb, 32);
+            sh->decoder_model_info_present = stb_av1_gb_bit(gb);
+            if (sh->decoder_model_info_present) {
+                stb_av1_gb_bits(gb, 5); stb_av1_gb_bits(gb, 32);
+                sh->buffer_removal_time_length_minus_1 = (int)stb_av1_gb_bits(gb, 5);
+                stb_av1_gb_bits(gb, 5);
+            }
+        }
+        sh->display_model_info_present = stb_av1_gb_bit(gb);
+        sh->operating_points_cnt = (int)stb_av1_gb_bits(gb, 5) + 1;
+        for (op = 0; op < sh->operating_points_cnt; op++) {
+            stb_av1_gb_bits(gb, 12); /* idc */
+            { int major = (int)stb_av1_gb_bits(gb, 3) + 2;
+              int minor = (int)stb_av1_gb_bits(gb, 2);
+              if (major > 3) stb_av1_gb_bit(gb); /* tier */
+              (void)major; (void)minor; }
+            if (sh->decoder_model_info_present) {
+                if (stb_av1_gb_bit(gb)) {
+                    stb_av1_gb_bits(gb, 8); stb_av1_gb_bits(gb, 8);
+                    stb_av1_gb_bit(gb);
+                }
+            }
+            if (sh->display_model_info_present) {
+                if (stb_av1_gb_bit(gb))
+                    stb_av1_gb_bits(gb, 4);
+            }
+        }
+    }
+
+    /* width/height bits — read for BOTH reduced and non-reduced */
+    sh->frame_width_bits = (int)stb_av1_gb_bits(gb, 4) + 1;
+    sh->frame_height_bits = (int)stb_av1_gb_bits(gb, 4) + 1;
+    sh->max_frame_width = (int)stb_av1_gb_bits(gb, sh->frame_width_bits) + 1;
+    sh->max_frame_height = (int)stb_av1_gb_bits(gb, sh->frame_height_bits) + 1;
+
+    if (!sh->reduced_still_picture_header) {
+        sh->frame_id_numbers_present = stb_av1_gb_bit(gb);
+        if (sh->frame_id_numbers_present) {
+            int delta_n = (int)stb_av1_gb_bits(gb, 4) + 2;
+            sh->order_hint_n_bits = (int)stb_av1_gb_bits(gb, 3) + delta_n + 1;
+            (void)delta_n;
+        }
+    }
+
+    /* sb128, filter_intra, intra_edge_filter — for BOTH cases */
+    sh->sb128 = stb_av1_gb_bit(gb);
+    sh->filter_intra = stb_av1_gb_bit(gb);
+    sh->enable_intra_edge_filter = stb_av1_gb_bit(gb);
+
+    if (!sh->reduced_still_picture_header) {
+        sh->enable_interintra_comp = stb_av1_gb_bit(gb);
+        sh->enable_masked_comp = stb_av1_gb_bit(gb);
+        stb_av1_gb_bit(gb); /* warped_motion */
+        sh->enable_dual_filter = stb_av1_gb_bit(gb);
+        sh->enable_order_hint = stb_av1_gb_bit(gb);
+        if (sh->enable_order_hint) {
+            sh->order_hint_n_bits = (int)stb_av1_gb_bits(gb, 2) + 1;
+            sh->enable_dist_wtd_comp = stb_av1_gb_bit(gb);
+            sh->enable_jnt_comp = stb_av1_gb_bit(gb);
+        }
+        sh->enable_superres = stb_av1_gb_bit(gb);
+    }
+
+    /* screen_content_tools / force_integer_mv */
+    if (sh->reduced_still_picture_header) {
+        sh->screen_content_tools = 0; /* ADAPTIVE */
+        sh->force_integer_mv = 0; /* ADAPTIVE */
+    } else {
+        sh->screen_content_tools = stb_av1_gb_bit(gb); /* seq_force_screen_content_tools */
+        if (sh->screen_content_tools) {
+            sh->force_integer_mv = stb_av1_gb_bit(gb); /* seq_force_integer_mv */
+        } else {
+            sh->force_integer_mv = 0;
+        }
+        /* enable_superres already read above for non-reduced */
+    }
+
+    /* Color config */
+    {
+        int hbd = stb_av1_gb_bit(gb);
+        if (sh->seq_profile == 2 && hbd) {
+            int twelve = stb_av1_gb_bit(gb);
+            sh->bit_depth = twelve ? 12 : 10;
+        } else {
+            sh->bit_depth = hbd ? 10 : 8;
+        }
+        if (sh->seq_profile == 1) {
+            sh->monochrome = 0;
+        } else {
+            sh->monochrome = stb_av1_gb_bit(gb);
+        }
+        if (stb_av1_gb_bit(gb)) { /* color_description_present */
+            sh->color_primaries = (int)stb_av1_gb_bits(gb, 8);
+            sh->transfer_characteristics = (int)stb_av1_gb_bits(gb, 8);
+            sh->matrix_coefficients = (int)stb_av1_gb_bits(gb, 8);
+        } else {
+            sh->color_primaries = 2; /* unspecified */
+            sh->transfer_characteristics = 2;
+            sh->matrix_coefficients = 2;
+        }
+        if (sh->monochrome) {
+            sh->color_range = stb_av1_gb_bit(gb);
+            sh->subsampling_x = 1; sh->subsampling_y = 1;
+        } else if (sh->color_primaries == 1 && sh->transfer_characteristics == 13 && sh->matrix_coefficients == 0) {
+            sh->color_range = 1; sh->subsampling_x = 0; sh->subsampling_y = 0;
+        } else {
+            sh->color_range = stb_av1_gb_bit(gb);
+            if (sh->seq_profile == 0) { sh->subsampling_x = 1; sh->subsampling_y = 1; }
+            else if (sh->seq_profile == 1) { sh->subsampling_x = 0; sh->subsampling_y = 0; }
+            else {
+                if (sh->bit_depth == 12) {
+                    sh->subsampling_x = stb_av1_gb_bit(gb);
+                    if (sh->subsampling_x) sh->subsampling_y = stb_av1_gb_bit(gb);
+                    else sh->subsampling_y = 0;
+                } else { sh->subsampling_x = 1; sh->subsampling_y = 0; }
+            }
+        }
+        if (!sh->monochrome)
+            stb_av1_gb_bit(gb); /* chroma_sample_position (if ssx==1 && ssy==1) — simplified */
+        sh->film_grain_params_present = stb_av1_gb_bit(gb);
+        sh->separate_uv_delta_q = stb_av1_gb_bit(gb);
+    }
+}
+
+/* GetBits-based frame header parser (raw bits, not MSAC).
+   Follows dav1d obu.c parse_frame_hdr for intra-only / key frame path.
+   *frame_hdr_bytes_out = byte offset of tile data start from OBU data. */
+static void stb_av1_parse_frame_hdr_getbits(struct StbAv1GetBits *gb,
+                                             struct stb_av1_frame_header *fh,
+                                             struct stb_av1_sequence_header *sh,
+                                             unsigned int *frame_hdr_bytes_out)
+{
+    if (!sh->reduced_still_picture_header)
+        fh->show_existing_frame = stb_av1_gb_bit(gb);
+    if (fh->show_existing_frame) {
+        stb_av1_gb_bits(gb, 3);
+        *frame_hdr_bytes_out = stb_av1_gb_pos_bytes(gb);
+        return;
+    }
+    if (sh->reduced_still_picture_header) {
+        fh->frame_type = STB_AV1_KEY_FRAME;
+        fh->show_frame = 1;
+    } else {
+        fh->frame_type = (int)stb_av1_gb_bits(gb, 2);
+        fh->show_frame = stb_av1_gb_bit(gb);
+    }
+    fh->error_resilient_mode =
+        (fh->frame_type == STB_AV1_KEY_FRAME && fh->show_frame) ||
+        fh->frame_type == STB_AV1_S_FRAME ||
+        sh->reduced_still_picture_header ? 1 : stb_av1_gb_bit(gb);
+
+    if (!sh->reduced_still_picture_header) {
+        fh->disable_cdf_update = stb_av1_gb_bit(gb);
+        fh->allow_screen_content_tools =
+            sh->screen_content_tools == 0 /* ADAPTIVE */
+                ? stb_av1_gb_bit(gb)
+                : (sh->screen_content_tools == 1 ? 1 : 0);
+        if (fh->allow_screen_content_tools)
+            fh->force_integer_mv =
+                sh->force_integer_mv == 0 /* ADAPTIVE */
+                    ? stb_av1_gb_bit(gb)
+                    : (sh->force_integer_mv == 1 ? 1 : 0);
+    } else {
+        fh->disable_cdf_update = stb_av1_gb_bit(gb);
+        fh->allow_screen_content_tools =
+            sh->screen_content_tools == 0 ? stb_av1_gb_bit(gb) :
+            (sh->screen_content_tools == 1 ? 1 : 0);
+        if (fh->allow_screen_content_tools)
+            fh->force_integer_mv =
+                sh->force_integer_mv == 0 ? stb_av1_gb_bit(gb) :
+                (sh->force_integer_mv == 1 ? 1 : 0);
+    }
+    if (fh->frame_type == STB_AV1_KEY_FRAME || fh->frame_type == STB_AV1_INTRA_ONLY)
+        fh->force_integer_mv = 1;
+
+    if (sh->frame_id_numbers_present)
+        stb_av1_gb_bits(gb, sh->order_hint_n_bits + 3); /* frame_id */
+
+    if (!sh->reduced_still_picture_header)
+        fh->frame_size_override = (fh->frame_type == STB_AV1_S_FRAME) ? 1 : stb_av1_gb_bit(gb);
+    if (sh->enable_order_hint)
+        fh->order_hint = (int)stb_av1_gb_bits(gb, sh->order_hint_n_bits);
+    fh->primary_ref_frame = (!fh->error_resilient_mode &&
+        fh->frame_type != STB_AV1_KEY_FRAME && fh->frame_type != STB_AV1_INTRA_ONLY)
+        ? (int)stb_av1_gb_bits(gb, 3) : 7;
+
+    if (fh->frame_type == STB_AV1_KEY_FRAME || fh->frame_type == STB_AV1_INTRA_ONLY) {
+        fh->refresh_frame_flags = (fh->frame_type == STB_AV1_KEY_FRAME && fh->show_frame)
+            ? 0xFF : (int)stb_av1_gb_bits(gb, 8);
+        /* read_frame_size */
+        if (fh->frame_size_override) {
+            fh->frame_width = (int)stb_av1_gb_bits(gb, sh->frame_width_bits) + 1;
+            fh->frame_height = (int)stb_av1_gb_bits(gb, sh->frame_height_bits) + 1;
+        } else {
+            fh->frame_width = sh->max_frame_width;
+            fh->frame_height = sh->max_frame_height;
+        }
+        fh->superres_scale_denominator = 8;
+        if (sh->enable_superres && stb_av1_gb_bit(gb))
+            fh->superres_scale_denominator = (int)stb_av1_gb_bits(gb, 3) + 9;
+        fh->render_width = fh->frame_width;
+        fh->render_height = fh->frame_height;
+        if (stb_av1_gb_bit(gb)) { /* have_render_size */
+            fh->render_width = (int)stb_av1_gb_bits(gb, 16) + 1;
+            fh->render_height = (int)stb_av1_gb_bits(gb, 16) + 1;
+        }
+        if (fh->allow_screen_content_tools && fh->superres_scale_denominator == 8)
+            fh->allow_intrabc = stb_av1_gb_bit(gb);
+    } else {
+        fh->refresh_frame_flags = (fh->frame_type == STB_AV1_S_FRAME)
+            ? 0xFF : (int)stb_av1_gb_bits(gb, 8);
+        /* Inter frame: read refs + frame_size (not needed for AVIF still) */
+        fh->frame_width = sh->max_frame_width;
+        fh->frame_height = sh->max_frame_height;
+    }
+
+    if (!sh->reduced_still_picture_header && !fh->disable_cdf_update)
+        stb_av1_gb_bit(gb); /* refresh_context */
+
+    /* Tiling */
+    {
+        int sbsz_log2 = 6 + sh->sb128;
+        int sbsz = 64 << sh->sb128;
+        int sbw = (fh->frame_width + sbsz - 1) >> sbsz_log2;
+        int sbh = (fh->frame_height + sbsz - 1) >> sbsz_log2;
+        int max_tile_width_sb = 4096 >> sbsz_log2;
+        int max_tile_area_sb = (4096 * 2304) >> (2 * sbsz_log2);
+        int min_log2_cols = stb_av1_tile_log2(max_tile_width_sb, sbw);
+        int max_log2_cols = stb_av1_tile_log2(1, sbw < 64 ? sbw : 64);
+        int max_log2_rows = stb_av1_tile_log2(1, sbh < 64 ? sbh : 64);
+        int min_log2_tiles = (stb_av1_tile_log2(max_tile_area_sb, sbw * sbh) > min_log2_cols)
+            ? stb_av1_tile_log2(max_tile_area_sb, sbw * sbh) : min_log2_cols;
+        int uniform = stb_av1_gb_bit(gb);
+        int log2_cols, log2_rows, cols, rows;
+        if (uniform) {
+            for (log2_cols = min_log2_cols; log2_cols < max_log2_cols && stb_av1_gb_bit(gb); log2_cols++) ;
+            { int tile_w = 1 + ((sbw - 1) >> log2_cols);
+              int min_log2_rows = (min_log2_tiles - log2_cols > 0) ? min_log2_tiles - log2_cols : 0;
+              for (log2_rows = min_log2_rows; log2_rows < max_log2_rows && stb_av1_gb_bit(gb); log2_rows++) ;
+              (void)tile_w; }
+        } else {
+            int widest = 0, area = sbw * sbh;
+            cols = 0;
+            { int sbx;
+              for (sbx = 0; sbx < sbw && cols < 64; cols++) {
+                  int tw = (sbw - sbx < max_tile_width_sb) ? sbw - sbx : max_tile_width_sb;
+                  int w = (tw > 1) ? 1 + (int)stb_av1_gb_uniform(gb, (unsigned)tw) : 1;
+                  sbx += w;
+                  if (w > widest) widest = w;
+              }
+            }
+            log2_cols = stb_av1_tile_log2(1, cols);
+            if (min_log2_tiles) area >>= min_log2_tiles + 1;
+            { int max_th = (area / widest > 1) ? area / widest : 1;
+              int sby;
+              rows = 0;
+              for (sby = 0; sby < sbh && rows < 64; rows++) {
+                  int th = (sbh - sby < max_th) ? sbh - sby : max_th;
+                  int h = (th > 1) ? 1 + (int)stb_av1_gb_uniform(gb, (unsigned)th) : 1;
+                  sby += h;
+              }
+            }
+            log2_rows = stb_av1_tile_log2(1, rows);
+        }
+        if (uniform) {
+            cols = 0;
+            { int tile_w = 1 + ((sbw - 1) >> log2_cols);
+              int sbx;
+              for (sbx = 0; sbx < sbw; sbx += tile_w, cols++) ; }
+            rows = 0;
+            { int min_log2_rows = (min_log2_tiles - log2_cols > 0) ? min_log2_tiles - log2_cols : 0;
+              (void)min_log2_rows;
+              { int tile_h = 1 + ((sbh - 1) >> log2_rows);
+                int sby;
+                for (sby = 0; sby < sbh; sby += tile_h, rows++) ; } }
+        }
+        fh->tile_cols = cols;
+        fh->tile_rows = rows;
+        if (log2_cols || log2_rows) {
+            stb_av1_gb_bits(gb, log2_cols + log2_rows); /* tile update idx */
+            fh->tile_cols = cols; fh->tile_rows = rows;
+            stb_av1_gb_bits(gb, 2); /* n_bytes */
+        }
+    }
+
+    /* Quant */
+    fh->base_q_idx = (int)stb_av1_gb_bits(gb, 8);
+    fh->delta_q_y_dc = 0;
+    if (stb_av1_gb_bit(gb))
+        fh->delta_q_y_dc = stb_av1_gb_sbits(gb, 7);
+    fh->delta_q_u_dc = 0; fh->delta_q_u_ac = 0;
+    fh->delta_q_v_dc = 0; fh->delta_q_v_ac = 0;
+    if (!sh->monochrome) {
+        int diff_uv = sh->separate_uv_delta_q ? stb_av1_gb_bit(gb) : 0;
+        if (stb_av1_gb_bit(gb)) fh->delta_q_u_dc = stb_av1_gb_sbits(gb, 7);
+        if (stb_av1_gb_bit(gb)) fh->delta_q_u_ac = stb_av1_gb_sbits(gb, 7);
+        if (diff_uv) {
+            if (stb_av1_gb_bit(gb)) fh->delta_q_v_dc = stb_av1_gb_sbits(gb, 7);
+            if (stb_av1_gb_bit(gb)) fh->delta_q_v_ac = stb_av1_gb_sbits(gb, 7);
+        } else {
+            fh->delta_q_v_dc = fh->delta_q_u_dc;
+            fh->delta_q_v_ac = fh->delta_q_u_ac;
+        }
+    }
+    fh->using_qmatrix = stb_av1_gb_bit(gb);
+    if (fh->using_qmatrix) {
+        fh->qm_y = (int)stb_av1_gb_bits(gb, 4);
+        fh->qm_u = (int)stb_av1_gb_bits(gb, 4);
+        fh->qm_v = sh->separate_uv_delta_q ? (int)stb_av1_gb_bits(gb, 4) : fh->qm_u;
+    }
+
+    /* Segmentation */
+    fh->segmentation_enabled = stb_av1_gb_bit(gb);
+    if (fh->segmentation_enabled) {
+        if (fh->primary_ref_frame == 7) {
+            fh->segment_update_map = 1;
+            /* update_data = 1, temporal = 0 */
+        } else {
+            fh->segment_update_map = stb_av1_gb_bit(gb);
+            if (fh->segment_update_map)
+                stb_av1_gb_bit(gb); /* temporal */
+            stb_av1_gb_bit(gb); /* update_data */
+        }
+        /* Per-segment data (when update_data=1, which is always for pri_ref=7) */
+        {
+            int i;
+            for (i = 0; i < 8; i++) {
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 9); /* delta_q */
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7); /* delta_lf_y_v */
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7); /* delta_lf_y_h */
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7); /* delta_lf_u */
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7); /* delta_lf_v */
+                if (stb_av1_gb_bit(gb)) stb_av1_gb_bits(gb, 3);  /* ref */
+                stb_av1_gb_bit(gb); /* skip */
+                stb_av1_gb_bit(gb); /* globalmv */
+            }
+        }
+    }
+
+    /* Delta Q/LF flags */
+    if (fh->base_q_idx) {
+        if (stb_av1_gb_bit(gb)) { /* delta_q_present */
+            stb_av1_gb_bits(gb, 2); /* delta_q_res */
+            if (!fh->allow_intrabc) {
+                if (stb_av1_gb_bit(gb)) { /* delta_lf_present */
+                    stb_av1_gb_bits(gb, 2); /* delta_lf_res */
+                    stb_av1_gb_bit(gb); /* delta_lf_multi */
+                }
+            }
+        }
+    }
+
+    /* All_lossless determination */
+    {
+        int delta_lossless = !fh->delta_q_y_dc && !fh->delta_q_u_dc &&
+            !fh->delta_q_u_ac && !fh->delta_q_v_dc && !fh->delta_q_v_ac;
+        int all_lossless = (!fh->base_q_idx && delta_lossless) ? 1 : 0;
+        (void)all_lossless;
+        fh->tx_mode = 2; /* default to SELECT */
+    }
+
+    /* Loopfilter */
+    {
+        int lf_not_lossless = fh->base_q_idx || fh->delta_q_y_dc ||
+            fh->delta_q_u_dc || fh->delta_q_u_ac;
+        if (lf_not_lossless && !fh->allow_intrabc) {
+            stb_av1_gb_bits(gb, 6); /* level_y[0] */
+            stb_av1_gb_bits(gb, 6); /* level_y[1] */
+            if (!sh->monochrome) {
+                stb_av1_gb_bits(gb, 6); /* level_u */
+                stb_av1_gb_bits(gb, 6); /* level_v */
+            }
+            stb_av1_gb_bits(gb, 3); /* sharpness */
+            /* mode_ref_delta_enabled */
+            if (stb_av1_gb_bit(gb)) {
+                if (stb_av1_gb_bit(gb)) { /* mode_ref_delta_update */
+                    int i;
+                    for (i = 0; i < 8; i++)
+                        if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7);
+                    for (i = 0; i < 2; i++)
+                        if (stb_av1_gb_bit(gb)) stb_av1_gb_sbits(gb, 7);
+                }
+            }
+        }
+    }
+
+    /* CDEF */
+    if (sh->enable_cdef && !fh->allow_intrabc) {
+        int not_lossless = fh->base_q_idx != 0;
+        if (not_lossless) {
+            int i, n_bits;
+            fh->cdef_damping = (int)stb_av1_gb_bits(gb, 2) + 3;
+            n_bits = (int)stb_av1_gb_bits(gb, 2);
+            fh->cdef_bits = n_bits;
+            for (i = 0; i < (1 << n_bits); i++) {
+                fh->cdef_y_pri_strength[i] = (int)stb_av1_gb_bits(gb, 4);
+                fh->cdef_y_sec_strength[i] = (int)stb_av1_gb_bits(gb, 2);
+                if (!sh->monochrome) {
+                    fh->cdef_uv_pri_strength[i] = (int)stb_av1_gb_bits(gb, 4);
+                    fh->cdef_uv_sec_strength[i] = (int)stb_av1_gb_bits(gb, 2);
+                }
+            }
+        }
+    }
+
+    /* Restoration */
+    if (sh->enable_restoration && !fh->allow_intrabc) {
+        int not_lossless = fh->base_q_idx != 0;
+        if (not_lossless) {
+            int i;
+            int n_planes = sh->monochrome ? 1 : 3;
+            for (i = 0; i < n_planes; i++) {
+                fh->lr_type[i] = (int)stb_av1_gb_bits(gb, 2);
+                if (fh->lr_type[i] && i == 0) {
+                    fh->lr_unit_size[i] = 6 + sh->sb128;
+                    if (stb_av1_gb_bit(gb)) {
+                        fh->lr_unit_size[i]++;
+                        if (!sh->sb128)
+                            fh->lr_unit_size[i] += stb_av1_gb_bit(gb);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Txfm mode */
+    {
+        int not_lossless = fh->base_q_idx != 0;
+        if (not_lossless)
+            fh->tx_mode = stb_av1_gb_bit(gb) ? 2 /* SWITCHABLE */ : 1 /* LARGEST */;
+        else
+            fh->tx_mode = 0; /* ONLY_4X4 */
+    }
+    fh->skip_mode = 0;
+
+    /* reduced_txtp_set */
+    fh->reduced_tx_set = stb_av1_gb_bit(gb);
+
+    /* Byte-align: tile data starts here */
+    stb_av1_gb_bytealign(gb);
+    *frame_hdr_bytes_out = stb_av1_gb_pos_bytes(gb);
+}
+
 /* MSAC-based sequence header parser.
    obu_hdr_bytes: number of bytes to skip (OBU header byte + LEB128 size field).
    MSAC reads from after these header bytes. */
@@ -5673,6 +6374,13 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
     sh.enable_restoration = 0;
     sh.film_grain_params_present = 0;
     sh.color_description_present = 0;
+    sh.sb128 = 0;
+    sh.filter_intra = 0;
+    sh.separate_uv_delta_q = 0;
+    sh.screen_content_tools = 0; /* ADAPTIVE */
+    sh.force_integer_mv = 0; /* ADAPTIVE */
+    sh.frame_id_numbers_present = 0;
+    sh.order_hint_n_bits = 0;
 
     /* Parse the AV1 bitstream */
     stb_avif_reader_init(&obu_reader, info.av1_data, info.av1_size);
@@ -5694,7 +6402,7 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
         (void)obu_extension_flag;
         obu_size = 0;
 
-while (more_obus && obu_reader.pos < obu_reader.size) {
+ while (more_obus && obu_reader.pos < obu_reader.size) {
             if (!seq_header_found && info.av1c_size > 0) {
                 /* av1C box already provides configuration from container parsing.
                    Values already set in sh from info above. No need to re-parse. */
@@ -5715,22 +6423,34 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
             }
 
 
+
             /* Process based on type */
             switch (obu_type) {
                 case STB_AV1_OBU_SEQUENCE_HEADER: {
-                    /* The av1C box already provides sequence configuration (seq_profile, bit_depth, etc.)
-                       as raw binary format. If av1C was parsed, skip re-parsing with MSAC.
-                       Only parse if we have an OBU-based sequence header in the mdat. */
-                    if (info.av1c_size == 0) {
+                    /* Parse the sequence header OBU to get sb128, filter_intra,
+                       screen_content_tools, etc. — these are NOT in the av1C box.
+                       Then restore av1C/ISPE values for fields they provide. */
 #ifdef STB_AVIF_USE_C89_DAV1D
-                        /* av1C not available: parse from OBU in mdat.
-                           obu_reader.pos already past OBU header + LEB128 size. */
-                        {
-                            struct stb_av1_msac _ms;
-                            stb_av1_msac_init(&_ms, obu_reader.data + obu_reader.pos, (unsigned long)(obu_size), 1);
-                            stb_av1_parse_seq_hdr_msac(&_ms, &sh, NULL, 0);
-                        }
+                    {
+                        struct StbAv1GetBits gb;
+                        int save_bd = sh.bit_depth, save_mono = sh.monochrome;
+                        int save_sx = sh.subsampling_x, save_sy = sh.subsampling_y;
+                        int save_w = sh.max_frame_width, save_h = sh.max_frame_height;
+                        int save_cr = sh.color_range, save_mc = sh.matrix_coefficients;
+                        stb_av1_gb_init(&gb, obu_reader.data + obu_reader.pos, (unsigned int)obu_size);
+                        stb_av1_parse_seq_hdr_getbits(&gb, &sh);
+                        /* Restore av1C/ISPE values */
+                        sh.bit_depth = save_bd;
+                        sh.monochrome = save_mono;
+                        sh.subsampling_x = save_sx;
+                        sh.subsampling_y = save_sy;
+                        sh.max_frame_width = save_w;
+                        sh.max_frame_height = save_h;
+                        sh.color_range = save_cr;
+                        sh.matrix_coefficients = save_mc;
+                    }
 #else
+                    if (info.av1c_size == 0) {
                         {
                             struct stb_avif_reader seq_r;
                             struct stb_av1_bool_reader seq_br;
@@ -5738,10 +6458,8 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                             stb_av1_bool_reader_init(&seq_br, obu_reader.data + obu_reader.pos, (size_t)obu_size);
                             stb_av1_parse_sequence_header_obu(&seq_r, &sh, &seq_br);
                         }
-#endif
                     }
-                    /* If av1C was parsed, the sequence header fields are already set from av1C.
-                       Skip parsing to avoid corrupting them with MSAC reading of raw av1C bytes. */
+#endif
                     seq_header_found = 1;
                     break;
                 }
@@ -5749,9 +6467,11 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                 case STB_AV1_OBU_REDUNDANT_FRAME_HEADER: {
 #ifdef STB_AVIF_USE_C89_DAV1D
                     {
-                        struct stb_av1_msac _ms;
-                        stb_av1_msac_init(&_ms, obu_reader.data + obu_reader.pos, (unsigned long)(obu_size), 1);
-                        stb_av1_parse_frame_hdr_msac(&_ms, &fh, &sh, NULL);
+                        struct StbAv1GetBits gb;
+                        unsigned int hdr_bytes = 0;
+                        stb_av1_gb_init(&gb, obu_reader.data + obu_reader.pos, (unsigned int)obu_size);
+                        stb_av1_parse_frame_hdr_getbits(&gb, &fh, &sh, &hdr_bytes);
+                        /* Frame header OBU has trailing bits; tile data comes in a separate TILE_GROUP OBU */
                     }
 #else
                     {
@@ -5770,11 +6490,31 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                 case STB_AV1_OBU_FRAME: {
 #ifdef STB_AVIF_USE_C89_DAV1D
                     {
-                        stbv_u32 frame_end = 0;
+                        struct StbAv1GetBits gb;
+                        unsigned int hdr_bytes = 0;
                         stbv_u32 sz = obu_size;
-                        stb_av1_msac_init(&stb_c89_msac, obu_reader.data + obu_reader.pos, (unsigned long)(sz), 0);
-                        stb_av1_parse_frame_hdr_msac(&stb_c89_msac, &fh, &sh, &frame_end);
-                        stb_av1_tile_data_bytes = sz - frame_end;
+                        stb_av1_gb_init(&gb, obu_reader.data + obu_reader.pos, (unsigned int)sz);
+                        stb_av1_parse_frame_hdr_getbits(&gb, &fh, &sh, &hdr_bytes);
+                        /* Tile group header: for single tile, no reads.
+                           For multi-tile, read tile_start/tile_end.
+                           After byte-align, tile data begins. */
+                        if (fh.tile_cols * fh.tile_rows > 1) {
+                            if (stb_av1_gb_bit(&gb)) { /* have_tile_pos */
+                                int n_bits = 0;
+                                /* log2_cols + log2_rows — approximate from cols/rows */
+                                int tc = fh.tile_cols, tr = fh.tile_rows;
+                                while ((1 << n_bits) < tc * tr) n_bits++;
+                                stb_av1_gb_bits(&gb, n_bits); /* tile_start */
+                                stb_av1_gb_bits(&gb, n_bits); /* tile_end */
+                            }
+                        }
+                        stb_av1_gb_bytealign(&gb);
+                        {
+                            unsigned int tile_offset = stb_av1_gb_pos_bytes(&gb);
+                            stb_av1_msac_init(&stb_c89_msac,
+                                obu_reader.data + obu_reader.pos + tile_offset,
+                                (unsigned long)(sz - tile_offset), 0);
+                        }
                     }
 #else
                     struct stb_avif_reader frame_r;
@@ -5788,33 +6528,33 @@ while (more_obus && obu_reader.pos < obu_reader.size) {
                     break;
                 }
                 case STB_AV1_OBU_TILE_GROUP: {
-                    /* The tile group data starts at obu_reader.pos */
                     if (frame_header_found) {
 #ifndef STB_AVIF_USE_C89_DAV1D
                         stb_av1_bool_reader_init(&br,
                                                    obu_reader.data + obu_reader.pos,
                                                    (size_t)obu_size);
 #else
-                        /* For separate tile group: re-init from tile group's compressed data.
-                           For combined frame OBU: MSAC already positioned at tile data
-                           from the FRAME case (do nothing). */
-                        if (stb_av1_tile_data_bytes == 0) {
-                            stb_av1_msac_init(&stb_c89_msac,
-                                obu_reader.data + obu_reader.pos,
-                                (unsigned long)(obu_size), 0);
-                            /* Consume TILE_GROUP raw header if multi-tile.
-                               Per AV1 spec section 5.9.2: the tile group header is
-                               only present when NumTilesInFrame > 1. */
-                            if (fh.tile_cols > 1 || fh.tile_rows > 1) {
-                                if (stb_av1_msac_decode_bool_equi(&stb_c89_msac))
-                                    stb_av1_msac_decode_bools(&stb_c89_msac, 10);
+                        /* Separate tile group OBU: init MSAC at tile data start.
+                           For single tile, no tile group header to skip.
+                           For multi-tile, read tile_start/tile_end with getbits. */
+                        {
+                            struct StbAv1GetBits gb;
+                            stb_av1_gb_init(&gb, obu_reader.data + obu_reader.pos, (unsigned int)obu_size);
+                            if (fh.tile_cols * fh.tile_rows > 1) {
+                                if (stb_av1_gb_bit(&gb)) {
+                                    int n_bits = 0;
+                                    int tc = fh.tile_cols, tr = fh.tile_rows;
+                                    while ((1 << n_bits) < tc * tr) n_bits++;
+                                    stb_av1_gb_bits(&gb, n_bits);
+                                    stb_av1_gb_bits(&gb, n_bits);
+                                }
                             }
-                            /* Consume TILE_GROUP raw header if multi-tile.
-                               Per AV1 spec section 5.9.2: the tile group header is
-                               only present when NumTilesInFrame > 1. */
-                            if (fh.tile_cols > 1 || fh.tile_rows > 1) {
-                                if (stb_av1_msac_decode_bool_equi(&stb_c89_msac))
-                                    stb_av1_msac_decode_bools(&stb_c89_msac, 10);
+                            stb_av1_gb_bytealign(&gb);
+                            {
+                                unsigned int tile_offset = stb_av1_gb_pos_bytes(&gb);
+                                stb_av1_msac_init(&stb_c89_msac,
+                                    obu_reader.data + obu_reader.pos + tile_offset,
+                                    (unsigned long)(obu_size - tile_offset), 0);
                             }
                         }
 #endif
