@@ -1953,7 +1953,7 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf) {
 
 struct stb_av1_msac {
     const unsigned char *buf_start, *buf_pos, *buf_end;
-    unsigned long long dif;
+    stbv_u64 dif;
     unsigned rng, cnt;
     int allow_update_cdf;
 };
@@ -1961,16 +1961,17 @@ struct stb_av1_msac {
 static void stb_av1_msac_refill(struct stb_av1_msac *s) {
     const unsigned char *p = s->buf_pos, *e = s->buf_end;
     int c = 64 - (int)s->cnt - 24;
-    unsigned long long d = s->dif;
-    do { if (p >= e) { d |= ~(~(unsigned long long)0xff << c); break; }
-         d |= (unsigned long long)(*p++ ^ 0xff) << c; c -= 8; } while (c >= 0);
+    stbv_u64 d = s->dif;
+    do { if (p >= e) { d |= ~(~(stbv_u64)0xff << c); break; }
+         d |= (stbv_u64)(*p++ ^ 0xff) << c; c -= 8; } while (c >= 0);
     s->dif = d; s->cnt = (unsigned)(64 - c - 24);
     s->buf_pos = p;
 }
 
-static void stb_av1_msac_norm(struct stb_av1_msac *s, unsigned long long d, unsigned r) {
+static void stb_av1_msac_norm(struct stb_av1_msac *s, stbv_u64 d, unsigned r) {
     int d2 = 0, cnt;
     unsigned r0 = r;
+    if (r == 0) { s->rng = 0x8000; return; }
     if (r & 0xff00) { d2 = 8; r >>= 8; }
     if (r & 0xf0) { d2 += 4; r >>= 4; }
     if (r & 0xc)  { d2 += 2; r >>= 2; }
@@ -1991,7 +1992,7 @@ static void stb_av1_msac_init(struct stb_av1_msac *s, const unsigned char *data,
 
 static unsigned stb_av1_msac_decode_bool_equi(struct stb_av1_msac *s) {
     unsigned r = s->rng, v = ((r >> 8) << 7) + 4;
-    unsigned long long d = s->dif, vw = (unsigned long long)v << 48;
+    stbv_u64 d = s->dif, vw = (stbv_u64)v << 48;
     unsigned ret = (d >= vw) ? 1u : 0u;
     if (ret) d -= vw; v += ret * (r - 2 * v);
     stb_av1_msac_norm(s, d, v); return !ret;
@@ -1999,7 +2000,7 @@ static unsigned stb_av1_msac_decode_bool_equi(struct stb_av1_msac *s) {
 
 static unsigned stb_av1_msac_decode_bool(struct stb_av1_msac *s, unsigned f) {
     unsigned r = s->rng, v = ((r >> 8) * (f >> 6) >> 1) + 4;
-    unsigned long long d = s->dif, vw = (unsigned long long)v << 48;
+    stbv_u64 d = s->dif, vw = (stbv_u64)v << 48;
     unsigned ret = (d >= vw) ? 1u : 0u;
     if (ret) d -= vw; v += ret * (r - 2 * v);
     stb_av1_msac_norm(s, d, v); return !ret;
@@ -2027,7 +2028,7 @@ static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned shor
         v += 4 * ((unsigned)(n_symbols - val));
     } while (c < v);
 
-    stb_av1_msac_norm(s, s->dif - ((unsigned long long)v << 48), u - v);
+    { unsigned rng_new = u - v; if (rng_new == 0) rng_new = 1; stb_av1_msac_norm(s, s->dif - ((stbv_u64)v << 48), rng_new); }
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[n_symbols], rate = 4 + (cnt >> 4) + (n_symbols > 2 ? 1u : 0u);
         unsigned i;
@@ -2112,7 +2113,7 @@ typedef union { unsigned char u8; } StbAv1Alias8;
 #define STB_AV1_SET_CTX4(var, off, val) \
     (((StbAv1Alias32 *) &(var)[off])->u32 = (unsigned int)((val) * 0x01010101U))
 #define STB_AV1_SET_CTX8(var, off, val) \
-    (((StbAv1Alias64 *) &(var)[off])->u64 = (unsigned long long)((val) * 0x0101010101010101ULL))
+    (((StbAv1Alias64 *) &(var)[off])->u64 = (stbv_u64)((val) * 0x0101010101010101ULL))
 
 /* memset_pow2 function pointer type */
 typedef void (*StbAv1MemsetFn)(void *ptr, int value);
@@ -2121,7 +2122,7 @@ typedef void (*StbAv1MemsetFn)(void *ptr, int value);
 static void stb_av1_memset_1(void *ptr, int val) { *(unsigned char *)ptr = (unsigned char)val; }
 static void stb_av1_memset_2(void *ptr, int val) { *(unsigned short *)ptr = (unsigned short)((unsigned char)val * 0x0101U); }
 static void stb_av1_memset_4(void *ptr, int val) { *(unsigned int *)ptr = (unsigned int)((unsigned char)val * 0x01010101U); }
-static void stb_av1_memset_8(void *ptr, int val) { *(unsigned long long *)ptr = (unsigned long long)((unsigned char)val * 0x0101010101010101ULL); }
+static void stb_av1_memset_8(void *ptr, int val) { *(unsigned long long *)ptr = (stbv_u64)((unsigned char)val * 0x0101010101010101ULL); }
 
 static const StbAv1MemsetFn stb_av1_memset_pow2[6] = {
     stb_av1_memset_1, stb_av1_memset_2, stb_av1_memset_4,
@@ -2340,6 +2341,7 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
         eob_bin_val = (int)stb_av1_msac_decode_symbol(msac, cdf->coef.eob_bin_1024[plane ? 1 : 0], 10);
     }
     if (eob_bin_val < 0) eob_bin_val = 0;
+    if (eob_bin_val > (int)(3 + eob_bin_sz)) eob_bin_val = (int)(3 + eob_bin_sz);
 
     if (eob_bin_val > 1) {
         int eob_bin = eob_bin_val - 2;
@@ -2417,7 +2419,9 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
                     + pl[2 * stride + 0];
             int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
             int mag_adj = (mag > 512) ? 4 : (mag + 64) >> 7;
-            int ctx = (int)stb_av1_lo_ctx_offsets[sy > 4 ? 4 : sy][sx > 4 ? 4 : sx] + mag_adj;
+            int ctx_sx = (sx >> 2) > 4 ? 4 : (sx >> 2);
+            int ctx_sy = (sy >> 2) > 4 ? 4 : (sy >> 2);
+            int ctx = (int)stb_av1_lo_ctx_offsets[ctx_sy][ctx_sx] + mag_adj;
             int sxy_or;
             if (ctx < 0) ctx = 0;
             if (ctx > 40) ctx = 40;
@@ -4679,7 +4683,7 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
                     while ((1 << (lw + 2)) < tx_w) lw++;
                     while ((1 << (lh + 2)) < tx_h) lh++;
                     if (lw + lh > 2) dq_shift = lw + lh - 2; else dq_shift = 0;
-                    dq_coeffs[sy * tx_w + sx] = (val * deq) >> dq_shift;
+                    dq_coeffs[sy * tx_w + sx] = (val * deq) << dq_shift;
                 }
             }
         }
@@ -4840,15 +4844,16 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
 {
     int tx_w = blk_w, tx_h = blk_h, tx_type = 0;
     int i, uv_mode, block_skip;
-    int coeffs[1024], eob;
+    int coeffs[4096], eob;
     int above_nz = (abs_r > 0) ? ((*above_nz_coeffs >> 6) & 1) : 0;
     int left_nz  = (abs_c > 0) ? ((*left_nz_coeffs >> 6) & 1) : 0;
-    int sctx_y = above_nz + left_nz;
+    int sctx_y = (above_nz && left_nz) ? 3 : (above_nz || left_nz) ? 2 : 0;
     int ctx_above, ctx_left;
     int pred_mode;
     int skip_tx_sz;
     int bw = blk_w > 32 ? 32 : blk_w;
     int bh = blk_h > 32 ? 32 : blk_h;
+    tx_w = bw; tx_h = bh;
     { int sz = bw < bh ? bw : bh;
       skip_tx_sz = 0;
       while ((1 << (skip_tx_sz + 2)) < sz) skip_tx_sz++;
@@ -5035,8 +5040,11 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
         int bw4 = (tc->frame_width + 3) / 4;
         int bh4 = (tc->frame_height + 3) / 4;
         int hsz4 = sz4 / 2; /* half-size in 4px units */
-        int can_h = bx4 + sz4 < bw4;
-        int can_v = by4 + sz4 < bh4;
+        int can_h, can_v;
+        bw4 = bw4 - sb_c * (sb_size / 4); if (bw4 < 0) bw4 = 0;
+        bh4 = bh4 - sb_r * (sb_size / 4); if (bh4 < 0) bh4 = 0;
+        can_h = bx4 + sz4 < bw4;
+        can_v = by4 + sz4 < bh4;
 
         if (!can_h && !can_v) {
             /* Forced split: recurse one level deeper */
@@ -5070,15 +5078,24 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
                                         above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
                 stb_av1_decode_sb_tree(tc, bx4+hsz4, by4+hsz4, bl+1, sb_r, sb_c, sb_size,
                                         above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+            } else if (bp == STB_PARTITION_H) {
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r+blk_sz/2, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
+            } else if (bp == STB_PARTITION_V) {
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz/2, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r, abs_c+blk_sz/2, blk_sz/2, blk_sz, bx4+hsz4/2, above_row_modes+bx4+hsz4/2, above_nz_coeffs+bx4+hsz4/2, left_mode, left_nz_coeffs);
+            } else if (bp == STB_PARTITION_T_TOP_SPLIT||bp == STB_PARTITION_T_BOTTOM_SPLIT||bp == STB_PARTITION_T_LEFT_SPLIT||bp == STB_PARTITION_T_RIGHT_SPLIT) {
+                int hw=blk_sz/2;
+                if(bp==STB_PARTITION_T_TOP_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
+                if(bp==STB_PARTITION_T_BOTTOM_SPLIT){stb_av1_decode_block(tc,abs_r+hw,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
+                if(bp==STB_PARTITION_T_LEFT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,hw,blk_sz,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
+                if(bp==STB_PARTITION_T_RIGHT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,blk_sz,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);}
+            } else if (bp == STB_PARTITION_H4) {
+                int qh=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r+i*qh,abs_c,blk_sz,qh,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);
+            } else if (bp == STB_PARTITION_V4) {
+                int qw=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r,abs_c+i*qw,qw,blk_sz,bx4+i*(hsz4/4),above_row_modes+bx4+i*(hsz4/4),above_nz_coeffs+bx4+i*(hsz4/4),left_mode,left_nz_coeffs);
             } else {
-                /* All other partition types (H, V, T, H4, V4): treat as rectangular NONE.
-                   Correct would need sub-block processing. For initial sync, skip partition. */
-                stb_av1_decode_block(tc, abs_r, abs_c,
-                                      blk_sz, blk_sz,
-                                      bx4,
-                                      above_row_modes + bx4,
-                                      above_nz_coeffs + bx4,
-                                      left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
             }
         } else if (can_h) {
             /* Edge: only H split. Decode bool using gather_top_partition_prob. */
@@ -5344,74 +5361,206 @@ static void stb_av1_decode_frame(struct stb_av1_tile_context *tc)
 /* CDEF FILTER (Constrained Directional Enhancement Filter)                   */
 /* -------------------------------------------------------------------------- */
 
+static const signed char stb_av1_cdef_dirs[8][2] = {
+    { -12+1,-24+2 }, {  0+1,-12+2 }, {  0+1, 0+2 }, {  0+1,12+2 },
+    { 12+1, 24+2 }, { 12+0, 24+1 }, { 12+0, 24+0 }, { 12+0,24-1 },
+};
+static int stb_cdef_clamp(int d, int L) { if(d<-L)return -L; if(d>L)return L; return d; }
+
+static int stb_cdef_dir(const unsigned char *img, int stride) {
+    int d, best=0, c[8]; unsigned bestc=~0u;
+    for(d=0;d<8;d++)c[d]=0;
+    { int iy, ix;
+    for(iy=1;iy<7;iy++)for(ix=1;ix<7;ix++){
+        int gx=(int)img[(iy-1)*stride+ix]+(int)img[(iy-1)*stride+ix+1]
+              -(int)img[(iy+1)*stride+ix]-(int)img[(iy+1)*stride+ix+1];
+        int gy=(int)img[(iy-1)*stride+ix]+(int)img[(iy+1)*stride+ix]
+              -(int)img[(iy-1)*stride+ix+1]-(int)img[(iy+1)*stride+ix+1];
+        c[0]+=(gx<0?-gx:gx);{int s=gx+gy;c[1]+=(s<0?-s:s);}
+        c[2]+=(gy<0?-gy:gy);{int s=gx-gy;c[3]+=(s<0?-s:s);}
+        {int s=-gx+gy;c[4]+=(s<0?-s:s);}c[5]+=(gy<0?-gy:gy)+(gx<0?-gx:gx);
+        c[6]+=(gx<0?-gx:gx)+(gy<0?-gy:gy);{int s=gx+gy;c[7]+=(s<0?-s:s)/2;}}}
+    for(d=0;d<8;d++)if((unsigned)c[d]<bestc){bestc=c[d];best=d;}
+    return best;
+}
+
+static int stb_cdef_pix(const unsigned char *s, int str, int x, int y, int dir, int pri, int sec) {
+    int c=s[y*str+x],pri_off=stb_av1_cdef_dirs[dir][0],sec_off=stb_av1_cdef_dirs[dir][1];
+    int sp=0,ss=0,k,off,py,px;
+    static const signed char m[4]={1,-1,2,-2};
+    for(k=0;k<4;k++){off=m[k]*pri_off;py=off/12;px=off%12;if(px>6)px-=12;if(py>6)py-=12;
+        sp+=stb_cdef_clamp(s[(y+py)*str+(x+px)]-c,pri);}
+    for(k=0;k<4;k++){off=m[k]*sec_off;py=off/12;px=off%12;if(px>6)px-=12;if(py>6)py-=12;
+        ss+=stb_cdef_clamp(s[(y+py)*str+(x+px)]-c,sec);}
+    c+=(sp+((sp>0)?4:0))>>3;c+=(ss+((ss>0)?2:0))>>2;
+    if(c<0)c=0;if(c>255)c=255;return c;
+}
+
 static void stb_av1_cdef_filter_plane(unsigned char *plane, int stride,
                                        int width, int height,
                                        int pri_strength, int sec_strength,
                                        int damping, int bit_depth)
 {
-    int y, x;
-    int dummy_sd;
-
-    (void)bit_depth;
-    (void)damping;
-    (void)sec_strength;
-    dummy_sd = damping + bit_depth - 8;
-    (void)dummy_sd;
-
-    if (pri_strength == 0 && sec_strength == 0)
-        return;
-
-    for (y = 1; y < height - 1; y++) {
-        for (x = 1; x < width - 1; x++) {
-            int c = plane[y * stride + x];
-            int sum_pri = 0;
-            int sum_sec = 0;
-            int count_pri = 0;
-            int count_sec = 0;
-            int sign;
-
-            /* Simplified CDEF: compute directional filter */
-            /* Primary taps (directional) */
-            sign = (c > 128) ? 1 : -1; /* simplified direction detection */
-            (void)sign;
-
-            /* For each direction, compute constraint filter.
-               Simplified: apply a basic low-pass filter. */
-            if (pri_strength > 0) {
-                int p0 = plane[(y-1) * stride + x];
-                int p1 = plane[(y+1) * stride + x];
-                int p2 = plane[y * stride + x-1];
-                int p3 = plane[y * stride + x+1];
-
-                /* Compute difference and constrain */
-                {
-                    int diff;
-                    int tap;
-                    diff = p0 - c;
-                    tap = diff >= 0 ? diff : -diff;
-                    if (tap < pri_strength) { sum_pri += diff; count_pri++; }
-                    diff = p1 - c;
-                    tap = diff >= 0 ? diff : -diff;
-                    if (tap < pri_strength) { sum_pri += diff; count_pri++; }
-                    diff = p2 - c;
-                    tap = diff >= 0 ? diff : -diff;
-                    if (tap < pri_strength) { sum_pri += diff; count_pri++; }
-                    diff = p3 - c;
-                    tap = diff >= 0 ? diff : -diff;
-                    if (tap < pri_strength) { sum_pri += diff; count_pri++; }
-                }
-            }
-
-            /* Apply filter */
-            if (count_pri > 0) {
-                int new_val = c + (sum_pri / count_pri);
-                if (new_val < 0) new_val = 0;
-                if (new_val > 255) new_val = 255;
-                plane[y * stride + x] = (unsigned char)new_val;
-            }
+    int y, x, by, bx, cy;
+    unsigned char *tmp; int tmp_stride;
+    (void)damping;(void)bit_depth;
+    if(pri_strength==0&&sec_strength==0)return;
+    tmp_stride=(width+31)&~31;
+    tmp=(unsigned char *)malloc((size_t)(tmp_stride*height));
+    if(!tmp)return;
+    for(y=0;y<height;y+=8)for(x=0;x<width;x+=8){
+        int bh=8,bw=8,dir;
+        if(y+bh>height)bh=height-y; if(x+bw>width)bw=width-x;
+        if(bh<4||bw<4){for(by=0;by<bh;by++)memcpy(tmp+(y+by)*tmp_stride+x,plane+(y+by)*stride+x,(size_t)bw);continue;}
+        dir=stb_cdef_dir(plane+y*stride+x,stride);
+        for(by=0;by<bh;by++)for(bx=0;bx<bw;bx++){
+            int px=x+bx,py=y+by;
+            if(px<2||px>=width-2||py<2||py>=height-2)tmp[py*tmp_stride+px]=plane[py*stride+px];
+            else tmp[py*tmp_stride+px]=(unsigned char)stb_cdef_pix(plane,stride,px,py,dir,pri_strength,sec_strength);
         }
     }
+    for(cy=0;cy<height;cy++)memcpy(plane+cy*stride,tmp+cy*tmp_stride,(size_t)width);
+    free(tmp);
 }
+
+/* -------------------------------------------------------------------------- */
+/* LOOP RESTORATION — Wiener 7-tap + SGR 3x3, 8-bit only                     */
+/* -------------------------------------------------------------------------- */
+
+static const unsigned short stb_av1_sgr_params[16][2]={
+{140,3236},{112,2158},{93,1618},{80,1438},{70,1295},{58,1177},{47,1079},{37,996},
+{30,925},{25,863},{0,2589},{0,1618},{0,1177},{0,925},{56,0},{22,0}};
+static const unsigned char stb_sgr_xbx[256]={
+255,128,85,64,51,43,37,32,28,26,23,21,20,18,17,16,15,14,14,13,12,12,11,11,10,
+10,9,9,9,8,8,8,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,
+3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+#define STB_LR_STRIDE 390
+
+static void stb_lr_wiener_h(unsigned short *d,const unsigned char *s,const signed short fh[8],int w,int hl,int hr){
+ int x;
+ for(x=0;x<w;x++){int sum=(1<<14)+s[x]*128,i;
+  for(i=0;i<7;i++){int idx=x+i-3;
+   if(idx<0){if(!hl)sum+=s[0]*fh[i];else sum+=s[idx]*fh[i];}
+   else if(idx>=w){if(!hr)sum+=s[w-1]*fh[i];else sum+=s[idx]*fh[i];}
+   else sum+=s[idx]*fh[i];}
+  d[x]=(unsigned short)((sum+8)>>4);}}
+
+static void stb_lr_wiener_v(unsigned char *p,unsigned short **ptrs,const signed short fv[8],int w){
+ int i,k;
+ for(i=0;i<w;i++){int sum=-(1<<12);
+  for(k=0;k<6;k++)sum+=ptrs[k][i]*fv[k];sum+=ptrs[5][i]*fv[6];
+  p[i]=(unsigned char)((sum+1024)>>11);if(p[i]>255)p[i]=255;if(p[i]<0)p[i]=0;}
+ for(i=0;i<5;i++)ptrs[i]=ptrs[i+1];}
+
+static void stb_lr_wiener_hv(unsigned char *p,unsigned short **ptrs,const unsigned char *src,const signed short f[2][8],int w,int hl,int hr){
+ unsigned short tmp[STB_LR_STRIDE];const signed short*fh=f[0],*fv=f[1];int i,k;
+ stb_lr_wiener_h(tmp,src,fh,w,hl,hr);
+ for(i=0;i<w;i++){int sum=-(1<<12);
+  for(k=0;k<6;k++)sum+=ptrs[k][i]*fv[k];sum+=tmp[i]*fv[6];
+  p[i]=(unsigned char)((sum+1024)>>11);if(p[i]>255)p[i]=255;if(p[i]<0)p[i]=0;}
+ for(k=0;k<6;k++)ptrs[k]=ptrs[k+1];ptrs[6]=ptrs[0];}
+
+static void stb_lr_wiener(unsigned char *p,int stride,int w,int h,const signed short f[2][8],int hl,int hr,int ht,int hb,const unsigned char *lpf){
+ unsigned short hor[6*STB_LR_STRIDE],*ptrs[7],*rows[6];int i;
+ for(i=0;i<6;i++)rows[i]=&hor[i*STB_LR_STRIDE];
+ if(ht){ptrs[0]=rows[0];ptrs[1]=rows[0];ptrs[2]=rows[1];ptrs[3]=rows[2];ptrs[4]=rows[2];ptrs[5]=rows[2];
+  stb_lr_wiener_h(rows[0],lpf,f[0],w,hl,hr);stb_lr_wiener_h(rows[1],lpf+stride,f[0],w,hl,hr);
+  stb_lr_wiener_h(rows[2],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv1;ptrs[4]=ptrs[5]=rows[3];
+  stb_lr_wiener_h(rows[3],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv2;ptrs[5]=rows[4];
+  stb_lr_wiener_h(rows[4],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv3;ptrs[6]=ptrs[5]+STB_LR_STRIDE;}
+ else{ptrs[0]=rows[0];ptrs[1]=rows[0];ptrs[2]=rows[0];ptrs[3]=rows[0];ptrs[4]=rows[0];ptrs[5]=rows[0];
+  stb_lr_wiener_h(rows[0],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv1;ptrs[4]=ptrs[5]=rows[1];
+  stb_lr_wiener_h(rows[1],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv2;ptrs[5]=rows[2];
+  stb_lr_wiener_h(rows[2],p,f[0],w,hl,hr);p+=stride;if(--h<=0)goto lrv3;ptrs[6]=rows[3];
+  stb_lr_wiener_hv(p,ptrs,p,f,w,hl,hr);p+=stride;if(--h<=0)goto lrv3;ptrs[6]=rows[4];
+  stb_lr_wiener_hv(p,ptrs,p,f,w,hl,hr);p+=stride;if(--h<=0)goto lrv3;}
+ ptrs[6]=ptrs[5]+STB_LR_STRIDE;
+ do{stb_lr_wiener_hv(p,ptrs,p,f,w,hl,hr);p+=stride;}while(--h>0);
+ if(!hb)goto lrv3;p+=stride;p+=stride;
+ lrv1:stb_lr_wiener_v(p,ptrs,f[1],w);return;
+ lrv3:stb_lr_wiener_v(p,ptrs,f[1],w);p+=stride;
+ lrv2:stb_lr_wiener_v(p,ptrs,f[1],w);}
+
+static void stb_lr_sgr_box3h(signed int*sumsq,int*sum,const unsigned char*s,int w,int hl,int hr){
+ int a=hl?s[-2]:s[0],b=hl?s[-1]:s[0],x;
+ for(x=-1;x<w+1;x++){int c=(x+1<w||hr)?s[x+1]:s[w-1];
+  sum[x]=a+b+c;sumsq[x]=a*a+b*b+c*c;a=b;b=c;}}
+
+static void stb_lr_sgr_box3v(signed int**sq,int**sm,signed int*oq,int*om,int w){
+ int x;for(x=0;x<w+2;x++){oq[x]=sq[0][x]+sq[1][x]+sq[2][x];om[x]=sm[0][x]+sm[1][x]+sm[2][x];}}
+
+static void stb_lr_sgr_calc(signed int*AA,int*BB,int w,int s,int n,int obx){
+ int i;for(i=0;i<w+2;i++){unsigned p=(unsigned)(AA[i]*n-BB[i]*BB[i]);
+  unsigned z=(p*(unsigned)s+(1<<19))>>20;unsigned x=stb_sgr_xbx[z>255?255:z];
+  AA[i]=(int)((x*BB[i]*obx+(1<<11))>>12);BB[i]=(int)x;}}
+
+static void stb_lr_sgr3(unsigned char*p,int stride,int w,int h,const unsigned short pr[2],int hl,int hr,int ht,int hb,const unsigned char*lpf){
+#define SGB 400
+ signed int sqb[SGB*3+16],*sqpt[3],*sqr[3];int smb[SGB*3+16],*smt[3],*smr[3];
+ signed int Ab[SGB*3+16],*Apt[3];int Bb[SGB*3+16],*Bpt[3];
+ int i,s=(int)pr[1],w1=(int)pr[0],*sumpt[3],*sum_rows[3];
+ for(i=0;i<3;i++){sqr[i]=&sqb[i*SGB];smr[i]=&smb[i*SGB];Apt[i]=&Ab[i*SGB];Bpt[i]=&Bb[i*SGB];}
+ if(ht){sqpt[0]=sqr[0];sqpt[1]=sqr[1];sqpt[2]=sqr[2];smt[0]=smr[0];smt[1]=smr[1];smt[2]=smr[2];
+  stb_lr_sgr_box3h(sqr[0],smr[0],lpf,w,hl,hr);stb_lr_sgr_box3h(sqr[1],smr[1],lpf+stride,w,hl,hr);
+  stb_lr_sgr_box3h(sqr[2],smr[2],p,w,hl,hr);p+=stride;
+  stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+  {int i;for(i=0;i<2;i++){sqpt[i]=sqpt[i+1];smt[i]=smt[i+1];Apt[i]=Apt[i+1];Bpt[i]=Bpt[i+1];}}
+  if(--h<=0)goto lsgv1;sqpt[2]=sqr[2];smt[2]=smr[2];}
+ else{sqpt[0]=sqr[0];sqpt[1]=sqr[0];sqpt[2]=sqr[0];smt[0]=smr[0];smt[1]=smr[0];smt[2]=smr[0];
+  stb_lr_sgr_box3h(sqr[0],smr[0],p,w,hl,hr);p+=stride;
+  stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+  {int i;for(i=0;i<2;i++){sqpt[i]=sqpt[i+1];smt[i]=smt[i+1];Apt[i]=Apt[i+1];Bpt[i]=Bpt[i+1];}}
+  if(--h<=0)goto lsgv1;sqpt[2]=sqr[1];smt[2]=smr[1];}
+ do{stb_lr_sgr_box3h(sqpt[2],smt[2],p,w,hl,hr);p+=stride;
+  stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+  {int i,tmp[STB_LR_STRIDE];for(i=0;i<w;i++){int a=(Bpt[1][i+1]+Bpt[1][i]+Bpt[1][i+2]+Bpt[0][i+1]+Bpt[2][i+1])*4+(Bpt[0][i]+Bpt[2][i]+Bpt[0][i+2]+Bpt[2][i+2])*3;
+   int b=(Apt[1][i+1]+Apt[1][i]+Apt[1][i+2]+Apt[0][i+1]+Apt[2][i+1])*4+(Apt[0][i]+Apt[2][i]+Apt[0][i+2]+Apt[2][i+2])*3;
+   tmp[i]=(b-a*(int)(p-stride)[i]+(1<<8))>>9;}
+  for(i=0;i<w;i++){int v=w1*tmp[i];int nv=(int)(p-stride)[i]+((v+(1<<10))>>11);
+   if(nv<0)nv=0;if(nv>255)nv=255;(p-stride)[i]=(unsigned char)nv;}}
+  {int i;for(i=0;i<2;i++){sqpt[i]=sqpt[i+1];smt[i]=smt[i+1];Apt[i]=Apt[i+1];Bpt[i]=Bpt[i+1];}}
+ }while(--h>0);
+ if(!hb)goto lsgv2;
+ stb_lr_sgr_box3h(sqpt[2],smt[2],p,w,hl,hr);p+=stride;
+ stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+ {int i,tmp[STB_LR_STRIDE];for(i=0;i<w;i++){int a=(Bpt[1][i+1]+Bpt[1][i]+Bpt[1][i+2]+Bpt[0][i+1]+Bpt[2][i+1])*4+(Bpt[0][i]+Bpt[2][i]+Bpt[0][i+2]+Bpt[2][i+2])*3;
+  int b=(Apt[1][i+1]+Apt[1][i]+Apt[1][i+2]+Apt[0][i+1]+Apt[2][i+1])*4+(Apt[0][i]+Apt[2][i]+Apt[0][i+2]+Apt[2][i+2])*3;
+  tmp[i]=(b-a*(int)(p-stride)[i]+(1<<8))>>9;}
+ for(i=0;i<w;i++){int v=w1*tmp[i];int nv=(int)(p-stride)[i]+((v+(1<<10))>>11);
+  if(nv<0)nv=0;if(nv>255)nv=255;(p-stride)[i]=(unsigned char)nv;}}
+ return;
+ lsgv2:sqpt[2]=sqpt[1];smt[2]=smt[1];stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+ {int i,tmp[STB_LR_STRIDE];for(i=0;i<w;i++){int a=(Bpt[1][i+1]+Bpt[1][i]+Bpt[1][i+2]+Bpt[0][i+1]+Bpt[2][i+1])*4+(Bpt[0][i]+Bpt[2][i]+Bpt[0][i+2]+Bpt[2][i+2])*3;
+  int b=(Apt[1][i+1]+Apt[1][i]+Apt[1][i+2]+Apt[0][i+1]+Apt[2][i+1])*4+(Apt[0][i]+Apt[2][i]+Apt[0][i+2]+Apt[2][i+2])*3;
+  tmp[i]=(b-a*(int)(p-stride)[i]+(1<<8))>>9;}
+ for(i=0;i<w;i++){int v=w1*tmp[i];int nv=(int)(p-stride)[i]+((v+(1<<10))>>11);
+  if(nv<0)nv=0;if(nv>255)nv=255;(p-stride)[i]=(unsigned char)nv;}}
+ return;
+ lsgv1:sqpt[2]=sqpt[1];smt[2]=smt[1];stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+ {int i;for(i=0;i<2;i++){sqpt[i]=sqpt[i+1];smt[i]=smt[i+1];Apt[i]=Apt[i+1];Bpt[i]=Bpt[i+1];}}
+ goto lsgv1_cont;
+ lsgv1_cont:
+ sqpt[2]=sqpt[1];smt[2]=smt[1];stb_lr_sgr_box3v(sqpt,smt,Apt[2],Bpt[2],w);stb_lr_sgr_calc(Apt[2],Bpt[2],w,s,9,455);
+ {int i,tmp[STB_LR_STRIDE];for(i=0;i<w;i++){int a=(Bpt[1][i+1]+Bpt[1][i]+Bpt[1][i+2]+Bpt[0][i+1]+Bpt[2][i+1])*4+(Bpt[0][i]+Bpt[2][i]+Bpt[0][i+2]+Bpt[2][i+2])*3;
+  int b=(Apt[1][i+1]+Apt[1][i]+Apt[1][i+2]+Apt[0][i+1]+Apt[2][i+1])*4+(Apt[0][i]+Apt[2][i]+Apt[0][i+2]+Apt[2][i+2])*3;
+  tmp[i]=(b-a*(int)(p-stride)[i]+(1<<8))>>9;}
+ for(i=0;i<w;i++){int v=w1*tmp[i];int nv=(int)(p-stride)[i]+((v+(1<<10))>>11);
+  if(nv<0)nv=0;if(nv>255)nv=255;(p-stride)[i]=(unsigned char)nv;}}
+#undef SGB
+}
+
+static void stb_av1_loop_restoration_plane(unsigned char *plane,int stride,int width,int height,int lr_type,const signed short wiener_f[2][8],const unsigned short sgr_p[2],int lr_us){
+ int y;(void)lr_us;
+ for(y=0;y<height;y+=lr_us){int uh=lr_us;const unsigned char*lpf=plane+(y>0?y-2:y)*stride;
+  if(y+uh>height)uh=height-y;
+  if(lr_type==0)stb_lr_wiener(plane+y*stride,stride,width,uh,wiener_f,1,1,(y>0),(y+uh<height),lpf);
+  else stb_lr_sgr3(plane+y*stride,stride,width,uh,sgr_p,1,1,(y>0),(y+uh<height),lpf);}}
+#undef STB_LR_STRIDE
 
 
 #ifdef STB_AVIF_USE_C89_DAV1D
