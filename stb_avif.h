@@ -6923,6 +6923,10 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
                     v_val = (int)info.plane_v[row * info.stride_v + col];
                 }
 
+                if (row == 0 && col < 10) {
+                    fprintf(stderr, "RAW[%d]: Y=%d U=%d V=%d\n", col, y_val, u_val, v_val);
+                }
+
                 /* Range expansion for limited range (color_range=0) */
                 if (sh.color_range == 0) {
                     y_val = ((y_val - 16) * 255) / 219;
@@ -6961,6 +6965,10 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
                 if (g > 255) g = 255;
                 if (b < 0) b = 0;
                 if (b > 255) b = 255;
+
+                if (row == 0 && col < 10) {
+                    fprintf(stderr, "RGB[%d]: (%d,%d,%d) mc=%d\n", col, r, g, b, sh.matrix_coefficients);
+                }
 
                 result[(row * info.width + col) * output_channels + 0] = (unsigned char)r;
                 result[(row * info.width + col) * output_channels + 1] = (unsigned char)g;
