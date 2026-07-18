@@ -3396,6 +3396,22 @@ static const unsigned char stb_av1_lo_ctx_offsets[5][5] = {
 /* CDF-based coefficient decoder with proper scan-order context mapping.
    Decodes coefficients in scan order, computing context from (x,y) position
    using the lo_ctx_offsets table (TX_CLASS_2D, mag_adj = 0). */
+static int stb_av1_get_dc_sign_ctx(unsigned char *a_ctx, unsigned char *l_ctx, int tx_w, int tx_h) {
+    /* Extract sign bits (bits 6-7) from above/left lcoef.
+       bit 6=1: no DC coefficient; bit 7=1: negative DC sign.
+       a>>6 yields: 0=positive, 1=no-coeff, 2=negative.
+       s = sum(above) + sum(left) - (num_above + num_left)
+       return (s != 0) + (s > 0)  → {0, 1, 2} */
+    int s = 0;
+    int n = 0, i;
+    int tx4 = tx_w / 4;
+    if (tx4 < 1) tx4 = 1;
+    for (i = 0; i < tx4 && a_ctx; i++) { s += (a_ctx[i] >> 6); n++; }
+    { int ty4 = tx_h / 4; if (ty4 < 1) ty4 = 1;
+      for (i = 0; i < ty4 && l_ctx; i++) { s += (l_ctx[i] >> 6); n++; }
+      s -= n; }
+    return (s != 0) + (s > 0);
+}
 static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int tx_w, int tx_h, int *eob, struct StbCdfContext *cdf, int plane, unsigned char *a_ctx, unsigned char *l_ctx) {
     int max_coeffs = tx_w * tx_h, i;
     int tx_sz_idx;
@@ -3570,7 +3586,7 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
 
             coeffs[0] = tok;
             if (tok > 0) {
-                if (stb_av1_msac_decode_bool_equi(msac))
+                if (stb_av1_msac_decode_bool_adapt(msac, cdf->coef.dc_sign[plane ? 1 : 0][0]))
                     coeffs[0] = -tok;
             }
         }
@@ -4461,6 +4477,18 @@ struct stb_av1_tile_context {
     /* Bit depth */
     int bit_depth;
     int pixel_max;
+
+    /* Partition context arrays for cross-superblock context propagation.
+       above_part[col_in_4px] = partition type of block at that column position
+       from the previous SB row. left_part[row_in_4px] = from previous SB column. */
+    unsigned char frame_above_part[4096];
+    unsigned char frame_left_part[4096];
+
+    /* Mode and NZ coefficient context for cross-superblock propagation */
+    unsigned char frame_above_modes[4096];
+    unsigned char frame_above_nz[4096];
+    unsigned char frame_left_modes[4096];
+    unsigned char frame_left_nz[4096];
 };
 
 /* Dequantization lookup table from dav1d: [bit_depth_idx][qindex][DC/AC].
@@ -6261,8 +6289,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         pred_mode = (int)stb_av1_msac_decode_symbol(tc->msac, mode_cdf, 13);
         if (pred_mode < 0) pred_mode = 0;
         if (pred_mode > 12) pred_mode = 12;
-        *above_row_modes = (unsigned char)pred_mode;
-        *left_mode = (unsigned char)pred_mode;
+        { int _bw4 = bw / 4; int _bh4 = bh / 4; int _i;
+          for (_i = 0; _i < _bw4; _i++) above_row_modes[_i] = (unsigned char)pred_mode;
+          for (_i = 0; _i < _bh4; _i++) left_mode[_i] = (unsigned char)pred_mode; }
     } else {
         pred_mode = STB_AV1_DC_PRED;
     }
@@ -6336,8 +6365,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
 } }
         {
             unsigned char nz_flag = (!block_skip) ? 0x40 : 0;
-            *above_nz_coeffs = nz_flag;
-            *left_nz_coeffs = nz_flag;
+            { int _bw4 = bw / 4; int _bh4 = bh / 4; int _i;
+              for (_i = 0; _i < _bw4; _i++) above_nz_coeffs[_i] = nz_flag;
+              for (_i = 0; _i < _bh4; _i++) left_nz_coeffs[_i] = nz_flag; }
         }
     }
 
@@ -6405,14 +6435,17 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
 /* Recursive partition tree decoder for one superblock.
    bl: block level (0=128x128, 1=64x64, 2=32x32, 3=16x16, 4=8x8, 5=4x4).
    For a 64x64 SB, start at bl=1.
-   bx4, by4: position within SB in 4px units (SB-local coords). */
+   bx4, by4: position within SB in 4px units (SB-local coords).
+   above_part/left_part: partition context arrays (indexed by 4px unit). */
 static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
                                     int bx4, int by4, int bl,
                                     int sb_r, int sb_c, int sb_size,
                                     unsigned char *above_row_modes,
                                     unsigned char *above_nz_coeffs,
-                                    unsigned char *left_mode,
-                                    unsigned char *left_nz_coeffs)
+                                    unsigned char *left_modes,
+                                    unsigned char *left_nzs,
+                                    unsigned char *above_part,
+                                    unsigned char *left_part)
 {
     int sz4 = 32 >> bl; /* block size in 4px units */
     int blk_sz = sz4 * 4; /* block size in pixels */
@@ -6429,7 +6462,7 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
                               bx4,
                               above_row_modes + bx4,
                               above_nz_coeffs + bx4,
-                              left_mode, left_nz_coeffs);
+                              left_modes + by4, left_nzs + by4);
         return;
     }
 
@@ -6448,7 +6481,8 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
             stb_av1_decode_sb_tree(tc, bx4, by4, bl + 1,
                                     sb_r, sb_c, sb_size,
                                     above_row_modes, above_nz_coeffs,
-                                    left_mode, left_nz_coeffs);
+                                    left_modes, left_nzs,
+                                    above_part, left_part);
             return;
         }
 
@@ -6461,14 +6495,17 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
         (unsigned)(tc->msac->dif >> 32), (unsigned)(tc->msac->dif & 0xFFFFFFFF), tc->msac->rng, tc->msac->cnt);
     _pd++;
 } }
+            { int _pctx = stb_av1_get_partition_ctx(above_part, left_part, bl, bx4, by4);
             int bp = (int)stb_av1_msac_decode_symbol(tc->msac,
-                        tc->cdf->partition[bl][0], (unsigned long)stb_av1_partition_nsym[bl]);
+                        tc->cdf->partition[bl][_pctx], (unsigned long)stb_av1_partition_nsym[bl]);
 { static int _pd = 0; if (_pd < 5) {
-    fprintf(stderr, "[DBG_PART] bp=%d msac after: dif=0x%08x%08x rng=%u cnt=%d\n", bp,
+    fprintf(stderr, "[DBG_PART] bp=%d ctx=%d msac after: dif=0x%08x%08x rng=%u cnt=%d\n", bp, _pctx,
         (unsigned)(tc->msac->dif >> 32), (unsigned)(tc->msac->dif & 0xFFFFFFFF), tc->msac->rng, tc->msac->cnt);
     _pd++;
 } }
             if (bp < 0) bp = 0;
+            /* Update partition context arrays */
+            { int _i; for (_i = 0; _i < sz4; _i++) { above_part[bx4+_i] = (unsigned char)bp; left_part[by4+_i] = (unsigned char)bp; } }
 
 
             if (bp == STB_PARTITION_NONE) {
@@ -6477,69 +6514,88 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
                                       bx4,
                                       above_row_modes + bx4,
                                       above_nz_coeffs + bx4,
-                                      left_mode, left_nz_coeffs);
+                                      left_modes + by4, left_nzs + by4);
             } else if (bp == STB_PARTITION_SPLIT) {
                 stb_av1_decode_sb_tree(tc, bx4,     by4,     bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
                 stb_av1_decode_sb_tree(tc, bx4+hsz4, by4,     bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
                 stb_av1_decode_sb_tree(tc, bx4,     by4+hsz4, bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
                 stb_av1_decode_sb_tree(tc, bx4+hsz4, by4+hsz4, bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
             } else if (bp == STB_PARTITION_H) {
-                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
-                stb_av1_decode_block(tc, abs_r+blk_sz/2, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_modes+by4, left_nzs+by4);
+                stb_av1_decode_block(tc, abs_r+blk_sz/2, abs_c, blk_sz, blk_sz/2, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_modes+by4+hsz4, left_nzs+by4+hsz4);
             } else if (bp == STB_PARTITION_V) {
-                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz/2, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
-                stb_av1_decode_block(tc, abs_r, abs_c+blk_sz/2, blk_sz/2, blk_sz, bx4+hsz4/2, above_row_modes+bx4+hsz4/2, above_nz_coeffs+bx4+hsz4/2, left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz/2, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_modes+by4, left_nzs+by4);
+                stb_av1_decode_block(tc, abs_r, abs_c+blk_sz/2, blk_sz/2, blk_sz, bx4+hsz4/2, above_row_modes+bx4+hsz4/2, above_nz_coeffs+bx4+hsz4/2, left_modes+by4, left_nzs+by4);
             } else if (bp == STB_PARTITION_T_TOP_SPLIT||bp == STB_PARTITION_T_BOTTOM_SPLIT||bp == STB_PARTITION_T_LEFT_SPLIT||bp == STB_PARTITION_T_RIGHT_SPLIT) {
                 int hw=blk_sz/2;
-                if(bp==STB_PARTITION_T_TOP_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
-                if(bp==STB_PARTITION_T_BOTTOM_SPLIT){stb_av1_decode_block(tc,abs_r+hw,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
-                if(bp==STB_PARTITION_T_LEFT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,hw,blk_sz,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);}
-                if(bp==STB_PARTITION_T_RIGHT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,blk_sz,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);}
+                if(bp==STB_PARTITION_T_TOP_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4+hsz4/2,left_nzs+by4+hsz4/2);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_modes+by4+hsz4/2,left_nzs+by4+hsz4/2);}
+                if(bp==STB_PARTITION_T_BOTTOM_SPLIT){stb_av1_decode_block(tc,abs_r+hw,abs_c,blk_sz,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4+hsz4/2,left_nzs+by4+hsz4/2);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_modes+by4,left_nzs+by4);}
+                if(bp==STB_PARTITION_T_LEFT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c,hw,blk_sz,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r+hw,abs_c+hw,hw,hw,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_modes+by4+hsz4/2,left_nzs+by4+hsz4/2);}
+                if(bp==STB_PARTITION_T_RIGHT_SPLIT){stb_av1_decode_block(tc,abs_r,abs_c+hw,hw,blk_sz,bx4+hsz4/2,above_row_modes+bx4+hsz4/2,above_nz_coeffs+bx4+hsz4/2,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4,left_nzs+by4);stb_av1_decode_block(tc,abs_r+hw,abs_c,hw,hw,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4+hsz4/2,left_nzs+by4+hsz4/2);}
             } else if (bp == STB_PARTITION_H4) {
-                int qh=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r+i*qh,abs_c,blk_sz,qh,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_mode,left_nz_coeffs);
+                int qh=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r+i*qh,abs_c,blk_sz,qh,bx4,above_row_modes+bx4,above_nz_coeffs+bx4,left_modes+by4+i*(hsz4/2),left_nzs+by4+i*(hsz4/2));
             } else if (bp == STB_PARTITION_V4) {
-                int qw=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r,abs_c+i*qw,qw,blk_sz,bx4+i*(hsz4/4),above_row_modes+bx4+i*(hsz4/4),above_nz_coeffs+bx4+i*(hsz4/4),left_mode,left_nz_coeffs);
+                int qw=blk_sz/4,i; for(i=0;i<4;i++)stb_av1_decode_block(tc,abs_r,abs_c+i*qw,qw,blk_sz,bx4+i*(hsz4/2),above_row_modes+bx4+i*(hsz4/2),above_nz_coeffs+bx4+i*(hsz4/2),left_modes+by4,left_nzs+by4);
             } else {
-                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_mode, left_nz_coeffs);
+                stb_av1_decode_block(tc, abs_r, abs_c, blk_sz, blk_sz, bx4, above_row_modes+bx4, above_nz_coeffs+bx4, left_modes+by4, left_nzs+by4);
             }
+            } /* end _pctx scope */
         } else if (can_h) {
             /* Edge: only H split. Decode bool using gather_top_partition_prob. */
-            unsigned prob = stb_av1_gather_top_partition(tc->cdf->partition[bl][0], bl);
+            { int _pctx = stb_av1_get_partition_ctx(above_part, left_part, bl, bx4, by4);
+            unsigned prob = stb_av1_gather_top_partition(tc->cdf->partition[bl][_pctx], bl);
             unsigned bit = stb_av1_msac_decode_bool(tc->msac, prob);
             if (bit) {
                 stb_av1_decode_sb_tree(tc, bx4,     by4,     bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
                 stb_av1_decode_sb_tree(tc, bx4+hsz4, by4,     bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
             } else {
                 stb_av1_decode_block(tc, abs_r, abs_c,
                                       blk_sz, blk_sz,
                                       bx4,
                                       above_row_modes + bx4,
                                       above_nz_coeffs + bx4,
-                                      left_mode, left_nz_coeffs);
+                                      left_modes + by4, left_nzs + by4);
             }
+            /* Update partition context */
+            { int _bp = bit ? STB_PARTITION_SPLIT : STB_PARTITION_H;
+              int _i; for (_i = 0; _i < sz4; _i++) { above_part[bx4+_i] = (unsigned char)_bp; left_part[by4+_i] = (unsigned char)_bp; } }
+            } /* end _pctx scope */
         } else {
             /* Edge: only V split. Decode bool using gather_left_partition_prob. */
-            unsigned prob = stb_av1_gather_left_partition(tc->cdf->partition[bl][0], bl);
+            { int _pctx = stb_av1_get_partition_ctx(above_part, left_part, bl, bx4, by4);
+            unsigned prob = stb_av1_gather_left_partition(tc->cdf->partition[bl][_pctx], bl);
             unsigned bit = stb_av1_msac_decode_bool(tc->msac, prob);
             if (bit) {
                 stb_av1_decode_sb_tree(tc, bx4,     by4,     bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
                 stb_av1_decode_sb_tree(tc, bx4,     by4+hsz4, bl+1, sb_r, sb_c, sb_size,
-                                        above_row_modes, above_nz_coeffs, left_mode, left_nz_coeffs);
+                                        above_row_modes, above_nz_coeffs, left_modes, left_nzs,
+                                        above_part, left_part);
             } else {
                 stb_av1_decode_block(tc, abs_r, abs_c,
                                       blk_sz, blk_sz,
                                       bx4,
                                       above_row_modes + bx4,
                                       above_nz_coeffs + bx4,
-                                      left_mode, left_nz_coeffs);
+                                      left_modes + by4, left_nzs + by4);
             }
+            /* Update partition context */
+            { int _bp = bit ? STB_PARTITION_SPLIT : STB_PARTITION_V;
+              int _i; for (_i = 0; _i < sz4; _i++) { above_part[bx4+_i] = (unsigned char)_bp; left_part[by4+_i] = (unsigned char)_bp; } }
+            } /* end _pctx scope */
         }
     }
 }
@@ -6552,16 +6608,45 @@ static void stb_av1_decode_superblock(struct stb_av1_tile_context *tc,
 
     unsigned char above_row_modes[256];
     unsigned char above_nz_coeffs[256];
-    unsigned char left_nz_coeffs = 0;
-    unsigned char left_mode = 0;
+    unsigned char left_modes[256];
+    unsigned char left_nzs[256];
+    unsigned char above_part[256];
+    unsigned char left_part[256];
+    int sb_sz4 = sb_size / 4;
+    int sc4 = sb_c * sb_sz4;
+    int sr4 = sb_r * sb_sz4;
+    int i;
 
     memset(above_row_modes, 0, sizeof(above_row_modes));
     memset(above_nz_coeffs, 0, sizeof(above_nz_coeffs));
+    memset(left_modes, 0, sizeof(left_modes));
+    memset(left_nzs, 0, sizeof(left_nzs));
+
+    /* Initialize context from frame-level arrays */
+    for (i = 0; i < sb_sz4; i++) {
+        above_part[i] = (sc4 + i < 4096) ? tc->frame_above_part[sc4 + i] : 0;
+        left_part[i] = (sr4 + i < 4096) ? tc->frame_left_part[sr4 + i] : 0;
+        above_row_modes[i] = (sc4 + i < 4096) ? tc->frame_above_modes[sc4 + i] : 0;
+        above_nz_coeffs[i] = (sc4 + i < 4096) ? tc->frame_above_nz[sc4 + i] : 0;
+        left_modes[i] = (sr4 + i < 4096) ? tc->frame_left_modes[sr4 + i] : 0;
+        left_nzs[i] = (sr4 + i < 4096) ? tc->frame_left_nz[sr4 + i] : 0;
+    }
 
     stb_av1_decode_sb_tree(tc, 0, 0, sb_size == 128 ? 0 : 1,
                             sb_r, sb_c, sb_size,
                             above_row_modes, above_nz_coeffs,
-                            &left_mode, &left_nz_coeffs);
+                            left_modes, left_nzs,
+                            above_part, left_part);
+
+    /* Save context back to frame-level arrays for next SBs */
+    for (i = 0; i < sb_sz4; i++) {
+        if (sc4 + i < 4096) tc->frame_above_part[sc4 + i] = above_part[i];
+        if (sr4 + i < 4096) tc->frame_left_part[sr4 + i] = left_part[i];
+        if (sc4 + i < 4096) tc->frame_above_modes[sc4 + i] = above_row_modes[i];
+        if (sc4 + i < 4096) tc->frame_above_nz[sc4 + i] = above_nz_coeffs[i];
+        if (sr4 + i < 4096) tc->frame_left_modes[sr4 + i] = left_modes[i];
+        if (sr4 + i < 4096) tc->frame_left_nz[sr4 + i] = left_nzs[i];
+    }
 }
 
 /* main tile decoding routine using CDF-based context-adaptive decoding */
@@ -6573,6 +6658,14 @@ static void stb_av1_decode_frame(struct stb_av1_tile_context *tc)
 
     sb_cols = (tc->frame_width + sb_size - 1) / sb_size;
     sb_rows = (tc->frame_height + sb_size - 1) / sb_size;
+
+    /* Initialize frame-level context arrays to 0 (no neighbors) */
+    memset(tc->frame_above_part, 0, sizeof(tc->frame_above_part));
+    memset(tc->frame_left_part, 0, sizeof(tc->frame_left_part));
+    memset(tc->frame_above_modes, 0, sizeof(tc->frame_above_modes));
+    memset(tc->frame_above_nz, 0, sizeof(tc->frame_above_nz));
+    memset(tc->frame_left_modes, 0, sizeof(tc->frame_left_modes));
+    memset(tc->frame_left_nz, 0, sizeof(tc->frame_left_nz));
 
     tc->total_sb = sb_cols * sb_rows;
     tc->done_sb = 0;
