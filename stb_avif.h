@@ -2906,6 +2906,7 @@ void stb_av1_cdf_full_init(struct StbCdfContext *cdf, int base_q_idx) {
     int qcat = (base_q_idx > 20) + (base_q_idx > 60) + (base_q_idx > 120);
     if (qcat < 0) qcat = 0;
     if (qcat > 3) qcat = 3;
+    { static int once = 0; if (!once) { once = 1; fprintf(stderr, "CDF_INIT: base_q_idx=%d qcat=%d\n", base_q_idx, qcat); } }
     /* Zero-initialize entire context */
     for (i = 0; i < (int)(sizeof(struct StbCdfContext) / sizeof(unsigned short)); i++)
         dst[i] = 0;
@@ -3107,6 +3108,10 @@ static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned shor
         v += 4 * ((unsigned)(n_symbols - val));
     } while (c < v);
 
+    { static int _dbg=0; if (_dbg++<5) { fprintf(stderr,"[SYM] n_sym=%lu val=%u c=%u r=%u u=%u v=%u cdf0=%u cdf1=%u cdf2=%u count=%u dif=0x%08x%08x rng=%u\n",
+        n_symbols, val, c, r, u, v, cdf[0], n_symbols>1?cdf[1]:0, n_symbols>2?cdf[2]:0, cdf[n_symbols],
+        (unsigned)(s->dif>>32),(unsigned)(s->dif),s->rng); } }
+
     { unsigned rng_new = u - v; if (rng_new == 0) rng_new = 1; stb_av1_msac_norm(s, s->dif - ((stbv_u64)v << 48), rng_new); }
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[n_symbols], rate = 4 + (cnt >> 4) + (n_symbols > 2 ? 1u : 0u);
@@ -3120,6 +3125,7 @@ static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned shor
 
 static unsigned stb_av1_msac_decode_bool_adapt(struct stb_av1_msac *s, unsigned short *cdf) {
     unsigned bit = stb_av1_msac_decode_bool(s, *cdf);
+    { static int _dbg=0; if (_dbg++<5) fprintf(stderr,"[BOOL] bit=%u cdf0=%u count=%u dif=0x%08x%08x rng=%u\n",bit,cdf[0],cdf[1],(unsigned)(s->dif>>32),(unsigned)(s->dif),s->rng); }
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[1], rate = 4 + (cnt >> 4);
         if (bit) cdf[0] += (unsigned short)((32768 - cdf[0]) >> rate);
@@ -3424,6 +3430,17 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
     }
     if (eob_bin_val < 0) eob_bin_val = 0;
     if (eob_bin_val > (int)(3 + eob_bin_sz)) eob_bin_val = (int)(3 + eob_bin_sz);
+    { static int __dbg=0; if (__dbg++<2) { fprintf(stderr,"[C89DBG] eob_bin_sz=%d eob_bin_val=%d max_coeffs=%d\n", eob_bin_sz, eob_bin_val, max_coeffs);
+        unsigned short *__pp=NULL; int __ns=0;
+        if (max_coeffs<=16) { __pp=cdf->coef.eob_bin_16[plane?1:0][0]; __ns=4; }
+        else if (max_coeffs<=32) { __pp=cdf->coef.eob_bin_32[plane?1:0][0]; __ns=5; }
+        else if (max_coeffs<=64) { __pp=cdf->coef.eob_bin_64[plane?1:0][0]; __ns=6; }
+        else if (max_coeffs<=128) { __pp=cdf->coef.eob_bin_128[plane?1:0][0]; __ns=7; }
+        else if (max_coeffs<=256) { __pp=cdf->coef.eob_bin_256[plane?1:0][0]; __ns=8; }
+        else if (max_coeffs<=512) { __pp=cdf->coef.eob_bin_512[plane?1:0]; __ns=9; }
+        else { __pp=cdf->coef.eob_bin_1024[plane?1:0]; __ns=10; }
+        int __i; fprintf(stderr,"[C89DBG] eob CDF: "); for(__i=0;__i<__ns;__i++) fprintf(stderr,"%u ",__pp[__i]); fprintf(stderr,"cnt=%u\n",__pp[__ns]); } }
+    { static int __dbg=0; if (__dbg++<2) fprintf(stderr,"[C89DBG] final eob=%d plane=%d\n", *eob, plane); }
 
     if (eob_bin_val > 1) {
         int eob_bin = eob_bin_val - 2;
@@ -6211,6 +6228,12 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
 
     eob = 0; block_skip = 0;
     memset(coeffs, 0, sizeof(coeffs));
+    { static int _once = 0; if (!_once) {
+        _once = 1;
+        fprintf(stderr, "SKIP_CDF[%d][%d] = %d %d\n", skip_tx_sz, sctx_y,
+            tc->cdf->coef.skip[skip_tx_sz][sctx_y][0],
+            tc->cdf->coef.skip[skip_tx_sz][sctx_y][1]);
+    } }
     if (stb_av1_msac_decode_bool_adapt(tc->msac, tc->cdf->coef.skip[skip_tx_sz][sctx_y]))
         block_skip = 1;
 
