@@ -6039,6 +6039,9 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
 
     dequant_dc = stb_av1_get_dequant(qindex, 1, tc->bit_depth);
     dequant_ac = stb_av1_get_dequant(qindex, 0, tc->bit_depth);
+    { static int _dqonce=0; if (!_dqonce) { _dqonce=1;
+      fprintf(stderr,"[RECON_DBG] qindex=%d dc=%d ac=%d bd=%d tx=%dx%d ttype=%d coeff[0]=%d coeff[1]=%d coeff[2]=%d\n",
+        qindex, dequant_dc, dequant_ac, tc->bit_depth, tx_w, tx_h, tx_type, coeffs[0], coeffs[1], coeffs[2]); } }
 
     /* Dequantize with scan-to-raster de-scanning.
        coeffs[i] is the coefficient at scan position i.
@@ -6061,9 +6064,16 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
                 dq_coeffs[sy * tx_w + sx] = val * deq;
             }
         }
+        { static int _dsconce=0; if (!_dsconce) { _dsconce=1;
+          fprintf(stderr,"[RECON_DBG] post-descan: dq[0]=%d dq[1]=%d dq[tx_w]=%d scan[0]=%d shift=%d mask=%d\n",
+            dq_coeffs[0], dq_coeffs[1], dq_coeffs[tx_w], scan[0], shift, mask); } }
     }
 
     stb_av1_inv_transform_2d(dq_coeffs, tx_w, tx_h, tx_type);
+    { static int _itxonce=0; if (!_itxonce) { _itxonce=1;
+      fprintf(stderr,"[RECON_DBG] after_idct: dq[0]=%d dq[1]=%d dq[2]=%d dq[3]=%d dq[4]=%d dq[17]=%d dq[32]=%d dq[48]=%d\n",
+        dq_coeffs[0], dq_coeffs[1], dq_coeffs[2], dq_coeffs[3], dq_coeffs[4],
+        dq_coeffs[17], dq_coeffs[tx_w], dq_coeffs[tx_w*2]); } }
 
     /* Reconstruct: pred + residual, clamp to [0, 255].
        Apply final >>4 scaling to match dav1d's inv_txfm_add_c final shift. */
