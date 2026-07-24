@@ -8676,6 +8676,9 @@ static void stb_av1_parse_frame_hdr_msac(struct stb_av1_msac *msac,
           (void)tcl; (void)trl; }
 
         if (frame_hdr_end) *frame_hdr_end = (stbv_u32)(msac->buf_pos - msac->buf_start);
+        fprintf(stderr, "[FRAME_HDR] type=%d show=%d reduced_still=%d q=%d w=%d h=%d refresh=0x%x\n",
+            fh->frame_type, fh->show_frame, sh->reduced_still_picture_header,
+            fh->base_q_idx, fh->frame_width, fh->frame_height, fh->refresh_frame_flags);
     }
 #endif
 /* -------------------------------------------------------------------------- */
@@ -9039,6 +9042,9 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
                     }
 #endif
                     frame_header_found = 1;
+                    fprintf(stderr, "[FRAME_HDR] type=%d show=%d q=%d w=%d h=%d refresh=0x%x reduced_still=%d\n",
+                        fh.frame_type, fh.show_frame, fh.base_q_idx,
+                        fh.frame_width, fh.frame_height, fh.refresh_frame_flags, sh.reduced_still_picture_header);
                     break;
                 }
                 case STB_AV1_OBU_FRAME: {
