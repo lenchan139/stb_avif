@@ -4136,12 +4136,26 @@ static int stb_av1_decode_intra_mode_cdf(struct stb_av1_msac *msac) {
 /* Position-based context offset for square transform blocks (TX_CLASS_2D).
    Indexed as: lo_ctx_offsets[min(y,4)][min(x,4)] for a 5x5 sub-block grid.
    Maps position to base context index (0-21) before magnitude adjustment (0-4). */
-static const unsigned char stb_av1_lo_ctx_offsets[5][5] = {
-    {  0,  1,  6,  6, 21 },
-    {  1,  6,  6, 21, 21 },
-    {  6,  6, 21, 21, 21 },
-    {  6, 21, 21, 21, 21 },
-    { 21, 21, 21, 21, 21 },
+static const unsigned char stb_av1_lo_ctx_offsets[3][5][5] = {
+    { /* w == h (square) */
+        {  0,  1,  6,  6, 21 },
+        {  1,  6,  6, 21, 21 },
+        {  6,  6, 21, 21, 21 },
+        {  6, 21, 21, 21, 21 },
+        { 21, 21, 21, 21, 21 },
+    }, { /* w > h (wide) */
+        {  0, 16,  6,  6, 21 },
+        { 16, 16,  6, 21, 21 },
+        { 16, 16, 21, 21, 21 },
+        { 16, 16, 21, 21, 21 },
+        { 16, 16, 21, 21, 21 },
+    }, { /* w < h (tall) */
+        {  0, 11, 11, 11, 11 },
+        { 11, 11, 11, 11, 11 },
+        {  6,  6, 21, 21, 21 },
+        {  6, 21, 21, 21, 21 },
+        { 21, 21, 21, 21, 21 },
+    },
 };
 
 /* CDF-based coefficient decoder with proper scan-order context mapping.
@@ -4175,12 +4189,11 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
     /* Coefficient-level skip (dav1d decodes this inside decode_coefs, after txtp) */
     {
         int sctx;
+        sctx = 0;
         if (a_ctx && l_ctx) {
             int above_nz = ((*a_ctx >> 6) & 1);
             int left_nz = ((*l_ctx >> 6) & 1);
-            sctx = (above_nz && left_nz) ? 3 : (above_nz || left_nz) ? 2 : 0;
-        } else {
-            sctx = 0;
+            sctx = above_nz + left_nz; /* 0, 1, or 2 */
         }
         if (stb_av1_msac_decode_bool_adapt(msac, cdf->coef.skip[tx_sz_idx][sctx])) {
             *eob = 0;
@@ -4212,17 +4225,6 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
     }
     if (eob_bin_val < 0) eob_bin_val = 0;
     if (eob_bin_val > (int)(3 + eob_bin_sz)) eob_bin_val = (int)(3 + eob_bin_sz);
-    { static int __dbg=0; if (__dbg++<2) { fprintf(stderr,"[C89DBG] eob_bin_sz=%d eob_bin_val=%d max_coeffs=%d\n", eob_bin_sz, eob_bin_val, max_coeffs);
-        unsigned short *__pp=NULL; int __ns=0;
-        if (max_coeffs<=16) { __pp=cdf->coef.eob_bin_16[plane?1:0][0]; __ns=4; }
-        else if (max_coeffs<=32) { __pp=cdf->coef.eob_bin_32[plane?1:0][0]; __ns=5; }
-        else if (max_coeffs<=64) { __pp=cdf->coef.eob_bin_64[plane?1:0][0]; __ns=6; }
-        else if (max_coeffs<=128) { __pp=cdf->coef.eob_bin_128[plane?1:0][0]; __ns=7; }
-        else if (max_coeffs<=256) { __pp=cdf->coef.eob_bin_256[plane?1:0][0]; __ns=8; }
-        else if (max_coeffs<=512) { __pp=cdf->coef.eob_bin_512[plane?1:0]; __ns=9; }
-        else { __pp=cdf->coef.eob_bin_1024[plane?1:0]; __ns=10; }
-        int __i; fprintf(stderr,"[C89DBG] eob CDF: "); for(__i=0;__i<__ns;__i++) fprintf(stderr,"%u ",__pp[__i]); fprintf(stderr,"cnt=%u\n",__pp[__ns]); } }
-    { static int __dbg=0; if (__dbg++<2) fprintf(stderr,"[C89DBG] final eob=%d plane=%d\n", *eob, plane); }
 
     if (eob_bin_val > 1) {
         int eob_bin = eob_bin_val - 2;
@@ -4235,6 +4237,7 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
     if (eob_bin_val < 0) eob_bin_val = 0;
     if (eob_bin_val >= max_coeffs) eob_bin_val = max_coeffs - 1;
     *eob = eob_bin_val;
+    { static int __dbg2=0; if (__dbg2++<1) fprintf(stderr,"[C89DBG2] final eob=%d eob_bin_val=%d plane=%d\n", *eob, eob_bin_val, plane); }
 
     {
         int shift = 0;
@@ -4262,7 +4265,12 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
         eob_ctx = 1 + (*eob > (2 << tx2dszctx) ? 1 : 0) + (*eob > (4 << tx2dszctx) ? 1 : 0);
         if (eob_ctx > 3) eob_ctx = 3;
 
-        /* Decode EOB position (scan position = eob) */
+        /* === PHASE 1: Decode ALL tokens (unsigned magnitude) without signs ===
+           Token decode order: EOB, then eob-1 down to 1, then DC (position 0).
+           Signs are decoded in Phase 2 after all tokens are decoded,
+           matching dav1d's two-pass order (all tokens first, then all signs). */
+
+        /* EOB position */
         rc_eob = scan[*eob];
         sx_eob = rc_eob >> shift;
         sy_eob = rc_eob & mask;
@@ -4270,11 +4278,9 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
 
         eob_tok = (int)stb_av1_msac_decode_symbol(msac,
             cdf->coef.eob_base_tok[tx_sz_idx][plane ? 1 : 0][eob_ctx], 2);
-        tok = eob_tok + 1; /* eob position always has tok >= 1 */
+        tok = eob_tok + 1;
 
         if (eob_tok == 2) {
-            /* eob_tok == 2 means tok >= 3, decode hi_tok.
-               dav1d: ctx = ((x|y) > 1) ? 14 : 7 (NO hi_mag adjustment) */
             int ctx_br = ((sx_eob | sy_eob) > 1) ? 14 : 7;
             tok = (int)stb_av1_msac_decode_hi_tok(msac,
                 cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
@@ -4284,11 +4290,9 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
         if (tok > 0) {
             unsigned char level = (unsigned char)((eob_tok == 2) ? (tok + (3 << 6)) : (tok * 0x41));
             pl_eob[0] = level;
-            if (stb_av1_msac_decode_bool_equi(msac))
-                coeffs[*eob] = -tok;
         }
 
-        /* Decode AC coefficients from eob-1 down to 1 */
+        /* AC positions: eob-1 down to 1 */
         for (i = *eob - 1; i > 0; i--) {
             int rc = scan[i];
             int sx = rc >> shift;
@@ -4299,10 +4303,10 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
                     + pl[2 * stride + 0];
             int hi_mag = pl[0 * stride + 1] + pl[1 * stride + 0] + pl[1 * stride + 1];
             int mag_adj = (mag > 512) ? 4 : (mag + 64) >> 7;
-            int ctx_sx = (sx >> 2) > 4 ? 4 : (sx >> 2);
-            int ctx_sy = (sy >> 2) > 4 ? 4 : (sy >> 2);
-            int ctx = (int)stb_av1_lo_ctx_offsets[ctx_sy][ctx_sx] + mag_adj;
-            int sxy_or;
+            int ctx_sx = sx > 4 ? 4 : sx;
+            int ctx_sy = sy > 4 ? 4 : sy;
+            int lo_idx = (tx_w > tx_h) ? 1 : (tx_w < tx_h) ? 2 : 0;
+            int ctx = (int)stb_av1_lo_ctx_offsets[lo_idx][ctx_sy][ctx_sx] + mag_adj;
             if (ctx < 0) ctx = 0;
             if (ctx > 40) ctx = 40;
 
@@ -4312,8 +4316,7 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
             if (tok == 3) {
                 int ctx_br;
                 hi_mag &= 63;
-                sxy_or = (sx | sy);
-                ctx_br = (sxy_or > 1 ? 14 : 7) + ((hi_mag > 12) ? 6 : (hi_mag + 1) >> 1);
+                ctx_br = ((sy > 1) ? 14 : 7) + ((hi_mag > 12) ? 6 : (hi_mag + 1) >> 1);
                 if (ctx_br > 20) ctx_br = 20;
                 tok = (int)stb_av1_msac_decode_hi_tok(msac,
                     cdf->coef.br_tok[br_tx][plane ? 1 : 0][ctx_br]);
@@ -4323,19 +4326,17 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
             if (tok > 0) {
                 unsigned char level = (unsigned char)((tok >= 3) ? (tok + (3 << 6)) : (tok * 0x41));
                 pl[0] = level;
-                if (stb_av1_msac_decode_bool_equi(msac))
-                    coeffs[i] = -tok;
             }
         }
 
-        /* Decode DC (scan position 0) with ctx=0 for TX_CLASS_2D */
+        /* DC position (scan position 0) */
         {
             unsigned char *pl = &levels[1 * stride + 1];
             int mag = pl[0 * stride + 1] + pl[1 * stride + 0]
                     + pl[1 * stride + 1] + pl[0 * stride + 2]
                     + pl[2 * stride + 0];
             (void)mag;
-            dc_ctx = 0; /* TX_CLASS_2D: ctx = 0 */
+            dc_ctx = 0;
 
             tok = (int)stb_av1_msac_decode_symbol(msac,
                 cdf->coef.base_tok[tx_sz_idx][plane ? 1 : 0][dc_ctx], 3);
@@ -4351,12 +4352,26 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
             }
 
             coeffs[0] = tok;
-            if (tok > 0) {
-                if (stb_av1_msac_decode_bool_adapt(msac, cdf->coef.dc_sign[plane ? 1 : 0][0]))
-                    coeffs[0] = -tok;
-            }
+        }
+
+        /* === PHASE 2: Decode signs for all non-zero positions ===
+           Order matches dav1d: DC sign first (adaptive bool, with dc_sign_ctx),
+           then AC signs in INCREASING scan index order (equiprobable bool). */
+        if (coeffs[0] > 0) {
+            int dc_sign_ctx = stb_av1_get_dc_sign_ctx(a_ctx, l_ctx, tx_w, tx_h);
+            if (stb_av1_msac_decode_bool_adapt(msac, cdf->coef.dc_sign[plane ? 1 : 0][dc_sign_ctx]))
+                coeffs[0] = -coeffs[0];
+        }
+        for (i = 1; i <= *eob; i++) {
+            if (coeffs[i] > 0 && stb_av1_msac_decode_bool_equi(msac))
+                coeffs[i] = -coeffs[i];
         }
     }
+    { static int _dbg_coeff=1; if (_dbg_coeff) { int k; _dbg_coeff=0;
+      fprintf(stderr,"[COEFFDBG] txw=%d txh=%d eob=%d\n", tx_w, tx_h, *eob);
+      for (k=0; k<max_coeffs; k++) { if (coeffs[k]) fprintf(stderr,"[COEFFDBG]  [%d]=%d", k, coeffs[k]); }
+      fprintf(stderr,"\n");
+    } }
     return *eob;
 }
 
@@ -5964,11 +5979,6 @@ static void stb_av1_inv_adst8_1d(signed int *c, int stride,
     t6a = (((3784 - 4096) * t7 - 1567 * t6 + 2048) >> 12) + t7;
     t7a = (( 1567 * t7 + (3784 - 4096) * t6 + 2048) >> 12) + t6;
 
-    t2            =  STB_AV1_CLIP(t0  - t2 , min, max);
-    t3            =  STB_AV1_CLIP(t1  - t3 , min, max);
-    t6            =  STB_AV1_CLIP(t4a - t6a, min, max);
-    t7            =  STB_AV1_CLIP(t5a - t7a, min, max);
-
     if (shift) {
         int rnd = 1 << (shift - 1);
         c[0 * stride] = (t0  + t2  + rnd) >> shift;
@@ -5981,6 +5991,10 @@ static void stb_av1_inv_adst8_1d(signed int *c, int stride,
         c[1 * stride] = -STB_AV1_CLIP(t4a + t6a, min, max);
         c[6 * stride] =  STB_AV1_CLIP(t5a + t7a, min, max);
     }
+    t2            =  STB_AV1_CLIP(t0  - t2 , min, max);
+    t3            =  STB_AV1_CLIP(t1  - t3 , min, max);
+    t6            =  STB_AV1_CLIP(t4a - t6a, min, max);
+    t7            =  STB_AV1_CLIP(t5a - t7a, min, max);
     c[3 * stride] = -(((t2 + t3) * 181 + 128) >> 8);
     c[4 * stride] =   ((t2 - t3) * 181 + 128) >> 8;
     c[2 * stride] =   ((t6 + t7) * 181 + 128) >> 8;
@@ -6869,13 +6883,24 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
 
     dequant_dc = stb_av1_get_dequant(qindex, 1, tc->bit_depth);
     dequant_ac = stb_av1_get_dequant(qindex, 0, tc->bit_depth);
+    /* compute dq_shift = max(0, ctx - 2) where ctx = slw + slh */
+    {
+        int lw = 0, lh = 0, slw, slh, ctx;
+        while ((1 << (lw + 2)) < tx_w) lw++;
+        while ((1 << (lh + 2)) < tx_h) lh++;
+        slw = (lw < 3) ? lw : 3; slh = (lh < 3) ? lh : 3;
+        ctx = slw + slh;
+        dequant_dc >>= (ctx > 2) ? ctx - 2 : 0;
+        dequant_ac >>= (ctx > 2) ? ctx - 2 : 0;
+    }
     { static int _dqonce=0; if (!_dqonce) { _dqonce=1;
       fprintf(stderr,"[RECON_DBG] qindex=%d dc=%d ac=%d bd=%d tx=%dx%d ttype=%d coeff[0]=%d coeff[1]=%d coeff[2]=%d\n",
         qindex, dequant_dc, dequant_ac, tc->bit_depth, tx_w, tx_h, tx_type, coeffs[0], coeffs[1], coeffs[2]); } }
 
     /* Dequantize with scan-to-raster de-scanning.
        coeffs[i] is the coefficient at scan position i.
-       We place it at row-major position (y*tx_w + x) where scan[i] = x*tx_w + y. */
+       scan[i] is a row-major index (y * tx_w + x) where y=row, x=col.
+       We place the coefficient at row-major position dq_coeffs[y * tx_w + x]. */
     {
         int shift = 0;
         const unsigned short *scan = stb_av1_get_scan(tx_w, tx_h, &shift);
@@ -6883,12 +6908,14 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
         memset(dq_coeffs, 0, (size_t)max_coeffs * sizeof(int));
         for (i = 0; i < max_coeffs; i++) {
             int rc = scan[i];
-            int sx = rc >> shift;
-            int sy = rc & mask;
+            int y = rc / tx_w;
+            int x = rc % tx_w;
             int val = coeffs[i];
             if (val) {
                 int deq = (i == 0) ? dequant_dc : dequant_ac;
-                dq_coeffs[sy * tx_w + sx] = val * deq;
+                int sign = 1;
+                if (val < 0) { sign = -1; val = -val; }
+                dq_coeffs[y * tx_w + x] = val * deq * sign;
             }
         }
         { static int _dsconce=0; if (!_dsconce) { _dsconce=1;
@@ -7154,16 +7181,20 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
     }
 
     /* Decode transform type (dav1d's decode_txtp).
-       For intra blocks: use txtp_intra1 (4x4/8x8) or txtp_intra2 (16x16+). */
+       For intra blocks: use txtp_intra1 (4x4/8x8) or txtp_intra2 (16x16+).
+       Matches dav1d recon_tmpl.c lines 368-379. */
     {
         int tx_sz_idx = 0;
         int t_dim_min, tx_idx;
         while ((1 << (tx_sz_idx + 2)) < blk_w) tx_sz_idx++;
         if (tx_sz_idx > 4) tx_sz_idx = 4;
         t_dim_min = tx_sz_idx;
-        if (tc->fh->reduced_tx_set || t_dim_min == 2) {
+        /* dav1d: t_dim->max + intra >= TX_64X64 -> DCT_DCT inferred */
+        if (t_dim_min >= 3) {
+            tx_type = 0;
+        } else if (tc->fh->reduced_tx_set || t_dim_min == 2) {
             tx_idx = (int)stb_av1_msac_decode_symbol(tc->msac,
-                tc->cdf->txtp_intra2[t_dim_min - 2][pred_mode < 13 ? pred_mode : 0], 4);
+                tc->cdf->txtp_intra2[t_dim_min][pred_mode < 13 ? pred_mode : 0], 4);
             tx_type = (int)stb_av1_tx_types_per_set[tx_idx + 0];
         } else {
             tx_idx = (int)stb_av1_msac_decode_symbol(tc->msac,
@@ -7225,10 +7256,17 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         int u_r = abs_r >> ss_y, u_c = abs_c >> ss_x;
         int u_w = (blk_w + ss_x) >> ss_x, u_h = (blk_h + ss_y) >> ss_y;
         int uvi;
+        int u_nz_aw = (u_w + 3) / 4, u_nz_ah = (u_h + 3) / 4;
+        unsigned char u_above_nz[32], u_left_nz[32];
+        unsigned char v_above_nz[32], v_left_nz[32];
         if (u_w < 1) u_w = 1;
         if (u_h < 1) u_h = 1;
         if (u_w > 32) u_w = 32;
         if (u_h > 32) u_h = 32;
+        if (u_nz_aw > 32) u_nz_aw = 32;
+        if (u_nz_ah > 32) u_nz_ah = 32;
+        for (uvi = 0; uvi < u_nz_aw; uvi++) { u_above_nz[uvi] = 0; v_above_nz[uvi] = 0; }
+        for (uvi = 0; uvi < u_nz_ah; uvi++) { u_left_nz[uvi] = 0; v_left_nz[uvi] = 0; }
 
         {
             int uv_mode_c = (uv_mode >= 0 && uv_mode <= 12) ? uv_mode : STB_AV1_DC_PRED;
@@ -7246,7 +7284,10 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
                                    above_uv, left_uv, topleft_uv, tc->bit_depth);
             for (uvi = 0; uvi < 1024; uvi++) u_coeffs[uvi] = 0;
             if (!block_skip)
-                stb_av1_decode_coeffs_cdf(tc->msac, u_coeffs, u_w, u_h, &u_eob, tc->cdf, 1, NULL, NULL);
+                stb_av1_decode_coeffs_cdf(tc->msac, u_coeffs, u_w, u_h, &u_eob, tc->cdf, 1, u_above_nz, u_left_nz);
+            { unsigned char nzf = (!block_skip && u_eob > 0) ? 0x40 : 0;
+              for (uvi = 0; uvi < u_nz_aw; uvi++) u_above_nz[uvi] = nzf;
+              for (uvi = 0; uvi < u_nz_ah; uvi++) u_left_nz[uvi] = nzf; }
             stb_av1_reconstruct_block(tc, tc->qindex_u, u_coeffs,
                                        u_w, u_h, tx_type_uv,
                                        pred_uv, u_w,
@@ -7270,7 +7311,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
                                    above_v, left_v, topleft_v, tc->bit_depth);
             for (uvi = 0; uvi < 1024; uvi++) v_coeffs[uvi] = 0;
             if (!block_skip)
-                stb_av1_decode_coeffs_cdf(tc->msac, v_coeffs, u_w, u_h, &v_eob, tc->cdf, 1, NULL, NULL);
+                stb_av1_decode_coeffs_cdf(tc->msac, v_coeffs, u_w, u_h, &v_eob, tc->cdf, 1, v_above_nz, v_left_nz);
             stb_av1_reconstruct_block(tc, tc->qindex_v, v_coeffs,
                                        u_w, u_h, tx_type_uv,
                                        pred_v, u_w,
