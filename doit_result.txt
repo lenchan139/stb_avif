@@ -1,0 +1,9 @@
+0
+BUILT
+EXIT=0
+OK 1204x800 ch=4
+pixel[0]: R=127 G=135 B=17 A=255
+pixel[240800]: R=0 G=0 B=0 A=255
+pixel[481600]: R=127 G=64 B=64 A=255
+pixel[722400]: R=0 G=0 B=0 A=255
+pixel[963199]: R=0 G=0 B=0 A=255
