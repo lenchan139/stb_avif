@@ -1,0 +1,143 @@
+[DBG] MSAC init: data=0xaaf000145 sz=80418 dif=0x7afaf34acd30e000 rng=32768 cnt=41
+[DBG] MSAC first 8 buf bytes: 0a 0a 19 6a 65 9e 3f c1 
+[DBG] av1_data ptr=0xaaf000145 size=80418
+[DBG] First 16 av1 bytes: 0a 0a 19 6a 65 9e 3f c1 01 0d 09 04 1a 07 11 20 
+[DBG] OBU: type=1 size=10 pos=2/80418
+[SEQHDR] sb128=1 filter_intra=1 intra_edge_filter=1
+[DBG] OBU: type=3 size=7 pos=14/80418
+[FRAME_HDR] type=0 show=1 q=72 w=1204 h=800 refresh=0xff reduced_still=1 disable_cdf=0
+[DBG] OBU: type=4 size=80393 pos=25/80418
+[DBG] TILE: obu_size=80393 tile_offset=0 tile_sz=80393 pos=25
+[DBG] First 16 tile bytes: f9 3a 3d 51 2c 07 c4 89 c2 7f 4c 9e 37 cd 9a 09 
+[DBG] MSAC init: data=0xaaf00015e sz=80393 dif=0x0362e15769fc1d80 rng=32768 cnt=41
+[DBG] MSAC first 8 buf bytes: f9 3a 3d 51 2c 07 c4 89 
+[MSAC_INIT] rng=32768 cnt=41 disable_cdf=0 delta_q_present=0
+CDF_INIT: base_q_idx=72 qcat=2
+[SB_ENTRY] sb(0,0) rng=32768 cnt=41 delta_q_present=0
+[DBG_PART] bl=0 sz4=32 bx4=0 by4=0 nsym=7
+[DBG_PART] cdf bl=0 ctx=0: 4869 4549 4239 284 229 149 129  cnt=0
+[DBG_PART] msac before: dif=0x0362e15769fc1d80 rng=32768 cnt=41
+[SYM] n_sym=7 val=3 c=866 r=128 u=4244 v=272 cdf0=4869 cdf1=4549 cdf2=4239 count=0 dif=0x0362e15769fc1d80 rng=32768
+[DBG_PART] bp=3 ctx=0 msac after: dif=0x252e15769fc1d800 rng=63552 cnt=37
+[DBG_PART] bl=1 sz4=16 bx4=0 by4=0 nsym=9
+[DBG_PART] cdf bl=1 ctx=0: 12631 11221 9690 3202 2931 2507 2244 1876 1044  cnt=0
+[DBG_PART] msac before: dif=0x252e15769fc1d800 rng=63552 cnt=37
+[SYM] n_sym=9 val=3 c=9518 r=248 u=18752 v=6224 cdf0=12631 cdf1=11221 cdf2=9690 count=0 dif=0x252e15769fc1d800 rng=63552
+[DBG_PART] bp=3 ctx=0 msac after: dif=0x337855da7f076000 rng=50112 cnt=35
+[DBG_PART] bl=2 sz4=8 bx4=0 by4=0 nsym=9
+[DBG_PART] cdf bl=2 ctx=0: 14306 11848 9644 5121 4541 3719 3249 2590 1224  cnt=0
+[DBG_PART] msac before: dif=0x337855da7f076000 rng=50112 cnt=35
+[SYM] n_sym=9 val=3 c=13176 r=195 u=14653 v=7824 cdf0=14306 cdf1=11848 cdf2=9644 count=0 dif=0x337855da7f076000 rng=50112
+[DBG_PART] bp=3 ctx=0 msac after: dif=0xa742aed3f83b0000 rng=54632 cnt=32
+[DBG_PART] bl=3 sz4=4 bx4=0 by4=0 nsym=9
+[DBG_PART] cdf bl=3 ctx=0: 17171 11839 8197 6062 5104 3947 3167 2197 866  cnt=0
+[DBG_PART] msac before: dif=0xa742aed3f83b0000 rng=54632 cnt=32
+[SYM] n_sym=9 val=2 c=42818 r=213 u=43910 v=40178 cdf0=30106 cdf1=26406 cdf2=24154 count=0 dif=0xa742aed3f83b0000 rng=54632
+[DBG_PART] bp=2 ctx=3 msac after: dif=0xa50aed3f83b00000 rng=59712 cnt=28
+[MSAC_TRACE] blk(0,0) ENTER blk_w=8 blk_h=16 rng=59712 cnt=28 delta_q=0 cdef_bits=2 seg=0
+[MSAC_TRACE] blk(0,0) bskip_ctx=0 skip_cdf0=1097 rng_before=59712 cnt=28
+[BOOL] bit=0 cdf0=1097 count=0 dif=0x9d4aed3f83b00000 rng=57728
+[MSAC_TRACE] blk(0,0) AFTER skip rng=57728 cnt=28
+[MSAC_TRACE] blk(0,0) AFTER cdef_idx=1 rng=57608 cnt=26
+[SYM] n_sym=12 val=0 c=45851 r=225 u=57608 v=30198 cdf0=17180 cdf1=15741 cdf2=13430 count=0 dif=0xb31bb4fe0ec00000 rng=57608
+[MSAC_TRACE] blk(0,0) AFTER y_mode=0 rng=54820 cnt=25
+[MSAC_TRACE] blk(0,0) AFTER uv_mode=5 rng=63168 cnt=15
+[BOOL] bit=0 cdf0=20217 count=0 dif=0x59d5e0ec00000000 rng=48838
+[MSAC_TRACE] blk(0,0) AFTER use_filter_intra=0 rng=48838 cnt=14
+[BOOL] bit=0 cdf0=405 count=0 dif=0x05010ec000000000 rng=57667
+[BOOL] bit=1 cdf0=14415 count=0 dif=0x2808760000000000 rng=49732
+[C89DBG2] final eob=60 eob_bin_val=60 plane=0
+[BOOL] bit=1 cdf0=19712 count=0 dif=0x1bbddc2200000000 rng=46824
+[COEFFDBG] txw=8 txh=16 eob=60
+[COEFFDBG]  [0]=-3[COEFFDBG]  [1]=-2[COEFFDBG]  [2]=-2[COEFFDBG]  [3]=4[COEFFDBG]  [4]=-1[COEFFDBG]  [6]=-4[COEFFDBG]  [7]=1[COEFFDBG]  [8]=1[COEFFDBG]  [9]=1[COEFFDBG]  [10]=-5[COEFFDBG]  [11]=-1[COEFFDBG]  [15]=-6[COEFFDBG]  [16]=-1[COEFFDBG]  [20]=-1[COEFFDBG]  [22]=-1[COEFFDBG]  [28]=1[COEFFDBG]  [30]=1[COEFFDBG]  [36]=1[COEFFDBG]  [43]=-1[COEFFDBG]  [44]=2[COEFFDBG]  [50]=1[COEFFDBG]  [51]=-1[COEFFDBG]  [53]=1[COEFFDBG]  [55]=1[COEFFDBG]  [60]=-1
+[RECON_DBG] qindex=72 dc=67 ac=79 bd=8 tx=8x16 ttype=1 coeff[0]=-3 coeff[1]=-2 coeff[2]=-2
+[RECON_DBG] post-descan: dq[0]=-201 dq[1]=-158 dq[tx_w]=-158 scan[0]=0 shift=4 mask=15
+[RECON_DBG] after_idct: dq[0]=-222 dq[1]=-155 dq[2]=262 dq[3]=-221 dq[4]=-275 dq[17]=-50 dq[32]=31 dq[48]=-30
+[MSAC_TRACE] blk(0,8) bskip_ctx=0 skip_cdf0=1029 rng_before=62472 cnt=23
+[DBG_PART] bl=3 sz4=4 bx4=4 by4=0 nsym=9
+[DBG_PART] cdf bl=3 ctx=0: 17171 11839 8197 6062 5104 3947 3167 2197 866  cnt=0
+[DBG_PART] msac before: dif=0xdd293fa880000000 rng=62592 cnt=18
+[DBG_PART] bp=1 ctx=3 msac after: dif=0xba19fd4400000000 rng=54688 cnt=15
+[MSAC_TRACE] blk(0,16) bskip_ctx=1 skip_cdf0=16253 rng_before=54688 cnt=15
+[MSAC_TRACE] blk(0,16) AFTER skip rng=55480 cnt=14
+[MSAC_TRACE] blk(0,16) AFTER y_mode=0 rng=54704 cnt=13
+[MSAC_TRACE] blk(0,16) AFTER uv_mode=9 rng=53712 cnt=10
+[MSAC_TRACE] blk(0,16) AFTER use_filter_intra=0 rng=62264 cnt=8
+[MSAC_TRACE] blk(8,16) bskip_ctx=1 skip_cdf0=15238 rng_before=45684 cnt=17
+[MSAC_TRACE] blk(16,0) bskip_ctx=0 skip_cdf0=3012 rng_before=63424 cnt=12
+[MSAC_TRACE] blk(16,0) AFTER skip rng=57616 cnt=12
+[MSAC_TRACE] blk(16,0) AFTER y_mode=9 rng=52232 cnt=9
+[MSAC_TRACE] blk(16,0) AFTER uv_mode=12 rng=35968 cnt=5
+[MSAC_TRACE] blk(16,8) bskip_ctx=0 skip_cdf0=2824 rng_before=34312 cnt=37
+[MSAC_TRACE] blk(16,8) AFTER skip rng=62720 cnt=36
+[MSAC_TRACE] blk(16,8) AFTER y_mode=6 rng=39328 cnt=31
+[MSAC_TRACE] blk(16,8) AFTER angle_delta rng=37976 cnt=28
+[MSAC_TRACE] blk(16,8) AFTER uv_mode=0 rng=45280 cnt=25
+[MSAC_TRACE] blk(16,16) bskip_ctx=1 skip_cdf0=16333 rng_before=61856 cnt=27
+[MSAC_TRACE] blk(16,24) bskip_ctx=2 skip_cdf0=28192 rng_before=61462 cnt=26
+[MSAC_TRACE] blk(24,16) AFTER skip rng=49774 cnt=25
+[MSAC_TRACE] blk(24,16) AFTER y_mode=9 rng=45816 cnt=22
+[MSAC_TRACE] blk(24,16) AFTER uv_mode=0 rng=42380 cnt=20
+[MSAC_TRACE] blk(24,24) AFTER skip rng=64796 cnt=21
+[MSAC_TRACE] blk(24,24) AFTER y_mode=2 rng=64832 cnt=17
+[MSAC_TRACE] blk(24,24) AFTER angle_delta rng=57946 cnt=16
+[MSAC_TRACE] blk(24,24) AFTER uv_mode=2 rng=43072 cnt=12
+[MSAC_TRACE] blk(0,32) AFTER skip rng=48474 cnt=36
+[MSAC_TRACE] blk(0,32) AFTER y_mode=0 rng=44878 cnt=35
+[MSAC_TRACE] blk(0,32) AFTER uv_mode=0 rng=53656 cnt=33
+[MSAC_TRACE] blk(0,32) AFTER use_filter_intra=0 rng=36723 cnt=33
+[MSAC_TRACE] blk(32,0) AFTER skip rng=43264 cnt=8
+[MSAC_TRACE] blk(32,0) AFTER y_mode=10 rng=65152 cnt=2
+[MSAC_TRACE] blk(32,0) AFTER uv_mode=1 rng=60206 cnt=44
+[MSAC_TRACE] blk(32,32) AFTER use_filter_intra=1 rng=61120 cnt=21
+[MSAC_TRACE] blk(0,64) AFTER cdef_idx=0 rng=43656 cnt=19
+[MSAC_TRACE] blk(64,0) AFTER cdef_idx=2 rng=64264 cnt=19
+[MSAC_TRACE] blk(64,32) AFTER angle_delta rng=33218 cnt=21
+[MSAC_TRACE] blk(96,32) AFTER angle_delta rng=45652 cnt=44
+[MSAC_TRACE] blk(80,64) AFTER cdef_idx=1 rng=33544 cnt=16
+[MSAC_TRACE] blk(64,64) AFTER use_filter_intra=1 rng=56930 cnt=9
+[MSAC_TRACE] blk(64,80) AFTER use_filter_intra=1 rng=64358 cnt=17
+[MSAC_TRACE] blk(64,96) AFTER angle_delta rng=41596 cnt=44
+[MSAC_TRACE] blk(64,104) AFTER angle_delta rng=57846 cnt=22
+[MSAC_TRACE] blk(72,96) AFTER use_filter_intra=1 rng=33652 cnt=37
+[MSAC_TRACE] blk(72,104) AFTER use_filter_intra=1 rng=64952 cnt=27
+[MSAC_TRACE] blk(80,96) AFTER angle_delta rng=63264 cnt=39
+[MSAC_TRACE] blk(88,96) AFTER angle_delta rng=44966 cnt=5
+[SB_ENTRY] sb(0,1) rng=63240 cnt=32 delta_q_present=0
+[MSAC_TRACE] blk(0,128) AFTER cdef_idx=1 rng=50952 cnt=30
+[SB_ENTRY] sb(0,2) rng=38408 cnt=29 delta_q_present=0
+[MSAC_TRACE] blk(0,256) AFTER cdef_idx=0 rng=62772 cnt=26
+  [  4%%] SB 3/70, 0s elapsed, ETA 0s     [SB_ENTRY] sb(0,3) rng=51208 cnt=26 delta_q_present=0
+[MSAC_TRACE] blk(0,384) AFTER cdef_idx=0 rng=64076 cnt=20
+[MSAC_TRACE] blk(0,448) AFTER cdef_idx=3 rng=33544 cnt=41
+  [  9%%] SB 6/70, 0s elapsed, ETA 0s       [ 13%%] SB 9/70, 0s elapsed, ETA 0s       [ 17%%] SB 12/70, 0s elapsed, ETA 0s       [ 21%%] SB 15/70, 0s elapsed, ETA 0s       [ 26%%] SB 18/70, 0s elapsed, ETA 0s       [ 30%%] SB 21/70, 0s elapsed, ETA 0s       [ 34%%] SB 24/70, 0s elapsed, ETA 0s       [ 39%%] SB 27/70, 0s elapsed, ETA 0s       [ 43%%] SB 30/70, 0s elapsed, ETA 0s       [ 47%%] SB 33/70, 0s elapsed, ETA 0s       [ 51%%] SB 36/70, 0s elapsed, ETA 0s       [ 56%%] SB 39/70, 0s elapsed, ETA 0s       [ 60%%] SB 42/70, 0s elapsed, ETA 0s       [ 64%%] SB 45/70, 0s elapsed, ETA 0s       [ 69%%] SB 48/70, 0s elapsed, ETA 0s       [ 73%%] SB 51/70, 0s elapsed, ETA 0s       [ 77%%] SB 54/70, 0s elapsed, ETA 0s       [ 81%%] SB 57/70, 0s elapsed, ETA 0s       [ 86%%] SB 60/70, 0s elapsed, ETA 0s       [ 90%%] SB 63/70, 0s elapsed, ETA 0s       [ 94%%] SB 66/70, 0s elapsed, ETA 0s       [ 99%%] SB 69/70, 0s elapsed, ETA 0s       [100%%] Done (70 superblocks, 0s)          
+RAW[0]: Y=113 U=128 V=17
+RGB[0]: (113,128,17) mc=0
+RAW[1]: Y=117 U=128 V=17
+RGB[1]: (117,128,17) mc=0
+RAW[2]: Y=143 U=128 V=17
+RGB[2]: (143,128,17) mc=0
+RAW[3]: Y=113 U=128 V=17
+RGB[3]: (113,128,17) mc=0
+RAW[4]: Y=110 U=128 V=17
+RGB[4]: (110,128,17) mc=0
+RAW[5]: Y=115 U=128 V=17
+RGB[5]: (115,128,17) mc=0
+RAW[6]: Y=117 U=96 V=17
+RGB[6]: (117,96,17) mc=0
+RAW[7]: Y=131 U=96 V=17
+RGB[7]: (131,96,17) mc=0
+RAW[8]: Y=0 U=0 V=17
+RGB[8]: (0,0,17) mc=0
+RAW[9]: Y=0 U=0 V=17
+RGB[9]: (0,0,17) mc=0
+C89 Decoded: 1204x800 ch=3
+Total pixels: 2889600, diff: 2881196 (99.7%), maxdiff=255, PSNR=11.17
+  pos 0: C89=(113,128,17) DAV=(70,53,61)
+  pos 100: C89=(0,94,93) DAV=(65,57,61)
+  pos 1000: C89=(0,0,128) DAV=(196,180,188)
+  pos 4816: C89=(113,128,64) DAV=(52,38,45)
+  pos 12040: C89=(132,128,58) DAV=(49,35,42)
+  pos 24080: C89=(105,127,47) DAV=(65,51,58)
+  pos 481600: C89=(64,68,65) DAV=(23,31,27)
+Wrote output_c89_test.ppm
