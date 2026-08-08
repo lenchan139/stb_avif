@@ -58,10 +58,12 @@ static int decode_to_ppm(const char *avif_path, const char *ppm_path, int req_ch
     return 1;
 }
 
+void stb_avif_set_msac_trace(int on);
 int main(int argc, char *argv[])
 {
     int pass = 0, fail = 0, i;
 
+    stb_avif_set_msac_trace(getenv("STB_TRACE") != NULL);
     const char *files[] = {
         "example_avif/fox.profile0.8bpc.yuv420.avif",
         "example_avif/fox.profile0.10bpc.yuv420.avif",

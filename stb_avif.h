@@ -2472,7 +2472,7 @@ static const unsigned short stb_av1_default_coef_eob_base_tok[4][5][2][4][3] = {
             21845, 10923,     0, 21845, 10923,     0,
     },
 };
-static const unsigned short stb_av1_default_coef_base_tok[4][5][2][41][4] = {
+static const unsigned short static const unsigned short stb_av1_default_coef_base_tok[4][5][2][41][4] = {
     { /* qcat=0 */
             28734, 23838, 20041,     0, 14686,  3027,   891,     0,
             20172,  6644,  2275,     0, 23322, 11650,  5763,     0,
@@ -3786,6 +3786,8 @@ struct stb_av1_msac {
     unsigned rng, cnt;
     int allow_update_cdf;
 };
+int stb_av1_msac_trace_flag = 0;
+void stb_avif_set_msac_trace(int on) { stb_av1_msac_trace_flag = on; }
 
 static void stb_av1_msac_refill(struct stb_av1_msac *s) {
     const unsigned char *p = s->buf_pos, *e = s->buf_end;
@@ -3830,7 +3832,11 @@ static unsigned stb_av1_msac_decode_bool_equi(struct stb_av1_msac *s) {
     stbv_u64 d = s->dif, vw = (stbv_u64)v << 48;
     unsigned ret = (d >= vw) ? 1u : 0u;
     if (ret) d -= vw; v += ret * (r - 2 * v);
-    stb_av1_msac_norm(s, d, v); return !ret;
+    stb_av1_msac_norm(s, d, v);
+    if (stb_av1_msac_trace_flag)
+        fprintf(stderr,"M E val=%u rng=%u cnt=%u dif=%08x%08x\n", !ret, s->rng, s->cnt,
+            (unsigned)(s->dif>>32),(unsigned)(s->dif));
+    return !ret;
 }
 
 static unsigned stb_av1_msac_decode_bool(struct stb_av1_msac *s, unsigned f) {
@@ -3854,6 +3860,7 @@ static unsigned stb_av1_msac_decode_bools(struct stb_av1_msac *s, unsigned n) {
 static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned short *cdf, unsigned long n_symbols) {
     unsigned c = (unsigned)(s->dif >> 48), r = s->rng >> 8;
     unsigned u, v = s->rng, val = -1;
+    unsigned trng = s->rng, tcnt = s->cnt; stbv_u64 tdif = s->dif;
 
     do {
         val++;
@@ -3863,11 +3870,11 @@ static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned shor
         v += 4 * ((unsigned)(n_symbols - val));
     } while (c < v);
 
-    { static int _dbg=0; _dbg++; { fprintf(stderr,"[SYM] n_sym=%lu val=%u c=%u r=%u u=%u v=%u cdf0=%u cdf1=%u cdf2=%u count=%u dif=0x%08x%08x rng=%u\n",
-        n_symbols, val, c, r, u, v, cdf[0], n_symbols>1?cdf[1]:0, n_symbols>2?cdf[2]:0, cdf[n_symbols],
-        (unsigned)(s->dif>>32),(unsigned)(s->dif),s->rng); } }
-
     { unsigned rng_new = u - v; if (rng_new == 0) rng_new = 1; stb_av1_msac_norm(s, s->dif - ((stbv_u64)v << 48), rng_new); }
+    if (stb_av1_msac_trace_flag)
+        fprintf(stderr,"M S %lu %u %u val=%u rng=%u cnt=%u dif=%08x%08x\n",
+            n_symbols, cdf[0], n_symbols>1?cdf[1]:0, val, s->rng, s->cnt,
+            (unsigned)(s->dif>>32),(unsigned)(s->dif));
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[n_symbols], rate = 4 + (cnt >> 4) + (n_symbols > 2 ? 1u : 0u);
         unsigned i;
@@ -3881,7 +3888,9 @@ static unsigned stb_av1_msac_decode_symbol(struct stb_av1_msac *s, unsigned shor
 
 static unsigned stb_av1_msac_decode_bool_adapt(struct stb_av1_msac *s, unsigned short *cdf) {
     unsigned bit = stb_av1_msac_decode_bool(s, *cdf);
-    { static int _dbg=0; _dbg++; fprintf(stderr,"[BOOL] bit=%u cdf0=%u count=%u dif=0x%08x%08x rng=%u\n",bit,cdf[0],cdf[1],(unsigned)(s->dif>>32),(unsigned)(s->dif),s->rng); }
+    if (stb_av1_msac_trace_flag)
+        fprintf(stderr,"M B %u val=%u rng=%u cnt=%u dif=%08x%08x\n", cdf[0], bit, s->rng, s->cnt,
+            (unsigned)(s->dif>>32),(unsigned)(s->dif));
     if (s->allow_update_cdf) {
         unsigned cnt = cdf[1], rate = 4 + (cnt >> 4);
         if (bit) cdf[0] += (unsigned short)((32768 - cdf[0]) >> rate);
@@ -4277,6 +4286,7 @@ static int stb_av1_decode_coeffs_cdf(struct stb_av1_msac *msac, int *coeffs, int
         *eob = 0;
         *res_ctx_out = 0x40;
         *txtp_out = 0;
+        memset(coeffs, 0, (size_t)(max_coeffs * sizeof(int)));
         return 0;
     }
 
@@ -5859,37 +5869,37 @@ static void stb_av1_inv_dct16_1d(signed int *c, int stride,
     if (shift) {
         int rnd = 1 << (shift - 1);
         c[0*stride]  = (t0   + t15a + rnd) >> shift;
-        c[1*stride]  = (t4   + t14  + rnd) >> shift;
+        c[1*stride]  = (t1   + t14  + rnd) >> shift;
         c[2*stride]  = (t2   + t13b + rnd) >> shift;
-        c[3*stride]  = (t6   + t12  + rnd) >> shift;
-        c[4*stride]  = (t1   + t11  + rnd) >> shift;
+        c[3*stride]  = (t3   + t12  + rnd) >> shift;
+        c[4*stride]  = (t4   + t11  + rnd) >> shift;
         c[5*stride]  = (t5   + t10b + rnd) >> shift;
-        c[6*stride]  = (t3   + t9   + rnd) >> shift;
+        c[6*stride]  = (t6   + t9   + rnd) >> shift;
         c[7*stride]  = (t7   + t8a  + rnd) >> shift;
         c[8*stride]  = (t7   - t8a  + rnd) >> shift;
-        c[9*stride]  = (t3   - t9   + rnd) >> shift;
+        c[9*stride]  = (t6   - t9   + rnd) >> shift;
         c[10*stride] = (t5   - t10b + rnd) >> shift;
-        c[11*stride] = (t1   - t11  + rnd) >> shift;
-        c[12*stride] = (t6   - t12  + rnd) >> shift;
+        c[11*stride] = (t4   - t11  + rnd) >> shift;
+        c[12*stride] = (t3   - t12  + rnd) >> shift;
         c[13*stride] = (t2   - t13b + rnd) >> shift;
-        c[14*stride] = (t4   - t14  + rnd) >> shift;
+        c[14*stride] = (t1   - t14  + rnd) >> shift;
         c[15*stride] = (t0   - t15a + rnd) >> shift;
     } else {
         c[0*stride]  = t0   + t15a;
-        c[1*stride]  = t4   + t14;
+        c[1*stride]  = t1   + t14;
         c[2*stride]  = t2   + t13b;
-        c[3*stride]  = t6   + t12;
-        c[4*stride]  = t1   + t11;
+        c[3*stride]  = t3   + t12;
+        c[4*stride]  = t4   + t11;
         c[5*stride]  = t5   + t10b;
-        c[6*stride]  = t3   + t9;
+        c[6*stride]  = t6   + t9;
         c[7*stride]  = t7   + t8a;
         c[8*stride]  = t7   - t8a;
-        c[9*stride]  = t3   - t9;
+        c[9*stride]  = t6   - t9;
         c[10*stride] = t5   - t10b;
-        c[11*stride] = t1   - t11;
-        c[12*stride] = t6   - t12;
+        c[11*stride] = t4   - t11;
+        c[12*stride] = t3   - t12;
         c[13*stride] = t2   - t13b;
-        c[14*stride] = t4   - t14;
+        c[14*stride] = t1   - t14;
         c[15*stride] = t0   - t15a;
     }
 }
@@ -6041,69 +6051,69 @@ static void stb_av1_inv_dct32_1d(signed int *c, int stride,
     if (shift) {
         int rnd = 1 << (shift - 1);
         c[0*stride]  = (t0  + t31  + rnd) >> shift;
-        c[1*stride]  = (t8  + t30a + rnd) >> shift;
-        c[2*stride]  = (t4  + t29  + rnd) >> shift;
-        c[3*stride]  = (t12 + t28a + rnd) >> shift;
-        c[4*stride]  = (t2  + t27  + rnd) >> shift;
-        c[5*stride]  = (t10 + t26a + rnd) >> shift;
+        c[1*stride]  = (t1  + t30a + rnd) >> shift;
+        c[2*stride]  = (t2  + t29  + rnd) >> shift;
+        c[3*stride]  = (t3  + t28a + rnd) >> shift;
+        c[4*stride]  = (t4  + t27  + rnd) >> shift;
+        c[5*stride]  = (t5  + t26a + rnd) >> shift;
         c[6*stride]  = (t6  + t25  + rnd) >> shift;
-        c[7*stride]  = (t14 + t24a + rnd) >> shift;
-        c[8*stride]  = (t1  + t23a + rnd) >> shift;
+        c[7*stride]  = (t7  + t24a + rnd) >> shift;
+        c[8*stride]  = (t8  + t23a + rnd) >> shift;
         c[9*stride]  = (t9  + t22  + rnd) >> shift;
-        c[10*stride] = (t5  + t21a + rnd) >> shift;
-        c[11*stride] = (t13 + t20  + rnd) >> shift;
-        c[12*stride] = (t3  + t19a + rnd) >> shift;
-        c[13*stride] = (t11 + t18  + rnd) >> shift;
-        c[14*stride] = (t7  + t17a + rnd) >> shift;
+        c[10*stride] = (t10 + t21a + rnd) >> shift;
+        c[11*stride] = (t11 + t20  + rnd) >> shift;
+        c[12*stride] = (t12 + t19a + rnd) >> shift;
+        c[13*stride] = (t13 + t18  + rnd) >> shift;
+        c[14*stride] = (t14 + t17a + rnd) >> shift;
         c[15*stride] = (t15 + t16  + rnd) >> shift;
         c[16*stride] = (t15 - t16  + rnd) >> shift;
-        c[17*stride] = (t7  - t17a + rnd) >> shift;
-        c[18*stride] = (t11 - t18  + rnd) >> shift;
-        c[19*stride] = (t3  - t19a + rnd) >> shift;
-        c[20*stride] = (t13 - t20  + rnd) >> shift;
-        c[21*stride] = (t5  - t21a + rnd) >> shift;
+        c[17*stride] = (t14 - t17a + rnd) >> shift;
+        c[18*stride] = (t13 - t18  + rnd) >> shift;
+        c[19*stride] = (t12 - t19a + rnd) >> shift;
+        c[20*stride] = (t11 - t20  + rnd) >> shift;
+        c[21*stride] = (t10 - t21a + rnd) >> shift;
         c[22*stride] = (t9  - t22  + rnd) >> shift;
-        c[23*stride] = (t1  - t23a + rnd) >> shift;
-        c[24*stride] = (t14 - t24a + rnd) >> shift;
+        c[23*stride] = (t8  - t23a + rnd) >> shift;
+        c[24*stride] = (t7  - t24a + rnd) >> shift;
         c[25*stride] = (t6  - t25  + rnd) >> shift;
-        c[26*stride] = (t10 - t26a + rnd) >> shift;
-        c[27*stride] = (t2  - t27  + rnd) >> shift;
-        c[28*stride] = (t12 - t28a + rnd) >> shift;
-        c[29*stride] = (t4  - t29  + rnd) >> shift;
-        c[30*stride] = (t8  - t30a + rnd) >> shift;
+        c[26*stride] = (t5  - t26a + rnd) >> shift;
+        c[27*stride] = (t4  - t27  + rnd) >> shift;
+        c[28*stride] = (t3  - t28a + rnd) >> shift;
+        c[29*stride] = (t2  - t29  + rnd) >> shift;
+        c[30*stride] = (t1  - t30a + rnd) >> shift;
         c[31*stride] = (t0  - t31  + rnd) >> shift;
     } else {
         c[0*stride]  = t0  + t31;
-        c[1*stride]  = t8  + t30a;
-        c[2*stride]  = t4  + t29;
-        c[3*stride]  = t12 + t28a;
-        c[4*stride]  = t2  + t27;
-        c[5*stride]  = t10 + t26a;
+        c[1*stride]  = t1  + t30a;
+        c[2*stride]  = t2  + t29;
+        c[3*stride]  = t3  + t28a;
+        c[4*stride]  = t4  + t27;
+        c[5*stride]  = t5  + t26a;
         c[6*stride]  = t6  + t25;
-        c[7*stride]  = t14 + t24a;
-        c[8*stride]  = t1  + t23a;
+        c[7*stride]  = t7  + t24a;
+        c[8*stride]  = t8  + t23a;
         c[9*stride]  = t9  + t22;
-        c[10*stride] = t5  + t21a;
-        c[11*stride] = t13 + t20;
-        c[12*stride] = t3  + t19a;
-        c[13*stride] = t11 + t18;
-        c[14*stride] = t7  + t17a;
+        c[10*stride] = t10 + t21a;
+        c[11*stride] = t11 + t20;
+        c[12*stride] = t12 + t19a;
+        c[13*stride] = t13 + t18;
+        c[14*stride] = t14 + t17a;
         c[15*stride] = t15 + t16;
         c[16*stride] = t15 - t16;
-        c[17*stride] = t7  - t17a;
-        c[18*stride] = t11 - t18;
-        c[19*stride] = t3  - t19a;
-        c[20*stride] = t13 - t20;
-        c[21*stride] = t5  - t21a;
+        c[17*stride] = t14 - t17a;
+        c[18*stride] = t13 - t18;
+        c[19*stride] = t12 - t19a;
+        c[20*stride] = t11 - t20;
+        c[21*stride] = t10 - t21a;
         c[22*stride] = t9  - t22;
-        c[23*stride] = t1  - t23a;
-        c[24*stride] = t14 - t24a;
+        c[23*stride] = t8  - t23a;
+        c[24*stride] = t7  - t24a;
         c[25*stride] = t6  - t25;
-        c[26*stride] = t10 - t26a;
-        c[27*stride] = t2  - t27;
-        c[28*stride] = t12 - t28a;
-        c[29*stride] = t4  - t29;
-        c[30*stride] = t8  - t30a;
+        c[26*stride] = t5  - t26a;
+        c[27*stride] = t4  - t27;
+        c[28*stride] = t3  - t28a;
+        c[29*stride] = t2  - t29;
+        c[30*stride] = t1  - t30a;
         c[31*stride] = t0  - t31;
     }
 }
@@ -6612,12 +6622,12 @@ static void stb_av1_inv_transform_2d(int *block, int w, int h, int tx_type)
     };
 
     /* Correct mapping: matches dav1d stb_av1_tx1d_types[txtp] = {row_type, col_type} */
-    is_dct_row = (tx_type == 0 || tx_type == 2 || tx_type == 5 || tx_type == 10);
-    is_dct_col = (tx_type == 0 || tx_type == 1 || tx_type == 4 || tx_type == 11);
-    is_adst_row = (tx_type == 1 || tx_type == 3 || tx_type == 7 || tx_type == 12);
-    is_adst_col = (tx_type == 2 || tx_type == 3 || tx_type == 6 || tx_type == 13);
-    is_flipadst_row = (tx_type == 4 || tx_type == 6 || tx_type == 8 || tx_type == 14);
-    is_flipadst_col = (tx_type == 5 || tx_type == 7 || tx_type == 8 || tx_type == 15);
+    is_dct_row = (tx_type == 0 || tx_type == 1 || tx_type == 4 || tx_type == 11);
+    is_dct_col = (tx_type == 0 || tx_type == 2 || tx_type == 5 || tx_type == 10);
+    is_adst_row = (tx_type == 2 || tx_type == 3 || tx_type == 6 || tx_type == 13);
+    is_adst_col = (tx_type == 1 || tx_type == 3 || tx_type == 7 || tx_type == 12);
+    is_flipadst_row = (tx_type == 5 || tx_type == 7 || tx_type == 8 || tx_type == 15);
+    is_flipadst_col = (tx_type == 4 || tx_type == 6 || tx_type == 8 || tx_type == 14);
 
     /* Allocate temp arrays */
     temp = (int *)stb_avif_malloc((size_t)(w * h) * sizeof(int));
@@ -7169,7 +7179,7 @@ static void stb_av1_reconstruct_block(struct stb_av1_tile_context *tc,
 {
     int i, j;
     int dequant_dc, dequant_ac;
-    static int dq_coeffs_buf[4096];
+    static int dq_coeffs_buf[128*128];
     int *dq_coeffs = dq_coeffs_buf;
     int max_coeffs = tx_w * tx_h;
 
@@ -7408,8 +7418,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
     int i, uv_mode, block_skip;
     int has_uv;
     int uv_cfl_a0, uv_cfl_a1;
+    int uv_angle = 0;
     int txtp_mode_luma = 0;
-    int coeffs[4096], eob;
+    int coeffs[128*128], eob;
     int ctx_above, ctx_left;
     int pred_mode;
     int bw = blk_w > 32 ? 32 : blk_w;
@@ -7501,7 +7512,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         /* VERT_PRED=1 through VERT_LEFT_PRED=8, blocks with lw+lh >= 2 */
         if (pred_mode >= 1 && pred_mode <= 8 && (blw + blh >= 2)) {
             unsigned short *angle_cdf = tc->cdf->angle_delta[pred_mode - 1];
-            (void)stb_av1_msac_decode_symbol(tc->msac, angle_cdf, 6);
+            y_angle = (int)stb_av1_msac_decode_symbol(tc->msac, angle_cdf, 6) - 3;
 { static int _blk=0; if (_blk < 8) fprintf(stderr,"[MSAC_TRACE] blk(%d,%d) AFTER angle_delta rng=%u cnt=%u\n", abs_r, abs_c, tc->msac->rng, tc->msac->cnt); _blk++; }
         }
     } else {
@@ -7533,7 +7544,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
             }
         } else if (blw + blh >= 2 && uv_mode >= 1 && uv_mode <= 8) {
             unsigned short *uv_acdf = tc->cdf->angle_delta[uv_mode - 1];
-            (void)stb_av1_msac_decode_symbol(tc->msac, uv_acdf, 6);
+            uv_angle = (int)stb_av1_msac_decode_symbol(tc->msac, uv_acdf, 6) - 3;
+        } else {
+            uv_angle = 0;
         }
 { static int _blk=0; if (_blk < 8) fprintf(stderr,"[MSAC_TRACE] blk(%d,%d) AFTER uv_mode=%d rng=%u cnt=%u\n", abs_r, abs_c, uv_mode, tc->msac->rng, tc->msac->cnt); _blk++; }
     }
@@ -7612,7 +7625,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
                 int sub_bw = tx_w, sub_bh = tx_h;
                 unsigned char above_y[64], left_y[64];
                 unsigned char topleft_y;
-                unsigned char pred_buf[1024];
+                unsigned char pred_buf[128*128];
                 int seob;
                 /* Prediction for this sub-block */
                 for (i = 0; i < sub_bw && i < 64; i++)
@@ -7705,9 +7718,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         {
             int uv_mode_c = (uv_mode >= 0 && uv_mode <= 12) ? uv_mode : STB_AV1_DC_PRED;
             int tx_type_uv = (int)stb_av1_txtp_from_uvmode[uv_mode_c];
-            unsigned char pred_uv[1024], above_uv[64], left_uv[64];
+            unsigned char pred_uv[128*128], above_uv[64], left_uv[64];
             unsigned char topleft_uv;
-            int u_eob, u_coeffs[1024];
+            int u_eob, u_coeffs[128*128];
             unsigned char res_ctx = 0x40;
             for (uvi = 0; uvi < u_w && uvi < 64; uvi++)
                 above_uv[uvi] = u_r > 0 ? tc->plane_u[(u_r-1)*tc->stride_u+u_c+uvi] : (unsigned char)128;
@@ -7717,7 +7730,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
                 ? tc->plane_u[(u_r-1)*tc->stride_u+u_c-1] : (unsigned char)128;
             stb_av1_intra_predict(pred_uv, u_w, u_w, u_h, uv_mode_c,
                                    above_uv, left_uv, topleft_uv, tc->bit_depth);
-            for (uvi = 0; uvi < 1024; uvi++) u_coeffs[uvi] = 0;
+            for (uvi = 0; uvi < 16384; uvi++) u_coeffs[uvi] = 0;
             if (!block_skip)
                 { static int _uvdbg=0; if (_uvdbg++<60) fprintf(stderr,"[UVDBG] u_r=%d u_c=%d u_w=%d u_h=%d ss=%d,%d blw=%d blh=%d ttype=%d\n", u_r, u_c, u_w, u_h, ss_x, ss_y, blw, blh, tx_type_uv); }
                 stb_av1_decode_coeffs_cdf(tc->msac, u_coeffs, u_w, u_h, &u_eob, tc->cdf, 1,
@@ -7735,9 +7748,9 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
         {
             int uv_mode_c = (uv_mode >= 0 && uv_mode <= 12) ? uv_mode : STB_AV1_DC_PRED;
             int tx_type_uv = (int)stb_av1_txtp_from_uvmode[uv_mode_c];
-            unsigned char pred_v[1024], above_v[64], left_v[64];
+            unsigned char pred_v[128*128], above_v[64], left_v[64];
             unsigned char topleft_v;
-            int v_eob, v_coeffs[1024];
+            int v_eob, v_coeffs[128*128];
             unsigned char res_ctx = 0x40;
             for (uvi = 0; uvi < u_w && uvi < 64; uvi++)
                 above_v[uvi] = u_r > 0 ? tc->plane_v[(u_r-1)*tc->stride_v+u_c+uvi] : (unsigned char)128;
@@ -7747,7 +7760,7 @@ static void stb_av1_decode_block(struct stb_av1_tile_context *tc,
                 ? tc->plane_v[(u_r-1)*tc->stride_v+u_c-1] : (unsigned char)128;
             stb_av1_intra_predict(pred_v, u_w, u_w, u_h, uv_mode_c,
                                    above_v, left_v, topleft_v, tc->bit_depth);
-            for (uvi = 0; uvi < 1024; uvi++) v_coeffs[uvi] = 0;
+            for (uvi = 0; uvi < 16384; uvi++) v_coeffs[uvi] = 0;
             if (!block_skip)
                 stb_av1_decode_coeffs_cdf(tc->msac, v_coeffs, u_w, u_h, &v_eob, tc->cdf, 1,
                     v_above_nz, v_left_nz, blw, blh, ss_x, ss_y, &res_ctx,
@@ -7835,7 +7848,7 @@ static void stb_av1_decode_sb_tree(struct stb_av1_tile_context *tc,
         }
 
         if (can_h && can_v) {
-{ static int _pd = 0; if (_pd < 5) {
+{ static int _pd = 0; if (_pd < 4000) {
     fprintf(stderr, "[DBG_PART] bl=%d sz4=%d bx4=%d by4=%d nsym=%d\n", bl, sz4, bx4, by4, stb_av1_partition_nsym[bl]);
     fprintf(stderr, "[DBG_PART] cdf bl=%d ctx=0: ", bl);
     { int _i; for(_i=0;_i<stb_av1_partition_nsym[bl];_i++) fprintf(stderr,"%u ",tc->cdf->partition[bl][0][_i]); fprintf(stderr," cnt=%u\n",tc->cdf->partition[bl][0][stb_av1_partition_nsym[bl]]); }
@@ -9167,7 +9180,8 @@ static void stb_av1_parse_frame_hdr_msac(struct stb_av1_msac *msac,
       fh->delta_q_y_dc = yd > 16 ? yd - 32 : yd; }
     fh->delta_q_u_dc=0; fh->delta_q_u_ac=0; fh->delta_q_v_dc=0; fh->delta_q_v_ac=0;
     fh->using_qmatrix = (int)stb_av1_msac_decode_bool_equi(msac);
-    if (fh->using_qmatrix) { fh->qm_y = (int)stb_av1_msac_decode_bools(msac, 4);
+    if (fh->using_qmatrix) {
+        fh->qm_y = (int)stb_av1_msac_decode_bools(msac, 4);
         fh->qm_u = (int)stb_av1_msac_decode_bools(msac, 4);
         fh->qm_v = (int)stb_av1_msac_decode_bools(msac, 4); }
     fh->segmentation_enabled = (int)stb_av1_msac_decode_bool_equi(msac);
@@ -9879,11 +9893,11 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
                     if (uv_c >= uv_w) uv_c = uv_w - 1;
                     if (uv_r < 0) uv_r = 0;
                     if (uv_c < 0) uv_c = 0;
-                    u_val = (int)info.plane_u[uv_r * info.stride_u + uv_c];
-                    v_val = (int)info.plane_v[uv_r * info.stride_v + uv_c];
+                    u_val = info.plane_u ? (int)info.plane_u[uv_r * info.stride_u + uv_c] : 128;
+                    v_val = info.plane_v ? (int)info.plane_v[uv_r * info.stride_v + uv_c] : 128;
                 } else {
-                    u_val = (int)info.plane_u[row * info.stride_u + col];
-                    v_val = (int)info.plane_v[row * info.stride_v + col];
+                    u_val = info.plane_u ? (int)info.plane_u[row * info.stride_u + col] : 128;
+                    v_val = info.plane_v ? (int)info.plane_v[row * info.stride_v + col] : 128;
                 }
 
                 if (row == 0 && col < 10) {
