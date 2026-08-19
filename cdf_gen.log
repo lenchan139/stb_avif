@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/Users/len/Downloads/stb_avif/gen_final.py", line 157, in <module>
-    assert len(flat) == our_total
-AssertionError

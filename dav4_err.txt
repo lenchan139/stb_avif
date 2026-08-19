@@ -1,1 +1,0 @@
-zsh:1: no such file or directory: ./dav1d_trace_driver
