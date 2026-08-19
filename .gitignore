@@ -2,7 +2,12 @@
 avif2ppm
 avif2ppm_dav1d
 test_avif2png
+test_avif2c89ppm
+test_c89_ppm
+test_dav1d_ppm
 test_avif
+_t
+_t.c
 *.o
 *.obj
 *.exe
@@ -10,6 +15,17 @@ test_avif
 # Output directories
 output_ppm/
 output_png/
+output_c89/
+output_ppm_c89/
+
+# Debug artifacts / logs
+stb_stderr*.txt
+stb_stdout*.txt
+dav*.txt
+doit_result.txt
+stb_c89_result.txt
+*.log
+*.inc
 
 # macOS
 .DS_Store
