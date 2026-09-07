@@ -163,6 +163,7 @@ int main(int argc, char *argv[])
 
     /* Default file list */
     const char *files[] = {
+"example_avif/app_2048.avif",
 "example_avif/app-icon.avif",
 "example_avif/avif-yuv444p.avif",
 "example_avif/avif-yuv444p10le.avif",
@@ -187,6 +188,7 @@ int main(int argc, char *argv[])
 "example_avif/hato.profile2.8bpc.yuv422.monochrome.avif",
 "example_avif/illustration.avif",
 "example_avif/image-settings.avif",
+"example_avif/markdown.avif",
 "example_avif/kimono.avif",
 "example_avif/Tomsk_with_thumbnails.avif",
 "example_avif/victoria-falls-lossless.avif",

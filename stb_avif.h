@@ -3575,6 +3575,15 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
             info.av1_size = total_av1;
             info.ivf_concat_buf = av1_buf;
         }
+        /* Validate: first byte must look like a valid OBU header */
+        if (total_av1 > 0) {
+            unsigned char first = info.av1_data[0];
+            int obu_type = (first >> 3) & 0xF;
+            if ((first & 0x80) != 0 || obu_type == 0 || (first & 1) != 0) {
+                stb_avif_error_msg = "Invalid IVF: first frame does not contain valid AV1 OBU data";
+                goto error_exit;
+            }
+        }
         info.input = data;
         info.input_len = len;
         goto ivf_decoded;
@@ -3905,6 +3914,14 @@ ivf_decoded:
         }
     }
 #endif /* !STB_AVIF_USE_DAV1D */
+
+    /* After sequence header parse, override info.width/height with the
+     * real bitstream dimensions.  IVF headers or ispe boxes can be wrong
+     * (e.g. thumbnail dimensions); the sequence header is authoritative. */
+    if (sh.max_frame_width > 0 && sh.max_frame_height > 0) {
+        info.width  = sh.max_frame_width;
+        info.height = sh.max_frame_height;
+    }
 
     /* If we didn't find a frame header, use defaults for still picture */
     if (!fh.frame_width || !fh.frame_height) {
