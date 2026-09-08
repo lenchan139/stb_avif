@@ -162,6 +162,34 @@ unsigned char *stb_avif_load_from_file(const char *filePath,
 #include <dav1d/dav1d.h>
 #endif
 
+/* Basic scalar types and getbits reader are shared between the internal
+   decoder and the ISOBMFF parser — always needed. */
+#ifndef STBV_U8_DEFINED
+typedef unsigned char stbv_u8;
+#define STBV_U8_DEFINED 1
+#endif
+#ifndef STBV_U16_DEFINED
+typedef unsigned short stbv_u16;
+#define STBV_U16_DEFINED 1
+#endif
+#ifndef STBV_U32_DEFINED
+typedef unsigned int stbv_u32;
+#define STBV_U32_DEFINED 1
+#endif
+#ifndef STBV_I32_DEFINED
+typedef signed int stbv_i32;
+#define STBV_I32_DEFINED 1
+#endif
+#ifndef STBV_U64_DEFINED
+#if defined(_MSC_VER)
+typedef unsigned __int64 stbv_u64;
+#else
+typedef unsigned long long stbv_u64;
+#endif
+#define STBV_U64_DEFINED 1
+#endif
+#include "stb_av1_getbits.h"
+
 #ifndef STB_AVIF_USE_DAV1D
 #include "stb_av1_scalar.h"
 #include "stb_av1_ipred.h"
@@ -4234,12 +4262,14 @@ ivf_decoded:
                         g = y_val;
                         b = u_val + 128;
                     } else if (mc >= 8 && mc <= 10) {
+                        /* BT.2020: Kr=0.2627, Kb=0.0593 */
                         r = y_val + ((378 * v_val) >> 8);
-                        g = y_val - ((42 * u_val + 120 * v_val) >> 8);
+                        g = y_val - ((42 * u_val + 174 * v_val) >> 8);
                         b = y_val + ((482 * u_val) >> 8);
                     } else if (mc == 1 || mc == 2) {
+                        /* BT.709: Kr=0.2126, Kb=0.0722 */
                         r = y_val + ((403 * v_val) >> 8);
-                        g = y_val - ((48 * u_val + 120 * v_val) >> 8);
+                        g = y_val - ((48 * u_val + 174 * v_val) >> 8);
                         b = y_val + ((475 * u_val) >> 8);
                     } else {
                         r = y_val + ((359 * v_val) >> 8);
