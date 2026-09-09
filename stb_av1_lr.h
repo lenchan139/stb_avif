@@ -424,12 +424,16 @@ static void stbv_av1_sgr_weighted2(unsigned short *dst, int dst_stride,
 }
 
 /* ---- SGR 3x3 filter ---- */
-static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
-                              int frame_w, int frame_h,
-                              int ux0, int uy0, int uw, int uh,
-                              int s1, int w1)
+
+/* Compute unweighted 3x3 SGR filter output.
+ * Reads from src (const, not modified), writes uh rows to out_tmp.
+ * Each output row at out_tmp[y * 384] for y in [0, uh). */
+static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
+                                      const unsigned short *src, int src_stride,
+                                      int frame_w, int frame_h,
+                                      int ux0, int uy0, int uw, int uh,
+                                      int s1)
 {
-    /* Allocate work buffers */
     int BUF = 384 + 16;
     int *sumsq_buf, *sum_buf;
     int *A_buf, *B_buf;
@@ -439,8 +443,7 @@ static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
     int y, i;
     int ex0 = ux0 - 1, ey0 = uy0 - 1;
     int ew = uw + 2, eh = uh + 2;
-    int ey0_clamped, ey1_clamped;
-    const unsigned short *src_row;
+    int ey0_clamped;
     signed short tmp[384];
 
     if (ew <= 0 || eh <= 0 || uw <= 0 || uh <= 0) return;
@@ -466,25 +469,22 @@ static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
         B_ptrs[i] = B_buf + i * BUF;
     }
 
-    /* Initialize: replicate top row for rows before the LR unit */
     ey0_clamped = ey0 < 0 ? 0 : ey0;
     {
-        const unsigned short *r0 = dst + ey0_clamped * stride + ex0;
+        const unsigned short *r0 = src + ey0_clamped * src_stride + ex0;
         stbv_av1_sgr_box3_row_h(sumsq_ptrs[0], sum_ptrs[0], r0, ew);
     }
 
-    /* Process eh rows */
     for (y = 0; y < eh; y++) {
         int row = (ey0 + y);
         int row_clamped;
         const unsigned short *src_ptr;
-        int next_row;
 
         if (row < 0) row_clamped = 0;
         else if (row >= frame_h) row_clamped = frame_h - 1;
         else row_clamped = row;
 
-        src_ptr = dst + row_clamped * stride + ex0;
+        src_ptr = src + row_clamped * src_stride + ex0;
 
         stbv_av1_sgr_box3_row_h(sumsq_ptrs[2], sum_ptrs[2], src_ptr, ew);
         stbv_av1_sgr_box3_row_v((const int *const *)sumsq_ptrs, (const int *const *)sum_ptrs, A_ptrs[2], B_ptrs[2], uw);
@@ -494,36 +494,34 @@ static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
         stbv_av1_rotate3(A_ptrs);
         stbv_av1_rotate3(B_ptrs);
 
-        /* If we have 3+ rows accumulated, produce output */
         if (y >= 2) {
             int out_y = uy0 + (y - 2);
             if (out_y >= uy0 && out_y < uy0 + uh) {
-                unsigned short *dst_row = dst + out_y * stride + ux0;
-                stbv_av1_sgr_finish_filter_row1(tmp, dst_row,
+                const unsigned short *src_row = src + out_y * src_stride + ux0;
+                stbv_av1_sgr_finish_filter_row1(out_tmp + (out_y - uy0) * 384,
+                                                src_row,
                                                 (const int *const *)A_ptrs,
                                                 (const int *const *)B_ptrs,
                                                 uw);
-                stbv_av1_sgr_weighted_row1(dst_row, tmp, uw, w1);
             }
         }
     }
 
-    /* Pad remaining rows */
     for (i = 0; i < 2; i++) {
         int out_y = uy0 + uh - 2 + i;
         if (out_y >= uy0 && out_y < uy0 + uh) {
-            unsigned short *dst_row = dst + out_y * stride + ux0;
-        stbv_av1_sgr_box3_row_v((const int *const *)sumsq_ptrs, (const int *const *)sum_ptrs, A_ptrs[2], B_ptrs[2], uw);
+            const unsigned short *src_row = src + out_y * src_stride + ux0;
+            stbv_av1_sgr_box3_row_v((const int *const *)sumsq_ptrs, (const int *const *)sum_ptrs, A_ptrs[2], B_ptrs[2], uw);
             stbv_av1_sgr_calc_ab(A_ptrs[2], B_ptrs[2], uw, s1, 9, 455);
             stbv_av1_rotate3(sumsq_ptrs);
             stbv_av1_rotate3(sum_ptrs);
             stbv_av1_rotate3(A_ptrs);
             stbv_av1_rotate3(B_ptrs);
-            stbv_av1_sgr_finish_filter_row1(tmp, dst_row,
+            stbv_av1_sgr_finish_filter_row1(out_tmp + (out_y - uy0) * 384,
+                                            src_row,
                                             (const int *const *)A_ptrs,
                                             (const int *const *)B_ptrs,
                                             uw);
-            stbv_av1_sgr_weighted_row1(dst_row, tmp, uw, w1);
         }
     }
 
@@ -533,11 +531,35 @@ static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
     stb_avif_free_internal(B_buf);
 }
 
-/* ---- SGR 5x5 filter ---- */
-static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
+/* Standalone 3x3 SGR: compute + apply weight to dst */
+static void stbv_av1_sgr_3x3(unsigned short *dst, int stride,
                               int frame_w, int frame_h,
                               int ux0, int uy0, int uw, int uh,
-                              int s0, int w0)
+                              int s1, int w1)
+{
+    int y;
+    signed short *out_tmp;
+    if (uw <= 0 || uh <= 0) return;
+    out_tmp = (signed short *)stb_avif_calloc((size_t)uh * 384, sizeof(signed short));
+    if (!out_tmp) return;
+    stbv_av1_sgr_compute_3x3(out_tmp, dst, stride, frame_w, frame_h,
+                              ux0, uy0, uw, uh, s1);
+    for (y = 0; y < uh; y++)
+        stbv_av1_sgr_weighted_row1(dst + (uy0 + y) * stride + ux0,
+                                   out_tmp + y * 384, uw, w1);
+    stb_avif_free_internal(out_tmp);
+}
+
+/* ---- SGR 5x5 filter ---- */
+
+/* Compute unweighted 5x5 SGR filter output.
+ * Reads from src (const, not modified), writes uh rows to out_tmp.
+ * Each output row at out_tmp[y * 384] for y in [0, uh). */
+static void stbv_av1_sgr_compute_5x5(signed short *out_tmp,
+                                      const unsigned short *src, int src_stride,
+                                      int frame_w, int frame_h,
+                                      int ux0, int uy0, int uw, int uh,
+                                      int s0)
 {
     int BUF = 384 + 16;
     int *sumsq_buf, *sum_buf;
@@ -549,7 +571,7 @@ static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
     int ex0 = ux0 - 2, ew = uw + 4;
     int ey0 = uy0 - 2, eh = uh + 4;
     int ey0_clamped;
-    signed short tmp[768]; /* 2 * 384 */
+    signed short tmp[768];
 
     if (ew <= 0 || eh <= 0 || uw <= 0 || uh <= 0) return;
 
@@ -578,7 +600,7 @@ static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
 
     ey0_clamped = ey0 < 0 ? 0 : ey0;
     {
-        const unsigned short *r0 = dst + ey0_clamped * stride + ex0;
+        const unsigned short *r0 = src + ey0_clamped * src_stride + ex0;
         stbv_av1_sgr_box5_row_h(sumsq_ptrs[0], sum_ptrs[0], r0, ew);
         stbv_av1_sgr_box5_row_h(sumsq_ptrs[1], sum_ptrs[1], r0, ew);
     }
@@ -592,11 +614,10 @@ static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
         else if (row >= frame_h) row_clamped = frame_h - 1;
         else row_clamped = row;
 
-        src_ptr = dst + row_clamped * stride + ex0;
+        src_ptr = src + row_clamped * src_stride + ex0;
 
         stbv_av1_sgr_box5_row_h(sumsq_ptrs[3], sum_ptrs[3], src_ptr, ew);
 
-        /* Vertical accumulation when we have 5 rows */
         stbv_av1_sgr_box5_row_v((const int *const *)sumsq_ptrs, (const int *const *)sum_ptrs, A_ptrs[1], B_ptrs[1], uw);
         stbv_av1_sgr_calc_ab(A_ptrs[1], B_ptrs[1], uw, s0, 25, 164);
         stbv_av1_rotate5(sumsq_ptrs);
@@ -604,21 +625,17 @@ static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
         stbv_av1_rotate2(A_ptrs);
         stbv_av1_rotate2(B_ptrs);
 
-        /* Output: when we have 3+ valid rows, produce 1-2 output rows */
         if (y >= 3) {
             int out_y = uy0 + (y - 3);
             int out_h = (y < eh - 1) ? 2 : 1;
-            unsigned short *dst_row;
             if (out_y + out_h > uy0 + uh) out_h = uy0 + uh - out_y;
             if (out_h > 0 && out_y >= uy0) {
-                dst_row = dst + out_y * stride + ux0;
-                stbv_av1_sgr_finish_filter_row2(tmp, dst_row, stride,
-                                                (const int *const *)A_ptrs,
-                                                (const int *const *)B_ptrs,
-                                                uw, out_h);
-                stbv_av1_sgr_weighted_row1(dst_row, tmp, uw, w0);
-                if (out_h > 1)
-                    stbv_av1_sgr_weighted_row1(dst_row + stride, tmp + 384, uw, w0);
+                const unsigned short *src_row = src + out_y * src_stride + ux0;
+                stbv_av1_sgr_finish_filter_row2(out_tmp + (out_y - uy0) * 384,
+                                                 src_row, src_stride,
+                                                 (const int *const *)A_ptrs,
+                                                 (const int *const *)B_ptrs,
+                                                 uw, out_h);
             }
         }
     }
@@ -629,17 +646,52 @@ static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
     stb_avif_free_internal(B_buf);
 }
 
+/* Standalone 5x5 SGR: compute + apply weight to dst */
+static void stbv_av1_sgr_5x5(unsigned short *dst, int stride,
+                              int frame_w, int frame_h,
+                              int ux0, int uy0, int uw, int uh,
+                              int s0, int w0)
+{
+    int y;
+    signed short *out_tmp;
+    if (uw <= 0 || uh <= 0) return;
+    out_tmp = (signed short *)stb_avif_calloc((size_t)uh * 384, sizeof(signed short));
+    if (!out_tmp) return;
+    stbv_av1_sgr_compute_5x5(out_tmp, dst, stride, frame_w, frame_h,
+                              ux0, uy0, uw, uh, s0);
+    for (y = 0; y < uh; y++)
+        stbv_av1_sgr_weighted_row1(dst + (uy0 + y) * stride + ux0,
+                                   out_tmp + y * 384, uw, w0);
+    stb_avif_free_internal(out_tmp);
+}
+
 /* ---- SGR mix (5x5 + 3x3) filter ---- */
+/* Both filters read from the same original src (dst before modification),
+ * produce unweighted outputs in tmp5/tmp3, then blend via sgr_weighted2. */
 static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
                               int frame_w, int frame_h,
                               int ux0, int uy0, int uw, int uh,
                               int s0, int s1, int w0, int w1)
 {
-    /* Simplified mix: apply 5x5 first, then 3x3 on the result */
-    stbv_av1_sgr_5x5(dst, stride, frame_w, frame_h,
-                      ux0, uy0, uw, uh, s0, w0);
-    stbv_av1_sgr_3x3(dst, stride, frame_w, frame_h,
-                      ux0, uy0, uw, uh, s1, w1);
+    signed short *tmp5, *tmp3;
+    int y;
+    if (uw <= 0 || uh <= 0) return;
+    tmp5 = (signed short *)stb_avif_calloc((size_t)uh * 384, sizeof(signed short));
+    tmp3 = (signed short *)stb_avif_calloc((size_t)uh * 384, sizeof(signed short));
+    if (!tmp5 || !tmp3) {
+        if (tmp5) stb_avif_free_internal(tmp5);
+        if (tmp3) stb_avif_free_internal(tmp3);
+        return;
+    }
+    /* Both compute functions read from dst (original) without modifying it */
+    stbv_av1_sgr_compute_5x5(tmp5, dst, stride, frame_w, frame_h,
+                              ux0, uy0, uw, uh, s0);
+    stbv_av1_sgr_compute_3x3(tmp3, dst, stride, frame_w, frame_h,
+                              ux0, uy0, uw, uh, s1);
+    /* Blend both filter outputs onto dst */
+    stbv_av1_sgr_weighted2(dst, stride, tmp5, tmp3, uw, uh, w0, w1);
+    stb_avif_free_internal(tmp5);
+    stb_avif_free_internal(tmp3);
 }
 
 /* ---- Frame-level LR application ---- */
