@@ -441,11 +441,14 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
     int *A_ptrs[3], *B_ptrs[3];
     int *sumsq_ptrs[3], *sum_ptrs[3];
     int y, i;
-    int ex0 = ux0 - 1, ey0 = uy0 - 1;
+    int ex0 = ux0 > 1 ? ux0 - 1 : 0;
+    int ey0 = uy0 > 1 ? uy0 - 1 : 0;
     int ew = uw + 2, eh = uh + 2;
     int ey0_clamped;
     signed short tmp[384];
 
+    if (ex0 + ew > frame_w) ew = frame_w - ex0;
+    if (ey0 + eh > frame_h) eh = frame_h - ey0;
     if (ew <= 0 || eh <= 0 || uw <= 0 || uh <= 0) return;
 
     sumsq_buf = (int*)stb_avif_calloc((size_t)BUF * 3, sizeof(int));
@@ -469,7 +472,7 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
         B_ptrs[i] = B_buf + i * BUF;
     }
 
-    ey0_clamped = ey0 < 0 ? 0 : ey0;
+    ey0_clamped = ey0;
     {
         const unsigned short *r0 = src + ey0_clamped * src_stride + ex0;
         stbv_av1_sgr_box3_row_h(sumsq_ptrs[0], sum_ptrs[0], r0, ew);
@@ -568,11 +571,15 @@ static void stbv_av1_sgr_compute_5x5(signed short *out_tmp,
     int *sumsq_ptrs[5], *sum_ptrs[5];
     int *A_ptrs[2], *B_ptrs[2];
     int y, i;
-    int ex0 = ux0 - 2, ew = uw + 4;
-    int ey0 = uy0 - 2, eh = uh + 4;
+    int ex0 = ux0 > 2 ? ux0 - 2 : 0;
+    int ew = uw + 4;
+    int ey0 = uy0 > 2 ? uy0 - 2 : 0;
+    int eh = uh + 4;
     int ey0_clamped;
     signed short tmp[768];
 
+    if (ex0 + ew > frame_w) ew = frame_w - ex0;
+    if (ey0 + eh > frame_h) eh = frame_h - ey0;
     if (ew <= 0 || eh <= 0 || uw <= 0 || uh <= 0) return;
 
     sumsq_buf = (int*)stb_avif_calloc((size_t)BUF * 5, sizeof(int));
@@ -598,7 +605,7 @@ static void stbv_av1_sgr_compute_5x5(signed short *out_tmp,
         B_ptrs[i] = B_buf + i * BUF;
     }
 
-    ey0_clamped = ey0 < 0 ? 0 : ey0;
+    ey0_clamped = ey0;
     {
         const unsigned short *r0 = src + ey0_clamped * src_stride + ex0;
         stbv_av1_sgr_box5_row_h(sumsq_ptrs[0], sum_ptrs[0], r0, ew);
@@ -758,7 +765,7 @@ static void stb_av1_lr_frame(unsigned short *plane_y, unsigned short *plane_u,
                                          ux0, uy0, uw, uh, s0, w0);
                     else if (s1)
                         stbv_av1_sgr_3x3(plane, stride, w, h,
-                                         ux0, uy0, uw, uh, s1, w0);
+                                         ux0, uy0, uw, uh, s1, w1_adj);
                 }
                 /* NONE: no-op */
             }
