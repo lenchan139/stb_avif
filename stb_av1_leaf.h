@@ -232,6 +232,11 @@ typedef struct stbv_av1_leaf_state_arrays {
     unsigned int above_seg_id_n;
     stbv_u8 *left_seg_id;
     unsigned int left_seg_id_n;
+    /* segment prediction context */
+    stbv_u8 *above_seg_pred;
+    unsigned int above_seg_pred_n;
+    stbv_u8 *left_seg_pred;
+    unsigned int left_seg_pred_n;
     /* IBC MV neighbour arrays for MV prediction (dav1d refmvs_find). */
     int *above_ibc_mv_y;
     int *above_ibc_mv_x;
@@ -300,6 +305,11 @@ typedef struct stbv_av1_leaf_state {
     stbv_u8 *left_seg_id;
     unsigned int above_seg_id_n;
     unsigned int left_seg_id_n;
+    /* segment prediction context (temporal seg_pred) */
+    stbv_u8 *above_seg_pred;
+    stbv_u8 *left_seg_pred;
+    unsigned int above_seg_pred_n;
+    unsigned int left_seg_pred_n;
     /* CDEF index output grid (per-64x64 block) */
     int *cdef_idx_grid;
     int cdef_grid_stride;
@@ -373,6 +383,10 @@ static void stbv_av1_leaf_state_init(stbv_av1_leaf_state *s,
     s->left_seg_id = a->left_seg_id;
     s->above_seg_id_n = a->above_seg_id_n;
     s->left_seg_id_n = a->left_seg_id_n;
+    s->above_seg_pred = a->above_seg_pred;
+    s->left_seg_pred = a->left_seg_pred;
+    s->above_seg_pred_n = a->above_seg_pred_n;
+    s->left_seg_pred_n = a->left_seg_pred_n;
     s->above_ibc_mv_y = a->above_ibc_mv_y;
     s->above_ibc_mv_x = a->above_ibc_mv_x;
     s->above_ibc_valid = a->above_ibc_valid;
@@ -1455,6 +1469,106 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
             state->left_skip[by4 + i] = (stbv_u8)block_skip;
     }
 
+    /* Post-skip segment_id decode (dav1d decode.c:908-949).
+     * When preskip=0, segment_id is decoded AFTER the skip symbol. */
+    if (frame && frame->segmentation.enabled && frame->segmentation.update_map &&
+        !frame->segmentation.preskip)
+    {
+        int have_top = (state->above_seg_id && (unsigned)bx4 < state->above_seg_id_n);
+        int have_left = (state->left_seg_id && (unsigned)by4 < state->left_seg_id_n);
+        if (!block_skip && frame->segmentation.temporal) {
+            /* Temporal prediction */
+            int sctx2 = 0;
+            if (state->above_seg_pred && (unsigned)bx4 < state->above_seg_pred_n)
+                sctx2 += state->above_seg_pred[bx4];
+            if (state->left_seg_pred && (unsigned)by4 < state->left_seg_pred_n)
+                sctx2 += state->left_seg_pred[by4];
+            seg_pred = stb_av1_msac_bool_adapt(msac, cdf->seg_pred + sctx2);
+            if (seg_pred) {
+                /* Temporal predicted seg_id from prev frame */
+                /* TODO: prev_segmap support - use 0 for now */
+                seg_id = 0;
+            } else {
+                /* Spatial prediction */
+                int seg_ctx = 0;
+                unsigned pred_seg_id = 0;
+                /* get_cur_frame_segid: spatial prediction from neighbors */
+                if (have_left && have_top) {
+                    int l = state->left_seg_id[by4];
+                    int a = state->above_seg_id[bx4];
+                    int al = (bx4 > 0 && by4 > 0) ? state->above_seg_id[bx4 - 1] : a;
+                    if (l == a && al == l) seg_ctx = 2;
+                    else if (l == a || al == l || a == al) seg_ctx = 1;
+                    else seg_ctx = 0;
+                    pred_seg_id = (unsigned)(a == al ? a : l);
+                } else {
+                    pred_seg_id = have_left ? (unsigned)state->left_seg_id[by4] :
+                                  have_top ? (unsigned)state->above_seg_id[bx4] : 0;
+                }
+                {
+                    unsigned diff = (unsigned)stb_av1_msac_symbol(msac,
+                        cdf->seg_id + seg_ctx * 8, 7);
+                    int last_active = frame->segmentation.last_active_segid;
+                    seg_id = stb_neg_deinterleave((int)diff, (int)pred_seg_id,
+                                                  last_active + 1);
+                    if (seg_id > last_active) seg_id = 0;
+                }
+                if (seg_id < 0 || seg_id >= 8) seg_id = 0;
+            }
+        } else {
+            /* block_skip=1 or !temporal: spatial prediction only */
+            int seg_ctx = 0;
+            unsigned pred_seg_id = 0;
+            if (have_left && have_top) {
+                int l = state->left_seg_id[by4];
+                int a = state->above_seg_id[bx4];
+                int al = (bx4 > 0 && by4 > 0) ? state->above_seg_id[bx4 - 1] : a;
+                if (l == a && al == l) seg_ctx = 2;
+                else if (l == a || al == l || a == al) seg_ctx = 1;
+                else seg_ctx = 0;
+                pred_seg_id = (unsigned)(a == al ? a : l);
+            } else {
+                pred_seg_id = have_left ? (unsigned)state->left_seg_id[by4] :
+                              have_top ? (unsigned)state->above_seg_id[bx4] : 0;
+            }
+            if (block_skip) {
+                seg_id = (int)pred_seg_id;
+            } else {
+                unsigned diff = (unsigned)stb_av1_msac_symbol(msac,
+                    cdf->seg_id + seg_ctx * 8, 7);
+                int last_active = frame->segmentation.last_active_segid;
+                seg_id = stb_neg_deinterleave((int)diff, (int)pred_seg_id,
+                                              last_active + 1);
+                if (seg_id > last_active) seg_id = 0;
+            }
+            if (seg_id < 0 || seg_id >= 8) seg_id = 0;
+        }
+
+        /* Apply per-segment features: skip */
+        if (frame->segmentation.d[seg_id].skip)
+            block_skip = 1;
+
+        /* Update seg_pred context arrays */
+        if (state->above_seg_pred && (unsigned)bx4 < state->above_seg_pred_n) {
+            for (i = 0; i < bw4_unc && (unsigned)(bx4 + i) < state->above_seg_pred_n; i++)
+                state->above_seg_pred[bx4 + i] = (stbv_u8)seg_pred;
+        }
+        if (state->left_seg_pred && (unsigned)by4 < state->left_seg_pred_n) {
+            for (i = 0; i < bh4_unc && (unsigned)(by4 + i) < state->left_seg_pred_n; i++)
+                state->left_seg_pred[by4 + i] = (stbv_u8)seg_pred;
+        }
+
+        /* Store segment_id in context arrays */
+        if (state->above_seg_id && (unsigned)bx4 < state->above_seg_id_n) {
+            for (i = 0; i < bw4_unc && (unsigned)(bx4 + i) < state->above_seg_id_n; i++)
+                state->above_seg_id[bx4 + i] = (stbv_u8)seg_id;
+        }
+        if (state->left_seg_id && (unsigned)by4 < state->left_seg_id_n) {
+            for (i = 0; i < bh4_unc && (unsigned)(by4 + i) < state->left_seg_id_n; i++)
+                state->left_seg_id[by4 + i] = (stbv_u8)seg_id;
+        }
+    }
+
     /* cdef index, once per superblock, only when the block is not skipped.
      * The slot state resets at each superblock start (dav1d decode_sb). */
     if (frame) {
@@ -1482,20 +1596,6 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
                 if (gx >= 0 && gx < state->cdef_grid_stride &&
                     gy >= 0)
                     state->cdef_idx_grid[gy * state->cdef_grid_stride + gx] = v;
-            }
-        }
-        /* Also write cdef_idx for skipped blocks - use 0 as default. */
-        if (block_skip && state->cdef_idx[idx] == -1) {
-            state->cdef_idx[idx] = 0;
-            if (bw4 > 16) state->cdef_idx[idx + 1] = 0;
-            if (bh4 > 16) state->cdef_idx[idx + 2] = 0;
-            if (bw4 == 32 && bh4 == 32) state->cdef_idx[idx + 3] = 0;
-            if (state->cdef_idx_grid && state->cdef_grid_stride > 0) {
-                int gx = sbx / 16 + (idx & 1);
-                int gy = sby / 16 + (idx >> 1);
-                if (gx >= 0 && gx < state->cdef_grid_stride &&
-                    gy >= 0)
-                    state->cdef_idx_grid[gy * state->cdef_grid_stride + gx] = 0;
             }
         }
     }
