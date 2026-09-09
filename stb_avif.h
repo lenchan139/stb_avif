@@ -1678,7 +1678,7 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
                                        int *bit_depth, int *monochrome,
                                        int *subsampling_x, int *subsampling_y,
                                         int *color_range, int *matrix_coefficients
-#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK)
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK) || defined(STB_AVIF_NO_LR)
                                        , int no_filters
 #endif
                                        )
@@ -1699,6 +1699,9 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
 #elif defined(STB_AVIF_NO_DEBLOCK)
     if (no_filters)
         s.inloop_filters = DAV1D_INLOOPFILTER_CDEF | DAV1D_INLOOPFILTER_RESTORATION;
+#elif defined(STB_AVIF_NO_LR)
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_DEBLOCK | DAV1D_INLOOPFILTER_CDEF;
 #endif
 
     ret = dav1d_open(&ctx, &s);
@@ -1884,6 +1887,11 @@ struct stb_avif_scalar_recon {
     stbv_u32 *lf_blkid_c;   /* chroma-plane coverage (separate set) */
     stbv_u8 *lf_txlw_c;
     stbv_u8 *lf_done;       /* per-4x4-unit reconstruction bitmap (luma) */
+    /* CDEF: per-8x8-block noskip mask (1 bit per 8x8 block, 8 rows per 64x64 SB).
+     * Bit i set in row r means the 8x8 block at (i*8, r*8) within the SB has
+     * coded coefficients and should be CDEF-filtered. */
+    stbv_u8 *cdef_noskip_mask;
+    int cdef_noskip_stride; /* bytes per row of the noskip mask grid */
     int lf_mapw4, lf_maph4;
     ptrdiff_t lf_b4stride;
     /* Per-block LF level map: [b4stride * b4height][2] where [0]=Y-vert, [1]=Y-horiz.
@@ -2219,7 +2227,7 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
     }
 }
 
-static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x)
+static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x, int seg_id)
 {
     struct stb_avif_scalar_recon *rc;
     int bw4, bh4;
@@ -2240,6 +2248,20 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                                    ? tx0 : 0].h;
     rc->block_skip = skip;
     rc->has_chroma = has_chroma;
+    /* Fill per-block LF level from lf_lut.  For intra/IBC: ref=0, is_gmv=0.
+     * The lut gives 4 direction levels [Y-vert, Y-horiz, U, V]. */
+    if (rc->lf_level && rc->lf_lut) {
+        int dir;
+        for (dir = 0; dir < 2; dir++) {
+            stbv_u8 lv = rc->lf_lut[seg_id][dir][0][0];
+            int y, x;
+            for (y = 0; y < bh4; y++)
+                for (x = 0; x < bw4; x++) {
+                    size_t off = (size_t)(by4 + y) * rc->lf_b4stride + (bx4 + x);
+                    rc->lf_level[off * 2 + dir] = lv;
+                }
+        }
+    }
     if (!intra) {
         /* IBC block: copy already-reconstructed pixels from the current
          * frame at the reference position indicated by the MV.  MV is in
@@ -2351,6 +2373,25 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
     rc->cfl_alpha_v = cfl_alpha_v;
     rc->block_skip = skip;
     rc->has_chroma = has_chroma;
+    /* Populate CDEF noskip_mask: for non-skipped blocks, set bits for each
+     * 8x8 block that overlaps the current 4x4-unit block.
+     * Layout: (sb_rows*8) rows x sb_cols bytes. Row r, SB-column sb_x is
+     * at byte sb_y*sb_cols*8 + r*sb_cols + sb_x, bit = block_col & 7. */
+    if (rc->cdef_noskip_mask) {
+        int sb_cols = (rc->above_n + 15) / 16;
+        int sb64_x = bx4 >> 4;
+        int sb64_y = by4 >> 4;
+        if (!skip) {
+            int row8 = by4 >> 1;  /* absolute 8x8 row in frame */
+            int col_start8 = bx4 >> 1;
+            int col_end8 = (bx4 + bw4 - 1) >> 1;
+            int c8;
+            for (c8 = col_start8; c8 <= col_end8; c8++) {
+                int byte_idx = row8 * sb_cols + sb64_x;
+                rc->cdef_noskip_mask[byte_idx] |= (stbv_u8)(1u << (c8 & 7));
+            }
+        }
+    }
     rc->pal_y = pal_sz_y;
     rc->pal_uv = pal_sz_uv;
     /* dav1d predicts PER TRANSFORM so every txb sees freshly reconstructed
@@ -3067,6 +3108,8 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     stbv_u8 *lf_level_map = 0;   /* [b4stride*b4height][2]: Y-vert, Y-horiz per block */
     int *cdef_idx_grid = 0;
     int cdef_grid_stride = 0;
+    stbv_u8 *cdef_noskip_mask = 0;
+    int cdef_noskip_stride = 0;
     stbv_av1_lr_mask lr_mask;
     int lr_mask_ok = 0;
     int bw8al, bh8al;
@@ -3317,6 +3360,12 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                 for (gi = 0; gi < cdef_grid_total; gi++)
                     cdef_idx_grid[gi] = -1;
             }
+            /* Allocate noskip mask: 8 rows per SB, 1 byte per row (8 bits = 8 blocks across).
+             * Layout: sb_rows*8 rows × sb_cols bytes. Stride = sb_cols. */
+            cdef_noskip_stride = cdef_grid_stride;
+            cdef_noskip_mask = (stbv_u8*)stb_avif_calloc(
+                (size_t)cdef_noskip_stride * cdef_grid_rows * 8, 1);
+            if (!cdef_noskip_mask) { r = -5; goto oom16; }
         }
     }
     /* Wire the CDEF grid into the leaf state (after allocation). */
@@ -3365,6 +3414,8 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     recon->left_n = frame_h4;
     recon->above_uvmode = above_uvmode;
     recon->left_uvmode = left_uvmode;
+    recon->cdef_noskip_mask = cdef_noskip_mask;
+    recon->cdef_noskip_stride = cdef_noskip_stride;
     g_scalar_recon = *recon;
     g_scalar_recon_cb.ud = &g_scalar_recon;
     g_scalar_recon_cb.cf = g_scalar_recon.cf;
@@ -3506,10 +3557,12 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                            cdef_idx_grid, cdef_grid_stride,
                            y_pri_arr, y_sec_arr,
                            uv_pri_arr, uv_sec_arr,
-                               (int)fh->cdef.damping);
+                               (int)fh->cdef.damping,
+                               cdef_noskip_mask, cdef_noskip_stride);
     }
 
     /* Loop restoration filtering (after CDEF, before 8-bit conversion). */
+#ifndef STB_AVIF_NO_LR
     if (!r && lr_mask_ok && stream->seq.restoration && !stream->frame.allow_intrabc) {
         stb_av1_lr_frame(py16, pu16, pv16,
                          tc->stride_y, tc->stride_u, tc->stride_v,
@@ -3519,6 +3572,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                          8 + stream->seq.hbd * 2,
                            &lr_mask);
     }
+#endif
 #endif /* !STB_AVIF_NO_FILTERS */
 
     /* Convert internal u16 planes to the caller's 8-bit planes.
@@ -3578,6 +3632,7 @@ oom16:
     stb_avif_free_internal(above_pal0); stb_avif_free_internal(above_pal1);
     stb_avif_free_internal(left_pal0); stb_avif_free_internal(left_pal1);
     stb_avif_free_internal(cdef_idx_grid);
+    stb_avif_free_internal(cdef_noskip_mask);
     stbv_av1_lr_mask_free(&lr_mask);
     stb_avif_free_internal(lf_blkid_map); stb_avif_free_internal(lf_blkid_map_c);
     stb_avif_free_internal(lf_txlw_map); stb_avif_free_internal(lf_txlw_map_c);
@@ -4156,7 +4211,7 @@ ivf_decoded:
             &dav1d_v, &dav1d_vs,
             &dav1d_bd, &dav1d_mono, &dav1d_sx, &dav1d_sy,
             &dav1d_cr, &dav1d_mc
-#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK)
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK) || defined(STB_AVIF_NO_LR)
             , 1
 #endif
             );

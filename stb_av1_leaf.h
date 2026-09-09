@@ -48,7 +48,7 @@ static int stb_neg_deinterleave(int diff, int ref, int max)
 typedef struct stbv_av1_leaf_recon {
     void *ud;
     stbv_i32 *cf;
-    void (*block_info)(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x);
+    void (*block_info)(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x, int seg_id);
     void (*luma_txb)(void *ud, int x4, int y4, int tx, int txtp, int eob, stbv_i32 *cf);
     void (*chroma_txb)(void *ud, int pl, int x4, int y4, int tx, int txtp, int eob, stbv_i32 *cf);
     void (*luma_pal)(void *ud, const stbv_u8 *idx, int sz, int bw4, int bh4, const stbv_u16 *pal);
@@ -1844,7 +1844,7 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
                             intra.y_mode, intra.y_angle, intra.uv_mode,
                             intra.uv_angle,
                             intra.cfl_alpha_u, intra.cfl_alpha_v,
-                             c.ibc_mv_y, c.ibc_mv_x);
+                             c.ibc_mv_y, c.ibc_mv_x, seg_id);
     }
 
     /* Palette pixel application must run AFTER block_info (the callbacks
