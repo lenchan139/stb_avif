@@ -1677,7 +1677,11 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
                                        unsigned char **v_plane, int *v_stride,
                                        int *bit_depth, int *monochrome,
                                        int *subsampling_x, int *subsampling_y,
-                                       int *color_range, int *matrix_coefficients)
+                                        int *color_range, int *matrix_coefficients
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK)
+                                       , int no_filters
+#endif
+                                       )
 {
     Dav1dContext *ctx = NULL;
     Dav1dSettings s;
@@ -1689,6 +1693,13 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
     dav1d_default_settings(&s);
     s.n_threads = 1;
     s.all_layers = 0;
+#ifdef STB_AVIF_NO_FILTERS
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_NONE;
+#elif defined(STB_AVIF_NO_DEBLOCK)
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_CDEF | DAV1D_INLOOPFILTER_RESTORATION;
+#endif
 
     ret = dav1d_open(&ctx, &s);
     if (ret < 0) {  return 0; }
@@ -3414,6 +3425,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         }
     }
 
+#ifndef STB_AVIF_NO_FILTERS
 #ifdef STB_AVIF_DEBLOCK
     if (!r) {
         const struct stb_av1_framehdr *fh = &stream->frame;
@@ -3507,6 +3519,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                          8 + stream->seq.hbd * 2,
                            &lr_mask);
     }
+#endif /* !STB_AVIF_NO_FILTERS */
 
     /* Convert internal u16 planes to the caller's 8-bit planes.
      * Use truncating shift to match dav1d's u16->u8 conversion. */
@@ -4142,7 +4155,11 @@ ivf_decoded:
             &dav1d_u, &dav1d_us,
             &dav1d_v, &dav1d_vs,
             &dav1d_bd, &dav1d_mono, &dav1d_sx, &dav1d_sy,
-            &dav1d_cr, &dav1d_mc);
+            &dav1d_cr, &dav1d_mc
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK)
+            , 1
+#endif
+            );
 
         if (dav1d_ok) {
             /* Replace internal planes with dav1d output */
