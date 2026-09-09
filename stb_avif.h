@@ -1875,6 +1875,12 @@ struct stb_avif_scalar_recon {
     stbv_u8 *lf_done;       /* per-4x4-unit reconstruction bitmap (luma) */
     int lf_mapw4, lf_maph4;
     ptrdiff_t lf_b4stride;
+    /* Per-block LF level map: [b4stride * b4height][2] where [0]=Y-vert, [1]=Y-horiz.
+     * Filled during leaf decode using dav1d_calc_lf_values equivalent. */
+    stbv_u8 *lf_level;
+    /* Per-block LF level lookup table: [seg_id][dir][ref][is_gmv]
+     * Computed once per frame from loopfilter header values. */
+    stbv_u8 lf_lut[8][4][8][2];
     int tile_x4, tile_y4, tile_w4, tile_h4;
     /* IBC reconstruction state. */
     int is_ibc;
@@ -2939,6 +2945,80 @@ static void stb_avif_recon_chroma_pal(void *ud, int pl, const stbv_u8 *idx, int 
 static struct stb_avif_scalar_recon g_scalar_recon;
 static stbv_av1_leaf_recon g_scalar_recon_cb;
 
+/* Compute per-block LF level lookup table (equivalent to dav1d_calc_lf_values).
+ * Output: lflvl[seg_id][dir][ref][is_gmv] where dir: 0=Y-vert,1=Y-horiz,2=U,3=V */
+static void stb_av1_calc_lf_values(stbv_u8 lflvl[8][4][8][2],
+                                   const struct stb_av1_framehdr *hdr,
+                                   const int lf_delta[4])
+{
+    int s, dir, ref, is_gmv;
+    int n_seg = hdr->segmentation.enabled ? 8 : 1;
+    int base[4]; /* base level per dir */
+    const int *ref_delta = hdr->loopfilter.mode_ref_delta_enabled
+                         ? hdr->loopfilter.ref_delta : NULL;
+    const int *mode_delta = hdr->loopfilter.mode_ref_delta_enabled
+                          ? hdr->loopfilter.mode_delta : NULL;
+
+    if (!hdr->loopfilter.level_y[0] && !hdr->loopfilter.level_y[1]) {
+        memset(lflvl, 0, sizeof(stbv_u8) * 8 * 4 * 8 * 2);
+        return;
+    }
+
+    /* Compute base levels for each dir, applying lf_delta */
+    base[0] = hdr->loopfilter.level_y[0] + lf_delta[0];
+    base[1] = hdr->loopfilter.level_y[1] + lf_delta[hdr->delta_lf_multi ? 1 : 0];
+    base[2] = hdr->loopfilter.level_u + lf_delta[hdr->delta_lf_multi ? 2 : 0];
+    base[3] = hdr->loopfilter.level_v + lf_delta[hdr->delta_lf_multi ? 3 : 0];
+    for (dir = 0; dir < 4; dir++) {
+        if (base[dir] < 0) base[dir] = 0;
+        if (base[dir] > 63) base[dir] = 63;
+    }
+
+    for (s = 0; s < n_seg; s++) {
+        int seg_delta_y_v = 0, seg_delta_y_h = 0;
+        int seg_delta_u = 0, seg_delta_v = 0;
+        if (hdr->segmentation.enabled) {
+            const struct stb_av1_seg_data *sd = &hdr->segmentation.d[s];
+            seg_delta_y_v = sd->delta_lf_y_v;
+            seg_delta_y_h = sd->delta_lf_y_h;
+            seg_delta_u = sd->delta_lf_u;
+            seg_delta_v = sd->delta_lf_v;
+        }
+        for (dir = 0; dir < 4; dir++) {
+            int b = base[dir];
+            int sd = (dir == 0) ? seg_delta_y_v : (dir == 1) ? seg_delta_y_h
+                    : (dir == 2) ? seg_delta_u : seg_delta_v;
+            int bseg = b + sd;
+            if (bseg < 0) bseg = 0;
+            if (bseg > 63) bseg = 63;
+
+            if (!ref_delta) {
+                for (ref = 0; ref < 8; ref++)
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++)
+                        lflvl[s][dir][ref][is_gmv] = (stbv_u8)bseg;
+            } else {
+                int sh = bseg >= 32;
+                for (ref = 0; ref < 8; ref++) {
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++) {
+                        int delta;
+                        if (ref == 0) {
+                            delta = ref_delta[0];
+                        } else {
+                            delta = mode_delta[is_gmv ? 1 : 0] + ref_delta[ref];
+                        }
+                        {
+                        int val = bseg + delta * (1 << sh);
+                        if (val < 0) val = 0;
+                        if (val > 63) val = 63;
+                        lflvl[s][dir][ref][is_gmv] = (stbv_u8)val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void stb_avif_row_reset_cb(void *opaque)
 {
     stbv_av1_leaf_state_reset_row((stbv_av1_leaf_state *)opaque);
@@ -2973,6 +3053,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     stbv_u32 *lf_blkid_map = 0, *lf_blkid_map_c = 0;
     stbv_u8 *lf_txlw_map = 0, *lf_txlw_map_c = 0;
     stbv_u8 *lf_done_map = 0;
+    stbv_u8 *lf_level_map = 0;   /* [b4stride*b4height][2]: Y-vert, Y-horiz per block */
     int *cdef_idx_grid = 0;
     int cdef_grid_stride = 0;
     stbv_av1_lr_mask lr_mask;
@@ -3204,8 +3285,10 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         lf_blkid_map_c = (stbv_u32*)stb_avif_calloc((size_t)mw * mh, sizeof(stbv_u32));
         lf_txlw_map_c = (stbv_u8*)stb_avif_calloc((size_t)mw * mh, 1);
         lf_done_map = (stbv_u8*)stb_avif_calloc((size_t)mw * mh, 1);
+        lf_level_map = (stbv_u8*)stb_avif_calloc((size_t)mw * mh * 2, 1);
         if (!lf_blkid_map || !lf_txlw_map ||
-            !lf_blkid_map_c || !lf_txlw_map_c || !lf_done_map) { r = -5; goto oom16; }
+            !lf_blkid_map_c || !lf_txlw_map_c || !lf_done_map ||
+            !lf_level_map) { r = -5; goto oom16; }
         memset(lf_blkid_map_c, 0xFF, (size_t)mw * mh * sizeof(stbv_u32));
     }
     /* CDEF index grid: one entry per 64x64 block. */
@@ -3280,6 +3363,13 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     g_scalar_recon_cb.luma_pal = stb_avif_recon_luma_pal;
     g_scalar_recon_cb.chroma_pal = stb_avif_recon_chroma_pal;
 
+    /* Compute per-block LF level lookup table and assign lf_level map. */
+    recon->lf_level = lf_level_map;
+    {
+        int init_lf_delta[4] = {0, 0, 0, 0};
+        stb_av1_calc_lf_values(recon->lf_lut, &stream->frame, init_lf_delta);
+    }
+
     memset(&td, 0, sizeof(td));
     td.seq = &stream->seq;
     td.frame = &stream->frame;
@@ -3333,6 +3423,16 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         int lvl_v = (int)fh->loopfilter.level_v;
         int sharp = (int)fh->loopfilter.sharpness;
         int maxv = (1 << recon->bit_depth) - 1;
+        /* Apply mode/ref deltas (dav1d_calc_lf_values equivalent for key frames).
+         * For intra blocks (all blocks in key frames): level += ref_delta[0] * (1 << sh)
+         * where sh = (base >= 32). This matches dav1d's per-block level computation. */
+        if (fh->loopfilter.mode_ref_delta_enabled) {
+            int sh;
+            if (lvl_yv) { sh = lvl_yv >= 32; lvl_yv = stb_av1_db_iclip(lvl_yv + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_yh) { sh = lvl_yh >= 32; lvl_yh = stb_av1_db_iclip(lvl_yh + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_u) { sh = lvl_u >= 32; lvl_u = stb_av1_db_iclip(lvl_u + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_v) { sh = lvl_v >= 32; lvl_v = stb_av1_db_iclip(lvl_v + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+        }
         if (recon->ss_ver && !lvl_u) lvl_u = lvl_v;
         if (py16)
             stb_avif_deblock_plane_u16(py16, tc->stride_y,
@@ -3469,6 +3569,7 @@ oom16:
     stb_avif_free_internal(lf_blkid_map); stb_avif_free_internal(lf_blkid_map_c);
     stb_avif_free_internal(lf_txlw_map); stb_avif_free_internal(lf_txlw_map_c);
     stb_avif_free_internal(lf_done_map);
+    stb_avif_free_internal(lf_level_map);
     stb_avif_free(stream);
     stb_avif_free(recon);
     return r;
@@ -4264,12 +4365,12 @@ ivf_decoded:
                     } else if (mc >= 8 && mc <= 10) {
                         /* BT.2020: Kr=0.2627, Kb=0.0593 */
                         r = y_val + ((378 * v_val) >> 8);
-                        g = y_val - ((42 * u_val + 174 * v_val) >> 8);
+                        g = y_val - ((42 * u_val + 146 * v_val) >> 8);
                         b = y_val + ((482 * u_val) >> 8);
                     } else if (mc == 1 || mc == 2) {
                         /* BT.709: Kr=0.2126, Kb=0.0722 */
                         r = y_val + ((403 * v_val) >> 8);
-                        g = y_val - ((48 * u_val + 174 * v_val) >> 8);
+                        g = y_val - ((48 * u_val + 120 * v_val) >> 8);
                         b = y_val + ((475 * u_val) >> 8);
                     } else {
                         r = y_val + ((359 * v_val) >> 8);
