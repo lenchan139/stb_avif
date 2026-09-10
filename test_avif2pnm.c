@@ -1,6 +1,7 @@
 /* test_avif2png.c - decode AVIF files to PPM for visual verification */
 /* Compile: cc -std=c89 -o test_avif2png test_avif2png.c -lm */
 
+#define STB_AVIF_DEBLOCK
 #define STB_AVIF_IMPLEMENTATION
 #include "stb_avif.h"
 
