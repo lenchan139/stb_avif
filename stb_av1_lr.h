@@ -118,8 +118,44 @@ static void stbv_av1_wiener_filter_h(unsigned short *dst, const unsigned short *
     }
 }
 
-static void stbv_av1_wiener_filter_v(unsigned short *p, const unsigned short *const *ptrs,
-                                     const signed short *fv, int w, int bit_depth)
+/* V-filter using 6 stored rows + 1 new row. Matches dav1d's wiener_filter_hv. */
+static void stbv_av1_wiener_hv(unsigned short *p, unsigned short **ptrs,
+                               const unsigned short *src, int src_stride,
+                               int w, const signed short *fh, const signed short *fv,
+                               int bit_depth)
+{
+    const int round_bits_v = 11 - (bit_depth == 12 ? 2 : 0);
+    const int round_off_v = 1 << (round_bits_v - 1);
+    const int round_offset = 1 << (bit_depth + (round_bits_v - 1));
+    const int maxv = (1 << bit_depth) - 1;
+    unsigned short tmp[STBV_LR_REST_UNIT_STRIDE];
+    int i;
+
+    /* H-filter the new source row into tmp */
+    stbv_av1_wiener_filter_h(tmp, src, src_stride, w, fh, bit_depth);
+
+    /* V-filter: 6 stored rows + 1 new row in tmp */
+    for (i = 0; i < w; i++) {
+        int sum = -round_offset;
+        int k;
+        for (k = 0; k < 6; k++)
+            sum += ptrs[k][i] * fv[k];
+        sum += tmp[i] * fv[6];
+        p[i] = stbv_av1_lr_clip16((sum + round_off_v) >> round_bits_v, maxv);
+    }
+
+    /* Copy tmp into ptrs[6] and rotate */
+    for (i = 0; i < w; i++)
+        ptrs[6][i] = tmp[i];
+    for (i = 0; i < 6; i++)
+        ptrs[i] = ptrs[i + 1];
+    ptrs[6] = ptrs[0];
+}
+
+/* V-filter for bottom padding: uses ptrs[0..5] + ptrs[5] (duplicated last row).
+ * Matches dav1d's wiener_filter_v. */
+static void stbv_av1_wiener_v_only(unsigned short *p, unsigned short **ptrs,
+                                   int w, const signed short *fv, int bit_depth)
 {
     const int round_bits_v = 11 - (bit_depth == 12 ? 2 : 0);
     const int round_off_v = 1 << (round_bits_v - 1);
@@ -131,15 +167,15 @@ static void stbv_av1_wiener_filter_v(unsigned short *p, const unsigned short *co
         int k;
         for (k = 0; k < 6; k++)
             sum += ptrs[k][i] * fv[k];
-        sum += ptrs[6][i] * fv[6];
+        sum += ptrs[5][i] * fv[6];
         p[i] = stbv_av1_lr_clip16((sum + round_off_v) >> round_bits_v, maxv);
     }
+    for (i = 0; i < 5; i++)
+        ptrs[i] = ptrs[i + 1];
 }
 
 /* Apply Wiener filter to a rectangular region of a plane.
- * src points to the top-left of the LR unit; the region is [0..w) x [0..h)
- * within the full plane (stride = full frame stride).
- * Edge padding: clamp at frame boundaries. */
+ * Matches dav1d's wiener_c() ring buffer structure exactly. */
 static void stbv_av1_wiener_plane(unsigned short *plane, int stride,
                                   int frame_w, int frame_h,
                                   int ux0, int uy0, int uw, int uh,
@@ -147,14 +183,19 @@ static void stbv_av1_wiener_plane(unsigned short *plane, int stride,
                                   int bit_depth,
                                   const unsigned short *lpf, int lpf_stride)
 {
-    int maxv = (1 << bit_depth) - 1;
-    unsigned short *tmp_buf;
-    unsigned short *tmp_rows[7];
+    unsigned short hor[6 * STBV_LR_REST_UNIT_STRIDE];
+    unsigned short *ptrs[7], *rows[6];
     signed short fh[7], fv[7];
-    int y, i;
-    int ew = uw + 6;
+    int i, h;
+    int have_top, have_bottom;
+    const unsigned short *src;
+    unsigned short *p;
+    const unsigned short *lpf_bottom;
 
     if (uw <= 0 || uh <= 0) return;
+
+    for (i = 0; i < 6; i++)
+        rows[i] = &hor[i * STBV_LR_REST_UNIT_STRIDE];
 
     /* Build symmetric 7-tap filter from 3 parameters */
     fh[0] = fh[6] = raw_fh[0];
@@ -166,48 +207,114 @@ static void stbv_av1_wiener_plane(unsigned short *plane, int stride,
     fv[2] = fv[4] = raw_fv[2];
     fv[3] = (signed short)(128 - (fv[0] + fv[1] + fv[2]) * 2);
 
-    tmp_buf = (unsigned short *)stb_avif_calloc((size_t)ew * 7, sizeof(unsigned short));
-    if (!tmp_buf) return;
-    for (i = 0; i < 7; i++)
-        tmp_rows[i] = tmp_buf + i * ew;
+    have_top = (uy0 > 0);
+    have_bottom = (uy0 + uh < frame_h);
 
-    /* Initialize ring buffer: replicate clamped rows.
-     * The horizontal source starts 3 pixels before the LR unit (ux0-3)
-     * so the 7-tap filter centered at position x reads src[x-3..x+3]. */
-    for (i = 0; i < 6; i++) {
-        int src_y = uy0 + i - 3;
-        int src_x0 = ux0 >= 3 ? ux0 - 3 : 0;
-        if (src_y < 0) src_y = 0;
-        if (src_y >= frame_h) src_y = frame_h - 1;
-        stbv_av1_wiener_filter_h(tmp_rows[i], plane + src_y * stride + src_x0,
-                                 stride, ew, fh, bit_depth);
+    p = plane + uy0 * stride + ux0;
+    src = p;
+    lpf_bottom = lpf + 6 * lpf_stride;
+    h = uh;
+
+    if (have_top) {
+        const unsigned short *lpf_top = lpf + (uy0 - 2) * lpf_stride + ux0;
+
+        ptrs[0] = rows[0];
+        ptrs[1] = rows[0];
+        ptrs[2] = rows[1];
+        ptrs[3] = rows[2];
+        ptrs[4] = rows[2];
+        ptrs[5] = rows[2];
+
+        /* H-filter 2 lpf rows (deblocked, pre-LR) */
+        stbv_av1_wiener_filter_h(rows[0], lpf_top, lpf_stride, uw, fh, bit_depth);
+        lpf_top += lpf_stride;
+        stbv_av1_wiener_filter_h(rows[1], lpf_top, lpf_stride, uw, fh, bit_depth);
+
+        /* H-filter 1st src row */
+        stbv_av1_wiener_filter_h(rows[2], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v1;
+
+        ptrs[4] = ptrs[5] = rows[3];
+        stbv_av1_wiener_filter_h(rows[3], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v2;
+
+        ptrs[5] = rows[4];
+        stbv_av1_wiener_filter_h(rows[4], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v3;
+    } else {
+        ptrs[0] = rows[0];
+        ptrs[1] = rows[0];
+        ptrs[2] = rows[0];
+        ptrs[3] = rows[0];
+        ptrs[4] = rows[0];
+        ptrs[5] = rows[0];
+
+        stbv_av1_wiener_filter_h(rows[0], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v1;
+
+        ptrs[4] = ptrs[5] = rows[1];
+        stbv_av1_wiener_filter_h(rows[1], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v2;
+
+        ptrs[5] = rows[2];
+        stbv_av1_wiener_filter_h(rows[2], src, stride, uw, fh, bit_depth);
+        src += stride;
+
+        if (--h <= 0) goto v3;
+
+        ptrs[6] = rows[3];
+        stbv_av1_wiener_hv(p, ptrs, src, stride, uw, fh, fv, bit_depth);
+        src += stride;
+        p += stride;
+
+        if (--h <= 0) goto v3;
+
+        ptrs[6] = rows[4];
+        stbv_av1_wiener_hv(p, ptrs, src, stride, uw, fh, fv, bit_depth);
+        src += stride;
+        p += stride;
+
+        if (--h <= 0) goto v3;
     }
 
-    /* Process uh rows of output.
-     * The horizontal filter produces ew = uw + 6 elements starting from
-     * ux0-3 (or 0). Positions 3..3+uw-1 are the valid LR unit pixels.
-     * The vertical pass must only write uw elements to avoid corrupting
-     * adjacent LR units. We offset the read pointers by +3 to skip the
-     * left padding. */
-    for (y = 0; y < uh; y++) {
-        int src_y = uy0 + y + 3;
-        int src_x0 = ux0 >= 3 ? ux0 - 3 : 0;
-        unsigned short *row_dst;
-        const unsigned short *vptrs[7];
+    ptrs[6] = ptrs[5] + STBV_LR_REST_UNIT_STRIDE;
+    do {
+        stbv_av1_wiener_hv(p, ptrs, src, stride, uw, fh, fv, bit_depth);
+        src += stride;
+        p += stride;
+    } while (--h > 0);
 
-        if (src_y >= frame_h) src_y = frame_h - 1;
-        stbv_av1_wiener_filter_h(tmp_rows[(y + 6) % 7],
-                                 plane + src_y * stride + src_x0,
-                                 stride, ew, fh, bit_depth);
+    if (!have_bottom)
+        goto v3;
 
-        for (i = 0; i < 7; i++)
-            vptrs[i] = tmp_rows[(y + i) % 7] + 3;
+    stbv_av1_wiener_hv(p, ptrs, lpf_bottom, lpf_stride, uw, fh, fv, bit_depth);
+    lpf_bottom += lpf_stride;
+    p += stride;
 
-        row_dst = plane + (uy0 + y) * stride + ux0;
-        stbv_av1_wiener_filter_v(row_dst, vptrs, fv, uw, bit_depth);
-    }
+    stbv_av1_wiener_hv(p, ptrs, lpf_bottom, lpf_stride, uw, fh, fv, bit_depth);
+    p += stride;
 
-    stb_avif_free_internal(tmp_buf);
+v1:
+    stbv_av1_wiener_v_only(p, ptrs, uw, fv, bit_depth);
+    return;
+
+v3:
+    stbv_av1_wiener_v_only(p, ptrs, uw, fv, bit_depth);
+    p += stride;
+v2:
+    stbv_av1_wiener_v_only(p, ptrs, uw, fv, bit_depth);
+    p += stride;
+    goto v1;
 }
 
 /* ---- SGR projection filter ---- */
