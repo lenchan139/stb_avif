@@ -77,7 +77,7 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
 
         if (wd >= 16 && (flat8out & flat8in)) {
             dst[strideb * -6] = (stbv_u16)stb_av1_db_iclip(
-                (p6*6 + p5*2 + p4*2 + p3 + p2 + p1 + p0 + q0 + q1 + 8) >> 4, 0, maxv);
+                (p6*7 + p5*2 + p4*2 + p3 + p2 + p1 + p0 + q0 + 8) >> 4, 0, maxv);
             dst[strideb * -5] = (stbv_u16)stb_av1_db_iclip(
                 (p6*5 + p5*2 + p4*2 + p3*2 + p2 + p1 + p0 + q0 + q1 + 8) >> 4, 0, maxv);
             dst[strideb * -4] = (stbv_u16)stb_av1_db_iclip(
@@ -99,7 +99,7 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
             dst[strideb * +4] = (stbv_u16)stb_av1_db_iclip(
                 (p1 + p0 + q0 + q1 + q2 + q3*2 + q4*2 + q5*2 + q6*5 + 8) >> 4, 0, maxv);
             dst[strideb * +5] = (stbv_u16)stb_av1_db_iclip(
-                (p1 + p0 + q0 + q1 + q2 + q3 + q4*2 + q5*2 + q6*6 + 8) >> 4, 0, maxv);
+                (p0 + q0 + q1 + q2 + q3 + q4*2 + q5*2 + q6*7 + 8) >> 4, 0, maxv);
         } else if (wd >= 8 && flat8in) {
             dst[strideb * -3] = (stbv_u16)stb_av1_db_iclip(
                 (p3*3 + p2*2 + p1 + p0 + q0 + 4) >> 3, 0, maxv);
