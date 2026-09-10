@@ -162,6 +162,34 @@ unsigned char *stb_avif_load_from_file(const char *filePath,
 #include <dav1d/dav1d.h>
 #endif
 
+/* Basic scalar types and getbits reader are shared between the internal
+   decoder and the ISOBMFF parser — always needed. */
+#ifndef STBV_U8_DEFINED
+typedef unsigned char stbv_u8;
+#define STBV_U8_DEFINED 1
+#endif
+#ifndef STBV_U16_DEFINED
+typedef unsigned short stbv_u16;
+#define STBV_U16_DEFINED 1
+#endif
+#ifndef STBV_U32_DEFINED
+typedef unsigned int stbv_u32;
+#define STBV_U32_DEFINED 1
+#endif
+#ifndef STBV_I32_DEFINED
+typedef signed int stbv_i32;
+#define STBV_I32_DEFINED 1
+#endif
+#ifndef STBV_U64_DEFINED
+#if defined(_MSC_VER)
+typedef unsigned __int64 stbv_u64;
+#else
+typedef unsigned long long stbv_u64;
+#endif
+#define STBV_U64_DEFINED 1
+#endif
+#include "stb_av1_getbits.h"
+
 #ifndef STB_AVIF_USE_DAV1D
 #include "stb_av1_scalar.h"
 #include "stb_av1_ipred.h"
@@ -1649,7 +1677,11 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
                                        unsigned char **v_plane, int *v_stride,
                                        int *bit_depth, int *monochrome,
                                        int *subsampling_x, int *subsampling_y,
-                                       int *color_range, int *matrix_coefficients)
+                                        int *color_range, int *matrix_coefficients
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK) || defined(STB_AVIF_NO_LR)
+                                       , int no_filters
+#endif
+                                       )
 {
     Dav1dContext *ctx = NULL;
     Dav1dSettings s;
@@ -1661,6 +1693,16 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
     dav1d_default_settings(&s);
     s.n_threads = 1;
     s.all_layers = 0;
+#ifdef STB_AVIF_NO_FILTERS
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_NONE;
+#elif defined(STB_AVIF_NO_DEBLOCK)
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_CDEF | DAV1D_INLOOPFILTER_RESTORATION;
+#elif defined(STB_AVIF_NO_LR)
+    if (no_filters)
+        s.inloop_filters = DAV1D_INLOOPFILTER_DEBLOCK | DAV1D_INLOOPFILTER_CDEF;
+#endif
 
     ret = dav1d_open(&ctx, &s);
     if (ret < 0) {  return 0; }
@@ -1845,8 +1887,19 @@ struct stb_avif_scalar_recon {
     stbv_u32 *lf_blkid_c;   /* chroma-plane coverage (separate set) */
     stbv_u8 *lf_txlw_c;
     stbv_u8 *lf_done;       /* per-4x4-unit reconstruction bitmap (luma) */
+    /* CDEF: per-8x8-block noskip mask (1 bit per 8x8 block, 8 rows per 64x64 SB).
+     * Bit i set in row r means the 8x8 block at (i*8, r*8) within the SB has
+     * coded coefficients and should be CDEF-filtered. */
+    stbv_u8 *cdef_noskip_mask;
+    int cdef_noskip_stride; /* bytes per row of the noskip mask grid */
     int lf_mapw4, lf_maph4;
     ptrdiff_t lf_b4stride;
+    /* Per-block LF level map: [b4stride * b4height][2] where [0]=Y-vert, [1]=Y-horiz.
+     * Filled during leaf decode using dav1d_calc_lf_values equivalent. */
+    stbv_u8 *lf_level;
+    /* Per-block LF level lookup table: [seg_id][dir][ref][is_gmv]
+     * Computed once per frame from loopfilter header values. */
+    stbv_u8 lf_lut[8][4][8][2];
     int tile_x4, tile_y4, tile_w4, tile_h4;
     /* IBC reconstruction state. */
     int is_ibc;
@@ -2174,7 +2227,7 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
     }
 }
 
-static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x)
+static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x, int seg_id)
 {
     struct stb_avif_scalar_recon *rc;
     int bw4, bh4;
@@ -2195,6 +2248,20 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                                    ? tx0 : 0].h;
     rc->block_skip = skip;
     rc->has_chroma = has_chroma;
+    /* Fill per-block LF level from lf_lut.  For intra/IBC: ref=0, is_gmv=0.
+     * The lut gives 4 direction levels [Y-vert, Y-horiz, U, V]. */
+    if (rc->lf_level && rc->lf_lut) {
+        int dir;
+        for (dir = 0; dir < 2; dir++) {
+            stbv_u8 lv = rc->lf_lut[seg_id][dir][0][0];
+            int y, x;
+            for (y = 0; y < bh4; y++)
+                for (x = 0; x < bw4; x++) {
+                    size_t off = (size_t)(by4 + y) * rc->lf_b4stride + (bx4 + x);
+                    rc->lf_level[off * 2 + dir] = lv;
+                }
+        }
+    }
     if (!intra) {
         /* IBC block: copy already-reconstructed pixels from the current
          * frame at the reference position indicated by the MV.  MV is in
@@ -2306,6 +2373,25 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
     rc->cfl_alpha_v = cfl_alpha_v;
     rc->block_skip = skip;
     rc->has_chroma = has_chroma;
+    /* Populate CDEF noskip_mask: for non-skipped blocks, set bits for each
+     * 8x8 block that overlaps the current 4x4-unit block.
+     * Layout: (sb_rows*8) rows x sb_cols bytes. Row r, SB-column sb_x is
+     * at byte sb_y*sb_cols*8 + r*sb_cols + sb_x, bit = block_col & 7. */
+    if (rc->cdef_noskip_mask) {
+        int sb_cols = (rc->above_n + 15) / 16;
+        int sb64_x = bx4 >> 4;
+        int sb64_y = by4 >> 4;
+        if (!skip) {
+            int row8 = by4 >> 1;  /* absolute 8x8 row in frame */
+            int col_start8 = bx4 >> 1;
+            int col_end8 = (bx4 + bw4 - 1) >> 1;
+            int c8;
+            for (c8 = col_start8; c8 <= col_end8; c8++) {
+                int byte_idx = row8 * sb_cols + sb64_x;
+                rc->cdef_noskip_mask[byte_idx] |= (stbv_u8)(1u << (c8 & 7));
+            }
+        }
+    }
     rc->pal_y = pal_sz_y;
     rc->pal_uv = pal_sz_uv;
     /* dav1d predicts PER TRANSFORM so every txb sees freshly reconstructed
@@ -2911,6 +2997,80 @@ static void stb_avif_recon_chroma_pal(void *ud, int pl, const stbv_u8 *idx, int 
 static struct stb_avif_scalar_recon g_scalar_recon;
 static stbv_av1_leaf_recon g_scalar_recon_cb;
 
+/* Compute per-block LF level lookup table (equivalent to dav1d_calc_lf_values).
+ * Output: lflvl[seg_id][dir][ref][is_gmv] where dir: 0=Y-vert,1=Y-horiz,2=U,3=V */
+static void stb_av1_calc_lf_values(stbv_u8 lflvl[8][4][8][2],
+                                   const struct stb_av1_framehdr *hdr,
+                                   const int lf_delta[4])
+{
+    int s, dir, ref, is_gmv;
+    int n_seg = hdr->segmentation.enabled ? 8 : 1;
+    int base[4]; /* base level per dir */
+    const int *ref_delta = hdr->loopfilter.mode_ref_delta_enabled
+                         ? hdr->loopfilter.ref_delta : NULL;
+    const int *mode_delta = hdr->loopfilter.mode_ref_delta_enabled
+                          ? hdr->loopfilter.mode_delta : NULL;
+
+    if (!hdr->loopfilter.level_y[0] && !hdr->loopfilter.level_y[1]) {
+        memset(lflvl, 0, sizeof(stbv_u8) * 8 * 4 * 8 * 2);
+        return;
+    }
+
+    /* Compute base levels for each dir, applying lf_delta */
+    base[0] = hdr->loopfilter.level_y[0] + lf_delta[0];
+    base[1] = hdr->loopfilter.level_y[1] + lf_delta[hdr->delta_lf_multi ? 1 : 0];
+    base[2] = hdr->loopfilter.level_u + lf_delta[hdr->delta_lf_multi ? 2 : 0];
+    base[3] = hdr->loopfilter.level_v + lf_delta[hdr->delta_lf_multi ? 3 : 0];
+    for (dir = 0; dir < 4; dir++) {
+        if (base[dir] < 0) base[dir] = 0;
+        if (base[dir] > 63) base[dir] = 63;
+    }
+
+    for (s = 0; s < n_seg; s++) {
+        int seg_delta_y_v = 0, seg_delta_y_h = 0;
+        int seg_delta_u = 0, seg_delta_v = 0;
+        if (hdr->segmentation.enabled) {
+            const struct stb_av1_seg_data *sd = &hdr->segmentation.d[s];
+            seg_delta_y_v = sd->delta_lf_y_v;
+            seg_delta_y_h = sd->delta_lf_y_h;
+            seg_delta_u = sd->delta_lf_u;
+            seg_delta_v = sd->delta_lf_v;
+        }
+        for (dir = 0; dir < 4; dir++) {
+            int b = base[dir];
+            int sd = (dir == 0) ? seg_delta_y_v : (dir == 1) ? seg_delta_y_h
+                    : (dir == 2) ? seg_delta_u : seg_delta_v;
+            int bseg = b + sd;
+            if (bseg < 0) bseg = 0;
+            if (bseg > 63) bseg = 63;
+
+            if (!ref_delta) {
+                for (ref = 0; ref < 8; ref++)
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++)
+                        lflvl[s][dir][ref][is_gmv] = (stbv_u8)bseg;
+            } else {
+                int sh = bseg >= 32;
+                for (ref = 0; ref < 8; ref++) {
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++) {
+                        int delta;
+                        if (ref == 0) {
+                            delta = ref_delta[0];
+                        } else {
+                            delta = mode_delta[is_gmv ? 1 : 0] + ref_delta[ref];
+                        }
+                        {
+                        int val = bseg + delta * (1 << sh);
+                        if (val < 0) val = 0;
+                        if (val > 63) val = 63;
+                        lflvl[s][dir][ref][is_gmv] = (stbv_u8)val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void stb_avif_row_reset_cb(void *opaque)
 {
     stbv_av1_leaf_state_reset_row((stbv_av1_leaf_state *)opaque);
@@ -2945,8 +3105,11 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     stbv_u32 *lf_blkid_map = 0, *lf_blkid_map_c = 0;
     stbv_u8 *lf_txlw_map = 0, *lf_txlw_map_c = 0;
     stbv_u8 *lf_done_map = 0;
+    stbv_u8 *lf_level_map = 0;   /* [b4stride*b4height][2]: Y-vert, Y-horiz per block */
     int *cdef_idx_grid = 0;
     int cdef_grid_stride = 0;
+    stbv_u8 *cdef_noskip_mask = 0;
+    int cdef_noskip_stride = 0;
     stbv_av1_lr_mask lr_mask;
     int lr_mask_ok = 0;
     int bw8al, bh8al;
@@ -3176,8 +3339,10 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         lf_blkid_map_c = (stbv_u32*)stb_avif_calloc((size_t)mw * mh, sizeof(stbv_u32));
         lf_txlw_map_c = (stbv_u8*)stb_avif_calloc((size_t)mw * mh, 1);
         lf_done_map = (stbv_u8*)stb_avif_calloc((size_t)mw * mh, 1);
+        lf_level_map = (stbv_u8*)stb_avif_calloc((size_t)mw * mh * 2, 1);
         if (!lf_blkid_map || !lf_txlw_map ||
-            !lf_blkid_map_c || !lf_txlw_map_c || !lf_done_map) { r = -5; goto oom16; }
+            !lf_blkid_map_c || !lf_txlw_map_c || !lf_done_map ||
+            !lf_level_map) { r = -5; goto oom16; }
         memset(lf_blkid_map_c, 0xFF, (size_t)mw * mh * sizeof(stbv_u32));
     }
     /* CDEF index grid: one entry per 64x64 block. */
@@ -3195,6 +3360,12 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                 for (gi = 0; gi < cdef_grid_total; gi++)
                     cdef_idx_grid[gi] = -1;
             }
+            /* Allocate noskip mask: 8 rows per SB, 1 byte per row (8 bits = 8 blocks across).
+             * Layout: sb_rows*8 rows × sb_cols bytes. Stride = sb_cols. */
+            cdef_noskip_stride = cdef_grid_stride;
+            cdef_noskip_mask = (stbv_u8*)stb_avif_calloc(
+                (size_t)cdef_noskip_stride * cdef_grid_rows * 8, 1);
+            if (!cdef_noskip_mask) { r = -5; goto oom16; }
         }
     }
     /* Wire the CDEF grid into the leaf state (after allocation). */
@@ -3243,6 +3414,8 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     recon->left_n = frame_h4;
     recon->above_uvmode = above_uvmode;
     recon->left_uvmode = left_uvmode;
+    recon->cdef_noskip_mask = cdef_noskip_mask;
+    recon->cdef_noskip_stride = cdef_noskip_stride;
     g_scalar_recon = *recon;
     g_scalar_recon_cb.ud = &g_scalar_recon;
     g_scalar_recon_cb.cf = g_scalar_recon.cf;
@@ -3251,6 +3424,13 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     g_scalar_recon_cb.chroma_txb = stb_avif_recon_chroma_txb;
     g_scalar_recon_cb.luma_pal = stb_avif_recon_luma_pal;
     g_scalar_recon_cb.chroma_pal = stb_avif_recon_chroma_pal;
+
+    /* Compute per-block LF level lookup table and assign lf_level map. */
+    recon->lf_level = lf_level_map;
+    {
+        int init_lf_delta[4] = {0, 0, 0, 0};
+        stb_av1_calc_lf_values(recon->lf_lut, &stream->frame, init_lf_delta);
+    }
 
     memset(&td, 0, sizeof(td));
     td.seq = &stream->seq;
@@ -3296,6 +3476,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         }
     }
 
+#ifndef STB_AVIF_NO_FILTERS
 #ifdef STB_AVIF_DEBLOCK
     if (!r) {
         const struct stb_av1_framehdr *fh = &stream->frame;
@@ -3305,6 +3486,16 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         int lvl_v = (int)fh->loopfilter.level_v;
         int sharp = (int)fh->loopfilter.sharpness;
         int maxv = (1 << recon->bit_depth) - 1;
+        /* Apply mode/ref deltas (dav1d_calc_lf_values equivalent for key frames).
+         * For intra blocks (all blocks in key frames): level += ref_delta[0] * (1 << sh)
+         * where sh = (base >= 32). This matches dav1d's per-block level computation. */
+        if (fh->loopfilter.mode_ref_delta_enabled) {
+            int sh;
+            if (lvl_yv) { sh = lvl_yv >= 32; lvl_yv = stb_av1_db_iclip(lvl_yv + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_yh) { sh = lvl_yh >= 32; lvl_yh = stb_av1_db_iclip(lvl_yh + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_u) { sh = lvl_u >= 32; lvl_u = stb_av1_db_iclip(lvl_u + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+            if (lvl_v) { sh = lvl_v >= 32; lvl_v = stb_av1_db_iclip(lvl_v + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
+        }
         if (recon->ss_ver && !lvl_u) lvl_u = lvl_v;
         if (py16)
             stb_avif_deblock_plane_u16(py16, tc->stride_y,
@@ -3366,10 +3557,12 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                            cdef_idx_grid, cdef_grid_stride,
                            y_pri_arr, y_sec_arr,
                            uv_pri_arr, uv_sec_arr,
-                               (int)fh->cdef.damping);
+                               (int)fh->cdef.damping,
+                               cdef_noskip_mask, cdef_noskip_stride);
     }
 
     /* Loop restoration filtering (after CDEF, before 8-bit conversion). */
+#ifndef STB_AVIF_NO_LR
     if (!r && lr_mask_ok && stream->seq.restoration && !stream->frame.allow_intrabc) {
         stb_av1_lr_frame(py16, pu16, pv16,
                          tc->stride_y, tc->stride_u, tc->stride_v,
@@ -3379,6 +3572,8 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                          8 + stream->seq.hbd * 2,
                            &lr_mask);
     }
+#endif
+#endif /* !STB_AVIF_NO_FILTERS */
 
     /* Convert internal u16 planes to the caller's 8-bit planes.
      * Use truncating shift to match dav1d's u16->u8 conversion. */
@@ -3437,10 +3632,12 @@ oom16:
     stb_avif_free_internal(above_pal0); stb_avif_free_internal(above_pal1);
     stb_avif_free_internal(left_pal0); stb_avif_free_internal(left_pal1);
     stb_avif_free_internal(cdef_idx_grid);
+    stb_avif_free_internal(cdef_noskip_mask);
     stbv_av1_lr_mask_free(&lr_mask);
     stb_avif_free_internal(lf_blkid_map); stb_avif_free_internal(lf_blkid_map_c);
     stb_avif_free_internal(lf_txlw_map); stb_avif_free_internal(lf_txlw_map_c);
     stb_avif_free_internal(lf_done_map);
+    stb_avif_free_internal(lf_level_map);
     stb_avif_free(stream);
     stb_avif_free(recon);
     return r;
@@ -4013,7 +4210,11 @@ ivf_decoded:
             &dav1d_u, &dav1d_us,
             &dav1d_v, &dav1d_vs,
             &dav1d_bd, &dav1d_mono, &dav1d_sx, &dav1d_sy,
-            &dav1d_cr, &dav1d_mc);
+            &dav1d_cr, &dav1d_mc
+#if defined(STB_AVIF_NO_FILTERS) || defined(STB_AVIF_NO_DEBLOCK) || defined(STB_AVIF_NO_LR)
+            , 1
+#endif
+            );
 
         if (dav1d_ok) {
             /* Replace internal planes with dav1d output */
@@ -4234,10 +4435,12 @@ ivf_decoded:
                         g = y_val;
                         b = u_val + 128;
                     } else if (mc >= 8 && mc <= 10) {
+                        /* BT.2020: Kr=0.2627, Kb=0.0593 */
                         r = y_val + ((378 * v_val) >> 8);
-                        g = y_val - ((42 * u_val + 120 * v_val) >> 8);
+                        g = y_val - ((42 * u_val + 146 * v_val) >> 8);
                         b = y_val + ((482 * u_val) >> 8);
                     } else if (mc == 1 || mc == 2) {
+                        /* BT.709: Kr=0.2126, Kb=0.0722 */
                         r = y_val + ((403 * v_val) >> 8);
                         g = y_val - ((48 * u_val + 120 * v_val) >> 8);
                         b = y_val + ((475 * u_val) >> 8);

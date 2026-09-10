@@ -152,7 +152,7 @@ static int stb_av1_cdef_adjust_strength(int strength, unsigned var)
     if (!var) return 0;
     i = var >> 6 ? stb_av1_cdef_ulog2(var >> 6) : 0;
     if (i > 12) i = 12;
-    return (strength * (4 + i) + 8) >> 4;
+    return strength * (4 + i) >> 4;
 }
 
 /* --- Filter kernel --- */
@@ -161,7 +161,7 @@ static int stb_av1_cdef_adjust_strength(int strength, unsigned var)
  * dst points to the block in the frame buffer.
  * dst_stride, frame_w, frame_h: frame geometry.
  * bx, by: block position in pixels within the frame.
- * edges: CDEF_HAVE_* flags. */
+ * edges: CDEF_HAVE_* flags (currently unused — edge pixels are clamped). */
 static void stb_av1_cdef_filter_block(stbv_u16 *dst, int dst_stride,
                                        int bx, int by,
                                        int frame_w, int frame_h,
@@ -176,14 +176,16 @@ static void stb_av1_cdef_filter_block(stbv_u16 *dst, int dst_stride,
     const stbv_i8 (*cdef_dirs)[2] = &stb_av1_cdef_directions[dir];
     int x, y, k;
 
-    /* Fill tmp with the block + 2-pixel padding on each side. */
+    /* Fill tmp with the block + 2-pixel padding on each side.
+     * Read from dst (live frame) for all pixels. For out-of-bounds pixels
+     * (frame edges), clamp coordinates to frame bounds — this replicates
+     * edge pixels, matching dav1d's CDEF_HAVE_* edge handling. */
     for (y = -2; y < h + 2; y++) {
         for (x = -2; x < w + 2; x++) {
             int fx = bx + x, fy = by + y;
-            if (fx >= 0 && fx < frame_w && fy >= 0 && fy < frame_h)
-                tmp[y * tmp_stride + x] = (stbv_i16)dst[fy * dst_stride + fx];
-            else
-                tmp[y * tmp_stride + x] = -32768;
+            int cx = (fx < 0) ? 0 : (fx >= frame_w) ? frame_w - 1 : fx;
+            int cy = (fy < 0) ? 0 : (fy >= frame_h) ? frame_h - 1 : fy;
+            tmp[y * tmp_stride + x] = (stbv_i16)dst[cy * dst_stride + cx];
         }
     }
 
@@ -203,34 +205,34 @@ static void stb_av1_cdef_filter_block(stbv_u16 *dst, int dst_stride,
                     int pri_tap_k = pri_tap;
                     for (k = 0; k < 2; k++) {
                         int off1 = cdef_dirs[2][k];
-                        int p0 = tmp[(y + 2) * tmp_stride + (x + 2) + off1];
-                        int p1 = tmp[(y + 2) * tmp_stride + (x + 2) - off1];
+                        int p0 = tmp[y * tmp_stride + x + off1];
+                        int p1 = tmp[y * tmp_stride + x - off1];
                         sum += pri_tap_k * stb_av1_cdef_constrain(p0 - px, pri_strength, pri_shift);
                         sum += pri_tap_k * stb_av1_cdef_constrain(p1 - px, pri_strength, pri_shift);
                         pri_tap_k = (pri_tap_k & 3) | 2;
-                        if (p0 < min) min = p0;
+                        if ((unsigned)p0 < (unsigned)min) min = p0;
                         if (p0 > max) max = p0;
-                        if (p1 < min) min = p1;
+                        if ((unsigned)p1 < (unsigned)min) min = p1;
                         if (p1 > max) max = p1;
                         {
                             int off2 = cdef_dirs[4][k];
                             int off3 = cdef_dirs[0][k];
-                            int s0 = tmp[(y + 2) * tmp_stride + (x + 2) + off2];
-                            int s1 = tmp[(y + 2) * tmp_stride + (x + 2) - off2];
-                            int s2 = tmp[(y + 2) * tmp_stride + (x + 2) + off3];
-                            int s3 = tmp[(y + 2) * tmp_stride + (x + 2) - off3];
+                            int s0 = tmp[y * tmp_stride + x + off2];
+                            int s1 = tmp[y * tmp_stride + x - off2];
+                            int s2 = tmp[y * tmp_stride + x + off3];
+                            int s3 = tmp[y * tmp_stride + x - off3];
                             int sec_tap = 2 - k;
                             sum += sec_tap * stb_av1_cdef_constrain(s0 - px, sec_strength, sec_shift);
                             sum += sec_tap * stb_av1_cdef_constrain(s1 - px, sec_strength, sec_shift);
                             sum += sec_tap * stb_av1_cdef_constrain(s2 - px, sec_strength, sec_shift);
                             sum += sec_tap * stb_av1_cdef_constrain(s3 - px, sec_strength, sec_shift);
-                            if (s0 < min) min = s0;
+                            if ((unsigned)s0 < (unsigned)min) min = s0;
                             if (s0 > max) max = s0;
-                            if (s1 < min) min = s1;
+                            if ((unsigned)s1 < (unsigned)min) min = s1;
                             if (s1 > max) max = s1;
-                            if (s2 < min) min = s2;
+                            if ((unsigned)s2 < (unsigned)min) min = s2;
                             if (s2 > max) max = s2;
-                            if (s3 < min) min = s3;
+                            if ((unsigned)s3 < (unsigned)min) min = s3;
                             if (s3 > max) max = s3;
                         }
                     }
@@ -248,8 +250,8 @@ static void stb_av1_cdef_filter_block(stbv_u16 *dst, int dst_stride,
                     int pri_tap_k = pri_tap;
                     for (k = 0; k < 2; k++) {
                         int off = cdef_dirs[2][k];
-                        int p0 = tmp[(y + 2) * tmp_stride + (x + 2) + off];
-                        int p1 = tmp[(y + 2) * tmp_stride + (x + 2) - off];
+                        int p0 = tmp[y * tmp_stride + x + off];
+                        int p1 = tmp[y * tmp_stride + x - off];
                         sum += pri_tap_k * stb_av1_cdef_constrain(p0 - px, pri_strength, pri_shift);
                         sum += pri_tap_k * stb_av1_cdef_constrain(p1 - px, pri_strength, pri_shift);
                         pri_tap_k = (pri_tap_k & 3) | 2;
@@ -269,10 +271,10 @@ static void stb_av1_cdef_filter_block(stbv_u16 *dst, int dst_stride,
                 for (k = 0; k < 2; k++) {
                     int off1 = cdef_dirs[4][k];
                     int off2 = cdef_dirs[0][k];
-                    int s0 = tmp[(y + 2) * tmp_stride + (x + 2) + off1];
-                    int s1 = tmp[(y + 2) * tmp_stride + (x + 2) - off1];
-                    int s2 = tmp[(y + 2) * tmp_stride + (x + 2) + off2];
-                    int s3 = tmp[(y + 2) * tmp_stride + (x + 2) - off2];
+                    int s0 = tmp[y * tmp_stride + x + off1];
+                    int s1 = tmp[y * tmp_stride + x - off1];
+                    int s2 = tmp[y * tmp_stride + x + off2];
+                    int s3 = tmp[y * tmp_stride + x - off2];
                     int sec_tap = 2 - k;
                     sum += sec_tap * stb_av1_cdef_constrain(s0 - px, sec_strength, sec_shift);
                     sum += sec_tap * stb_av1_cdef_constrain(s1 - px, sec_strength, sec_shift);
@@ -301,14 +303,14 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                                  const int *cdef_idx_grid, int cdef_grid_stride,
                                  const int y_pri[8], const int y_sec[8],
                                  const int uv_pri[8], const int uv_sec[8],
-                                 int cdef_damping)
+                                 int cdef_damping,
+                                 const stbv_u8 *noskip_mask, int noskip_stride)
 {
     int bitdepth_min_8 = bit_depth - 8;
     int damping = cdef_damping + bitdepth_min_8;
     int sb64_cols = (frame_w + 63) / 64;
     int sb64_rows = (frame_h + 63) / 64;
     int sb64_x, sb64_y;
-
     if (!cdef_idx_grid || !plane_y) return;
 
     for (sb64_y = 0; sb64_y < sb64_rows; sb64_y++) {
@@ -316,8 +318,6 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
             int cdef_idx = cdef_idx_grid[sb64_y * cdef_grid_stride + sb64_x];
             int bx, by;
             int y_pri_lvl, y_sec_lvl, uv_pri_lvl, uv_sec_lvl;
-            int dir = 0;
-            unsigned variance = 0;
             int edges;
             int bw, bh;
 
@@ -339,9 +339,8 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
             if (sb64_x > 0) edges |= CDEF_HAVE_LEFT;
             if (sb64_x < sb64_cols - 1) edges |= CDEF_HAVE_RIGHT;
 
-            /* Compute adjusted strengths. */
-            y_pri_lvl = stb_av1_cdef_adjust_strength(
-                (y_pri[cdef_idx] << 2) << bitdepth_min_8, variance);
+            /* Compute strengths. */
+            y_pri_lvl = (y_pri[cdef_idx] << 2) << bitdepth_min_8;
             y_sec_lvl = y_sec[cdef_idx];
             y_sec_lvl += (y_sec_lvl == 3);
             y_sec_lvl <<= bitdepth_min_8;
@@ -351,45 +350,54 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
             uv_sec_lvl += (uv_sec_lvl == 3);
             uv_sec_lvl <<= bitdepth_min_8;
 
-            /* Find direction for luma (needed if y_pri_lvl > 0). */
-            if (y_pri_lvl || uv_pri_lvl) {
-                dir = stb_av1_cdef_find_dir(
-                    &plane_y[by * stride_y + bx], stride_y,
-                    &variance, bitdepth_min_8);
-            }
-
-            /* Re-adjust y_pri_lvl now that we have variance. */
-            y_pri_lvl = stb_av1_cdef_adjust_strength(
-                (y_pri[cdef_idx] << 2) << bitdepth_min_8, variance);
-
-            /* Filter luma: process 8x8 blocks within the 64x64 SB. */
-            if (y_pri_lvl || y_sec_lvl) {
+            /* Filter luma: process 8x8 blocks within the 64x64 SB.
+             * Direction and variance are computed per 8x8 block (matching dav1d). */
+            {
                 int lx, ly;
                 for (ly = 0; ly < bh; ly += 8) {
                     for (lx = 0; lx < bw; lx += 8) {
                         int bbw = (lx + 8 <= bw) ? 8 : bw - lx;
                         int bbh = (ly + 8 <= bh) ? 8 : bh - ly;
                         int bedges = edges;
+                        int block_y_pri_lvl = y_pri_lvl;
+                        int block_dir = 0;
+                        unsigned block_var = 0;
+                        /* Skip blocks without coded coefficients (matching dav1d noskip_mask). */
+                        if (noskip_mask) {
+                            int abs_row8 = (by + ly) >> 3;
+                            int abs_col8 = (bx + lx) >> 3;
+                            int byte_idx = abs_row8 * noskip_stride + sb64_x;
+                            if (!(noskip_mask[byte_idx] & (1 << (abs_col8 & 7))))
+                                continue;
+                        }
                         if (ly > 0) bedges |= CDEF_HAVE_TOP;
                         if (ly + 8 < bh) bedges |= CDEF_HAVE_BOTTOM;
                         if (lx > 0) bedges |= CDEF_HAVE_LEFT;
                         if (lx + 8 < bw) bedges |= CDEF_HAVE_RIGHT;
-                        stb_av1_cdef_filter_block(
-                            plane_y, stride_y, bx + lx, by + ly,
-                            frame_w, frame_h,
-                            y_pri_lvl, y_sec_lvl,
-                            dir, damping, bbw, bbh, bedges,
-                            bitdepth_min_8);
+                        if (y_pri_lvl || uv_pri_lvl) {
+                            block_dir = stb_av1_cdef_find_dir(
+                                &plane_y[(by + ly) * stride_y + (bx + lx)], stride_y,
+                                &block_var, bitdepth_min_8);
+                            block_y_pri_lvl = stb_av1_cdef_adjust_strength(
+                                (y_pri[cdef_idx] << 2) << bitdepth_min_8, block_var);
+                        }
+                        if (block_y_pri_lvl || y_sec_lvl) {
+                            stb_av1_cdef_filter_block(
+                                plane_y, stride_y, bx + lx, by + ly,
+                                frame_w, frame_h,
+                                block_y_pri_lvl, y_sec_lvl,
+                                block_dir, damping, bbw, bbh, bedges,
+                                bitdepth_min_8);
+                        }
                     }
                 }
             }
 
             /* Filter chroma. */
             if (uv_pri_lvl || uv_sec_lvl) {
-                static const stbv_u8 uv_dir_map[8] = {
-                    0, 1, 2, 3, 4, 5, 6, 7
-                };
-                int uvdir = uv_pri_lvl ? uv_dir_map[dir] : 0;
+                static const stbv_u8 uv_dirs_i420[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+                static const stbv_u8 uv_dirs_i422[8] = { 7, 0, 2, 4, 5, 6, 6, 6 };
+                const stbv_u8 *uv_dir = (ss_ver && !ss_hor) ? uv_dirs_i420 : uv_dirs_i422;
                 int cw = (frame_w + ss_hor) >> ss_hor;
                 int ch = (frame_h + ss_ver) >> ss_ver;
                 int cbx = bx >> ss_hor;
@@ -405,8 +413,6 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                     stbv_u16 *plane = (pl == 1) ? plane_u : plane_v;
                     int stride = (pl == 1) ? stride_u : stride_v;
                     int clx, cly;
-                    int uv_pri_adj = uv_pri_lvl;
-                    int uv_sec_adj = uv_sec_lvl;
                     int bedges_c = edges;
 
                     /* For chroma, adjust damping by -1 per dav1d. */
@@ -420,14 +426,35 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                             int bbw = (clx + 8 <= cbw) ? 8 : cbw - clx;
                             int bbh = (cly + 8 <= cbh) ? 8 : cbh - cly;
                             int cbedges = bedges_c;
+                            int uvdir = 0;
+                            /* Skip chroma blocks whose corresponding luma 8x8 block has no coded coefficients. */
+                            if (noskip_mask) {
+                                int luma_row8 = (by + (cly << ss_ver)) >> 3;
+                                int luma_col8 = (bx + (clx << ss_hor)) >> 3;
+                                int byte_idx = luma_row8 * noskip_stride + sb64_x;
+                                if (!(noskip_mask[byte_idx] & (1 << (luma_col8 & 7))))
+                                    continue;
+                            }
                             if (cly > 0) cbedges |= CDEF_HAVE_TOP;
                             if (cly + 8 < cbh) cbedges |= CDEF_HAVE_BOTTOM;
                             if (clx > 0) cbedges |= CDEF_HAVE_LEFT;
                             if (clx + 8 < cbw) cbedges |= CDEF_HAVE_RIGHT;
+                            /* Compute chroma direction from the corresponding luma block. */
+                            if (uv_pri_lvl) {
+                                int lx2 = clx << ss_hor;
+                                int ly2 = cly << ss_ver;
+                                if (lx2 < bw && ly2 < bh) {
+                                    unsigned luma_var;
+                                    int luma_dir = stb_av1_cdef_find_dir(
+                                        &plane_y[(by + ly2) * stride_y + (bx + lx2)], stride_y,
+                                        &luma_var, bitdepth_min_8);
+                                    uvdir = uv_dir[luma_dir];
+                                }
+                            }
                             stb_av1_cdef_filter_block(
                                 plane, stride, cbx + clx, cby + cly,
                                 cw, ch,
-                                uv_pri_adj, uv_sec_adj,
+                                uv_pri_lvl, uv_sec_lvl,
                                 uvdir, cdef_damping_c, bbw, bbh, cbedges,
                                 bitdepth_min_8);
                         }

@@ -424,30 +424,30 @@ is1d = tx_class != 0;
     /* eob_bin_{16..1024}.  The first two dimensions are chroma and 1-D. */
     switch (szctx) {
     case 0:
-        eob_bin_cdf = cdf->coef + 130U +
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB16_OFF +
                       ((unsigned)chroma * 2U + is1d) * 8U;
         break;
     case 1:
-        eob_bin_cdf = cdf->coef + 162U +
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB32_OFF +
                       ((unsigned)chroma * 2U + is1d) * 8U;
         break;
     case 2:
-        eob_bin_cdf = cdf->coef + 194U +
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB64_OFF +
                       ((unsigned)chroma * 2U + is1d) * 8U;
         break;
     case 3:
-        eob_bin_cdf = cdf->coef + 226U +
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB128_OFF +
                       ((unsigned)chroma * 2U + is1d) * 8U;
         break;
     case 4:
-        eob_bin_cdf = cdf->coef + 258U +
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB256_OFF +
                       ((unsigned)chroma * 2U + is1d) * 16U;
         break;
     case 5:
-        eob_bin_cdf = cdf->coef + 322U + (unsigned)chroma * 16U;
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB512_OFF + (unsigned)chroma * 16U;
         break;
     default:
-        eob_bin_cdf = cdf->coef + 354U + (unsigned)chroma * 16U;
+        eob_bin_cdf = cdf->coef + STBV_AV1_COEF_EOB1024_OFF + (unsigned)chroma * 16U;
         break;
     }
 
@@ -455,7 +455,7 @@ is1d = tx_class != 0;
     if (eob > 1U) {
         eob_bin = eob - 2U;
         /* eob_hi_bit[N_TX_SIZES][2][9][2] */
-        eob_hi_cdf = cdf->coef + 2858U + (unsigned)txctx * 36U +
+        eob_hi_cdf = cdf->coef + STBV_AV1_COEF_EOBHI_OFF + (unsigned)txctx * 36U +
                      (unsigned)chroma * 18U + eob_bin * 2U;
         eob = ((stb_av1_msac_bool_adapt(msac, eob_hi_cdf) | 2U) << eob_bin) |
               stb_av1_msac_bools(msac, eob_bin);
@@ -464,13 +464,13 @@ is1d = tx_class != 0;
         return -2;
 
     /* eob_base_tok[N_TX_SIZES][2][4][4] */
-    eob_cdf = cdf->coef + 386U + (unsigned)txctx * 32U +
+    eob_cdf = cdf->coef + STBV_AV1_COEF_EOBBASE_OFF + (unsigned)txctx * 32U +
               (unsigned)chroma * 16U;
     /* base_tok[N_TX_SIZES][2][41][4] */
-    lo_cdf = cdf->coef + 546U + (unsigned)txctx * 328U +
+    lo_cdf = cdf->coef + STBV_AV1_COEF_BASE_OFF + (unsigned)txctx * 328U +
              (unsigned)chroma * 164U;
     /* br_tok[min(txctx,3)][2][21][4] */
-    hi_cdf = cdf->coef + 2186U + (unsigned)(txctx > 3 ? 3 : txctx) * 168U +
+    hi_cdf = cdf->coef + STBV_AV1_COEF_BR_OFF + (unsigned)(txctx > 3 ? 3 : txctx) * 168U +
              (unsigned)chroma * 84U;
 
     /* The level scratch layout is exactly the one used by dav1d: for 2-D
@@ -620,7 +620,7 @@ is1d = tx_class != 0;
     if (!dc_tok) {
         dc_sign_level = 1U << 6;
     } else {
-        dc_sign_cdf = cdf->coef + 3038U + (chroma != 0) * 6U +
+        dc_sign_cdf = cdf->coef + STBV_AV1_COEF_DCSIGN_OFF + (chroma != 0) * 6U +
                       (unsigned)dc_sign_ctx * 2U;
         dc_sign = (int)stb_av1_msac_bool_adapt(msac, dc_sign_cdf);
         dc_sign_level = (dc_sign - 1) & (2 << 6);

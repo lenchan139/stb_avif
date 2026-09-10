@@ -95,9 +95,11 @@ struct stb_av1_framehdr {
     unsigned int frame_id;
     unsigned int frame_size_override;
     unsigned int frame_offset;
+    unsigned int primary_ref_frame;
     unsigned int refresh_frame_flags;
     unsigned int allow_intrabc;
     unsigned int refresh_context;
+    unsigned int buffer_removal_time_present;
 
     unsigned int width[2];
     unsigned int height;
@@ -312,7 +314,26 @@ static int stb_av1_parse_framehdr(struct stb_av1_framehdr *h,
     if (s->order_hint)
         h->frame_offset = stb_av1_get_bits(gb, (int)s->order_hint_n_bits);
 
-    /* primary_ref_frame is NONE for key/intra frames. */
+    if (!h->error_resilient_mode && (h->frame_type == STB_AV1_FRAME_INTER ||
+                                     h->frame_type == STB_AV1_FRAME_SWITCH))
+        h->primary_ref_frame = (int)stb_av1_get_bits(gb, 3);
+    else
+        h->primary_ref_frame = 7; /* PRIMARY_REF_NONE */
+
+    if (s->decoder_model_info_present) {
+        h->buffer_removal_time_present = stb_av1_get_bit(gb);
+        if (h->buffer_removal_time_present) {
+            for (i = 0; i < s->num_operating_points; i++) {
+                if (s->operating_points[i].decoder_model_param_present) {
+                    unsigned int idc = s->operating_points[i].idc;
+                    int in_temporal = (idc >> 0) & 1;
+                    int in_spatial  = (idc >> 0) & 1;
+                    if (!idc || (in_temporal && in_spatial))
+                        (void)stb_av1_get_bits(gb, (int)s->buffer_removal_delay_length);
+                }
+            }
+        }
+    }
 
     if (h->frame_type == STB_AV1_FRAME_KEY ||
         h->frame_type == STB_AV1_FRAME_INTRA_ONLY) {
@@ -369,10 +390,18 @@ static int stb_av1_parse_framehdr(struct stb_av1_framehdr *h,
     h->segmentation.enabled = stb_av1_get_bit(gb);
     h->segmentation.last_active_segid = -1;
     if (h->segmentation.enabled) {
-        h->segmentation.update_map = 1;
-        h->segmentation.update_data = 1;
         h->segmentation.preskip = 0;
-        for (i = 0; i < STB_AV1_MAX_SEGMENTS; i++) {
+        if (h->primary_ref_frame == 7) { /* PRIMARY_REF_NONE */
+            h->segmentation.update_map = 1;
+            h->segmentation.update_data = 1;
+        } else {
+            h->segmentation.update_map = stb_av1_get_bit(gb);
+            if (h->segmentation.update_map)
+                h->segmentation.temporal = stb_av1_get_bit(gb);
+            h->segmentation.update_data = stb_av1_get_bit(gb);
+        }
+        if (h->segmentation.update_data) {
+            for (i = 0; i < STB_AV1_MAX_SEGMENTS; i++) {
             struct stb_av1_seg_data *seg = &h->segmentation.d[i];
             seg->ref = -1;
             if (stb_av1_get_bit(gb)) {
@@ -409,6 +438,7 @@ static int stb_av1_parse_framehdr(struct stb_av1_framehdr *h,
                 h->segmentation.preskip = 1;
             }
         }
+        } /* end if (update_data) */
     } else {
         for (i = 0; i < STB_AV1_MAX_SEGMENTS; i++)
             h->segmentation.d[i].ref = -1;
