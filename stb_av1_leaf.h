@@ -517,7 +517,7 @@ static int stbv_av1_leaf_tx_plane(struct stb_av1_msac *msac,
                                  is_chroma ? c->cbh4_unc : c->bh4_unc,
                                  txw4, txh4, is_chroma);
     {
-        stbv_u16 *_csk = cdf->coef + stbv_av1_tx_dims[tx].ctx * 26 + sctx * 2;
+        stbv_u16 *_csk = cdf->coef + STBV_AV1_COEF_SKIP_OFF + stbv_av1_tx_dims[tx].ctx * 26 + sctx * 2;
         skip = stb_av1_msac_bool_adapt(msac, _csk);
     }
     if (!skip) {
@@ -659,7 +659,6 @@ static int stbv_av1_leaf_tx_plane(struct stb_av1_msac *msac,
             dq_ac = stbv_av1_dq_tbl[hbd_i][qac][1];
             dq_shift = stbv_av1_tx_dims[tx].ctx - 2;
             if (dq_shift < 0) dq_shift = 0;
-
             eob = stbv_av1_decode_coeffs_square(msac, cdf, tx, is_chroma,
                                     txclass,
                                     dq_dc, dq_ac, dq_shift,
@@ -1263,9 +1262,9 @@ static void stbv_av1_find_ibc_mv_pred(const stbv_av1_leaf_state *s,
                                              (bx4 - n2 * 2 + 1) | 1, by4 | 1,
                                              bh4, h4,
                                              1 + max_cols - n2, bh4 >= 16 ? 4 : 2, 0);
-        }
-    }
-    }
+                            }
+                        }
+                    }
 
     /* Sort by weight (descending): bubble sort, matches dav1d refmvs_find
      * lines 500-524).  We sort the entire stack since all entries have

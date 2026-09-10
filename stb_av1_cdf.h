@@ -1609,18 +1609,19 @@ typedef struct stbv_av1_cdf {
     stbv_u16 txtp_inter3[8];     /* 4 bools, each 2 (val + count) */
 } stbv_av1_cdf;
 
-#define STBV_AV1_COEF_SKIP_OFF       0
-#define STBV_AV1_COEF_EOB16_OFF      130
-#define STBV_AV1_COEF_EOB32_OFF      162
-#define STBV_AV1_COEF_EOB64_OFF      194
-#define STBV_AV1_COEF_EOB128_OFF     226
-#define STBV_AV1_COEF_EOB256_OFF     258
-#define STBV_AV1_COEF_EOB512_OFF     322
-#define STBV_AV1_COEF_EOB1024_OFF    354
-#define STBV_AV1_COEF_EOBBASE_OFF    386
-#define STBV_AV1_COEF_BASE_OFF       546
-#define STBV_AV1_COEF_BR_OFF         2186
-#define STBV_AV1_COEF_EOBHI_OFF      2858
+/* Offsets in coef[] matching dav1d's CdfCoefContext struct layout. */
+#define STBV_AV1_COEF_EOB16_OFF      0
+#define STBV_AV1_COEF_EOB32_OFF      32
+#define STBV_AV1_COEF_EOB64_OFF      64
+#define STBV_AV1_COEF_EOB128_OFF     96
+#define STBV_AV1_COEF_EOB256_OFF     128
+#define STBV_AV1_COEF_EOB512_OFF     192
+#define STBV_AV1_COEF_EOB1024_OFF    224
+#define STBV_AV1_COEF_EOBBASE_OFF    256
+#define STBV_AV1_COEF_BASE_OFF       416
+#define STBV_AV1_COEF_BR_OFF         2056
+#define STBV_AV1_COEF_EOBHI_OFF      2728
+#define STBV_AV1_COEF_SKIP_OFF       2908
 #define STBV_AV1_COEF_DCSIGN_OFF     3038
 
 /* dav1d stores its CDFs in inverted form: each entry is 32768 minus the
@@ -1649,19 +1650,20 @@ static void stbv_av1_cdf_copy_coef(stbv_u16 *d, unsigned q)
         memcpy(d + (off), s, (count) * sizeof(stbv_u16)); \
         stbv_av1_cdf_inv(d + (off), s, (groups), (stride), (n)); \
     } while (0)
-    STBV_CPY(skip,0,130,65,2,1);
-    STBV_CPY(eob_bin_16,130,32,4,8,4);
-    STBV_CPY(eob_bin_32,162,32,4,8,5);
-    STBV_CPY(eob_bin_64,194,32,4,8,6);
-    STBV_CPY(eob_bin_128,226,32,4,8,7);
-    STBV_CPY(eob_bin_256,258,64,4,16,8);
-    STBV_CPY(eob_bin_512,322,32,2,16,9);
-    STBV_CPY(eob_bin_1024,354,32,2,16,10);
-    STBV_CPY(eob_base_tok,386,160,40,4,2);
-    STBV_CPY(base_tok,546,1640,410,4,3);
-    STBV_CPY(br_tok,2186,672,168,4,3);
-    STBV_CPY(eob_hi_bit,2858,180,90,2,1);
-    STBV_CPY(dc_sign,3038,12,6,2,1);
+    /* Field order matches dav1d's CdfCoefContext struct layout. */
+    STBV_CPY(eob_bin_16,STBV_AV1_COEF_EOB16_OFF,32,4,8,4);
+    STBV_CPY(eob_bin_32,STBV_AV1_COEF_EOB32_OFF,32,4,8,5);
+    STBV_CPY(eob_bin_64,STBV_AV1_COEF_EOB64_OFF,32,4,8,6);
+    STBV_CPY(eob_bin_128,STBV_AV1_COEF_EOB128_OFF,32,4,8,7);
+    STBV_CPY(eob_bin_256,STBV_AV1_COEF_EOB256_OFF,64,4,16,8);
+    STBV_CPY(eob_bin_512,STBV_AV1_COEF_EOB512_OFF,32,2,16,9);
+    STBV_CPY(eob_bin_1024,STBV_AV1_COEF_EOB1024_OFF,32,2,16,10);
+    STBV_CPY(eob_base_tok,STBV_AV1_COEF_EOBBASE_OFF,160,40,4,2);
+    STBV_CPY(base_tok,STBV_AV1_COEF_BASE_OFF,1640,410,4,3);
+    STBV_CPY(br_tok,STBV_AV1_COEF_BR_OFF,672,168,4,3);
+    STBV_CPY(eob_hi_bit,STBV_AV1_COEF_EOBHI_OFF,180,90,2,1);
+    STBV_CPY(skip,STBV_AV1_COEF_SKIP_OFF,130,65,2,1);
+    STBV_CPY(dc_sign,STBV_AV1_COEF_DCSIGN_OFF,12,6,2,1);
 #undef STBV_CPY
 #undef STBV_SRC
 }
