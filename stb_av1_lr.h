@@ -1130,17 +1130,21 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
         stbv_av1_sgr_box3_row_h(sumsq3_ptrs[2], sum3_ptrs[2], r, ew, ux0);
         src_y++;
 
-        /* box5_vert (no rotate for A5 — finish_mix does it) */
+        /* box5_vert: vertical sum, calc_ab, rotate sumsq5/sum5 (inside vert) */
         stbv_av1_sgr_box5_row_v((const int *const *)sumsq5_ptrs,
                                  (const int *const *)sum5_ptrs,
                                  A5_ptrs[1], B5_ptrs[1], uw);
         stbv_av1_sgr_calc_ab(A5_ptrs[1], B5_ptrs[1], uw, s0, 25, 164);
+        stbv_av1_rotate5(sumsq5_ptrs);
+        stbv_av1_rotate5(sum5_ptrs);
 
-        /* box3_vert (no rotate for A3 — finish_mix does it) */
+        /* box3_vert: vertical sum, calc_ab, rotate sumsq3/sum3 (inside vert) */
         stbv_av1_sgr_box3_row_v((const int *const *)sumsq3_ptrs,
                                  (const int *const *)sum3_ptrs,
                                  A3_ptrs[3], B3_ptrs[3], uw);
         stbv_av1_sgr_calc_ab(A3_ptrs[3], B3_ptrs[3], uw, s1, 9, 455);
+        stbv_av1_rotate3(sumsq3_ptrs);
+        stbv_av1_rotate3(sum3_ptrs);
 
         /* finish_mix: filter + weighted2 + rotate A5/A3 */
         out_y = uy0 + (uh - h - 3);
@@ -1167,8 +1171,6 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
             stbv_av1_sgr_weighted2(dst_row, stride, tmp5 + idx5, tmp3 + idx5,
                                     uw, 2, w0, w1, maxv);
         }
-        stbv_av1_rotate5(sumsq5_ptrs);
-        stbv_av1_rotate5(sum5_ptrs);
         stbv_av1_rotate2(A5_ptrs);
         stbv_av1_rotate2(B5_ptrs);
         stbv_av1_rotate4(A3_ptrs);
