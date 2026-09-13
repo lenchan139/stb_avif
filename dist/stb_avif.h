@@ -9853,8 +9853,14 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
      * For palette blocks this still fires but luma_pal/chroma_pal will
      * overwrite the prediction afterwards. */
     if (c.recon && c.recon->block_info) {
+        /* Compute max_tx before block_info so skip blocks get the correct tx0 */
+        int block_max_tx;
+        if (lossless)
+            block_max_tx = STBV_AV1_TX_4X4;
+        else
+            block_max_tx = stbv_av1_max_tx_for_bs[bs][0];
         c.recon->block_info(c.recon->ud, intra_flag, bs, bx4, by4,
-                            has_chroma, cbw4, cbh4, 0, 0,
+                            has_chroma, cbw4, cbh4, 0, block_max_tx,
                             state->pal_sz_y, state->pal_sz_uv,
                             (int)block_skip,
                             intra.y_mode, intra.y_angle, intra.uv_mode,
@@ -11129,7 +11135,9 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
  *   sharpness   - frame sharpness
  *   is_chroma   - caps filter width at 6
  *   blkid       - per-4x4-unit block-identity map
- *   txlw        - per-4x4-unit log2-width of the covering transform
+ *   txlw        - per-4x4-unit packed transform size: low 3 bits hold
+ *                 the log2 width (for vertical edges), high 3 bits hold
+ *                 the log2 height (for horizontal edges)
  *   b4stride    - row stride of the blkid/txlw maps (4x4 units)
  *   mapw4, maph4 - map extent in 4x4 units
  *   ssx, ssy    - plane subsampling relative to the maps' grid
@@ -11191,8 +11199,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                 int yl = yy < maph4 ? yy : maph4 - 1;
                 stbv_u32 bl = blkid[(size_t)yl * b4stride + xl_c];
                 stbv_u32 br = blkid[(size_t)yl * b4stride + xr_c];
-                int ll = txlw[(size_t)yl * b4stride + xl_c];
-                int lr = txlw[(size_t)yl * b4stride + xr_c];
+                int ll = txlw[(size_t)yl * b4stride + xl_c] & 7;
+                int lr = txlw[(size_t)yl * b4stride + xr_c] & 7;
                 if (bl != br || ll != lr) {
                     int bucket = ll < lr ? ll : lr;
                     ptrdiff_t sb_p = 1;
@@ -11210,10 +11218,10 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                     q0 = p + (size_t)Y * stride + X;
                     wd = 4 << bucket;
                     if (is_chroma) wd = 4 + 2 * bucket;
-                    if (wd >= 16 && (X < 7 || w - X < 6)) wd = 8;
-                    if (wd >= 8 && (X < 4 || w - X < 3)) wd = is_chroma ? 6 : 4;
-                    if (wd >= 6 && (X < 3 || w - X < 2)) wd = 4;
-                    if (wd >= 4 && (X < 2 || w - X < 1)) continue;
+                    if (wd >= 16 && X < 7) wd = 8;
+                    if (wd >= 8 && X < 4) wd = is_chroma ? 6 : 4;
+                    if (wd >= 6 && X < 3) wd = 4;
+                    if (wd >= 4 && X < 2) continue;
                     stb_av1_loop_filter_edge(q0, sa_p, sb_p, lut_e[L], lut_i[L],
                                              L >> 4, wd, maxv, bd8);
                 }
@@ -11241,8 +11249,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                 int xt_c = xx < mapw4 ? xx : mapw4 - 1;
                 stbv_u32 bu = blkid[(size_t)yt_c * b4stride + xt_c];
                 stbv_u32 bd = blkid[(size_t)yb_c * b4stride + xt_c];
-                int lu = txlw[(size_t)yt_c * b4stride + xt_c];
-                int ld = txlw[(size_t)yb_c * b4stride + xt_c];
+                int lu = (txlw[(size_t)yt_c * b4stride + xt_c] >> 3) & 7;
+                int ld = (txlw[(size_t)yb_c * b4stride + xt_c] >> 3) & 7;
                 if (bu != bd || lu != ld) {
                     int bucket = lu < ld ? lu : ld;
                     ptrdiff_t sb_p = stride;
@@ -11260,10 +11268,10 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                     q0 = p + (size_t)Y * stride + X;
                     wd = 4 << bucket;
                     if (is_chroma) wd = 4 + 2 * bucket;
-                    if (wd >= 16 && (Y < 7 || h - Y < 6)) wd = 8;
-                    if (wd >= 8 && (Y < 4 || h - Y < 3)) wd = is_chroma ? 6 : 4;
-                    if (wd >= 6 && (Y < 3 || h - Y < 2)) wd = 4;
-                    if (wd >= 4 && (Y < 2 || h - Y < 1)) continue;
+                    if (wd >= 16 && Y < 7) wd = 8;
+                    if (wd >= 8 && Y < 4) wd = is_chroma ? 6 : 4;
+                    if (wd >= 6 && Y < 3) wd = 4;
+                    if (wd >= 4 && Y < 2) continue;
                     stb_av1_loop_filter_edge(q0, sa_p, sb_p, lut_e[L], lut_i[L],
                                              L >> 4, wd, maxv, bd8);
                 }
@@ -15019,7 +15027,8 @@ struct stb_avif_scalar_recon {
     int cur_pl;
     int cur_ltw4, cur_lth4; /* block's max luma tx size (b->tx dims) */
     /* Deblocking: per-4x4-unit block identity + covering-transform
-     * log2-width maps (frame-sized, filled during recon). */
+     * size maps (frame-sized, filled during recon).  Each txlw byte
+     * packs log2 width (low 3 bits) and log2 height (high 3 bits). */
     stbv_u32 *lf_blkid;
     stbv_u8 *lf_txlw;
     stbv_u32 *lf_blkid_c;   /* chroma-plane coverage (separate set) */
@@ -15475,29 +15484,50 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                 }
             }
         }
-        /* Fill lf_blkid for IBC skip blocks (same logic as intra skip). */
+        /* Fill lf_blkid for IBC skip blocks (same logic as intra skip).
+         * txlw map packs log2 width (low 3 bits) and log2 height
+         * (high 3 bits); vertical edges use width, horizontal use height. */
         if (skip && rc->lf_blkid && bw4 > 0 && bh4 > 0) {
-            stbv_u32 blkid = ((stbv_u32)bx4 << 16) | (stbv_u32)by4;
-            int ii, jj;
-            for (ii = 0; ii < bh4 && (by4 + ii) < rc->lf_maph4; ii++)
-                for (jj = 0; jj < bw4 && (bx4 + jj) < rc->lf_mapw4; jj++) {
-                    size_t off = (size_t)(by4 + ii) * rc->lf_b4stride + (bx4 + jj);
-                    rc->lf_blkid[off] = blkid;
-                    rc->lf_txlw[off] = rc->cur_ltw4;
-                    rc->lf_done[off] = 1;
+            int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                            stbv_av1_tx_dims[tx0].lw : 0;
+            int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                            stbv_av1_tx_dims[tx0].lh : 0;
+            int txw4 = 1 << txlw_skip;
+            int txh4 = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                       stbv_av1_tx_dims[tx0].h : 1;
+            int txwh_skip = txlw_skip | (txlh_skip << 3);
+            int cy, cx;
+            for (cy = 0; cy < bh4; cy += txh4) {
+                for (cx = 0; cx < bw4; cx += txw4) {
+                    stbv_u32 chunk_id = ((stbv_u32)(bx4 + cx) << 16) |
+                                         (stbv_u32)(by4 + cy);
+                    int iy, ix;
+                    for (iy = cy; iy < cy + txh4 && (by4 + iy) < rc->lf_maph4; iy++)
+                        for (ix = cx; ix < cx + txw4 && (bx4 + ix) < rc->lf_mapw4; ix++) {
+                            size_t off = (size_t)(by4 + iy) * rc->lf_b4stride + (bx4 + ix);
+                            rc->lf_blkid[off] = chunk_id;
+                            rc->lf_txlw[off] = (stbv_u8)txwh_skip;
+                            rc->lf_done[off] = 1;
+                        }
                 }
+            }
         }
         if (skip && has_chroma && rc->lf_blkid_c && bw4 > 0 && bh4 > 0) {
             int cbx4 = bx4 >> ss_h;
             int cby4 = by4 >> ss_v;
             int cbw4_u = (bw4 + ss_h) >> ss_h;
             int cbh4_u = (bh4 + ss_v) >> ss_v;
+            int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                            stbv_av1_tx_dims[tx0].lw : 0;
+            int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                            stbv_av1_tx_dims[tx0].lh : 0;
+            int txwh_skip = txlw_skip | (txlh_skip << 3);
             int ii, jj;
             for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
                 for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
                     size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
                     rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
-                    rc->lf_txlw_c[off] = rc->cur_ltw4;
+                    rc->lf_txlw_c[off] = (stbv_u8)txwh_skip;
                 }
         }
         return;
@@ -15543,29 +15573,49 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                                      y_mode, y_angle, uv_mode);
     /* Skip blocks never reach luma_txb/chroma_txb, so their lf_blkid map
      * entries would stay zero (calloc default), colliding with blkid=0 at
-     * (0,0) and creating false deblocking edges.  Fill the map here. */
+     * (0,0) and creating false deblocking edges.  Fill the map here.
+     * Use per-transform-chunk blkids so inner tx boundaries are detected. */
     if (skip && rc->lf_blkid && rc->cur_bw4 > 0 && rc->cur_bh4 > 0) {
-        stbv_u32 blkid = ((stbv_u32)bx4 << 16) | (stbv_u32)by4;
-        int i, j;
-        for (i = 0; i < rc->cur_bh4 && (by4 + i) < rc->lf_maph4; i++)
-            for (j = 0; j < rc->cur_bw4 && (bx4 + j) < rc->lf_mapw4; j++) {
-                size_t off = (size_t)(by4 + i) * rc->lf_b4stride + (bx4 + j);
-                rc->lf_blkid[off] = blkid;
-                rc->lf_txlw[off] = rc->cur_ltw4;
-                rc->lf_done[off] = 1;
+        int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                        stbv_av1_tx_dims[tx0].lw : 0;
+        int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                        stbv_av1_tx_dims[tx0].lh : 0;
+        int txw4 = 1 << txlw_skip;
+        int txh4 = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                   stbv_av1_tx_dims[tx0].h : 1;
+        int txwh_skip = txlw_skip | (txlh_skip << 3);
+        int cy, cx;
+        for (cy = 0; cy < rc->cur_bh4; cy += txh4) {
+            for (cx = 0; cx < rc->cur_bw4; cx += txw4) {
+                stbv_u32 chunk_id = ((stbv_u32)(bx4 + cx) << 16) |
+                                     (stbv_u32)(by4 + cy);
+                int iy, ix;
+                for (iy = cy; iy < cy + txh4 && (by4 + iy) < rc->lf_maph4; iy++)
+                    for (ix = cx; ix < cx + txw4 && (bx4 + ix) < rc->lf_mapw4; ix++) {
+                        size_t off = (size_t)(by4 + iy) * rc->lf_b4stride + (bx4 + ix);
+                        rc->lf_blkid[off] = chunk_id;
+                        rc->lf_txlw[off] = (stbv_u8)txwh_skip;
+                        rc->lf_done[off] = 1;
+                    }
             }
+        }
     }
     if (skip && has_chroma && rc->lf_blkid_c && rc->cur_bw4 > 0 && rc->cur_bh4 > 0) {
         int cbx4 = bx4 >> rc->ss_hor;
         int cby4 = by4 >> rc->ss_ver;
         int cbw4_u = (rc->cur_bw4 + rc->ss_hor) >> rc->ss_hor;
         int cbh4_u = (rc->cur_bh4 + rc->ss_ver) >> rc->ss_ver;
-        int i, j;
-        for (i = 0; i < cbh4_u && (cby4 + i) < rc->lf_maph4; i++)
-            for (j = 0; j < cbw4_u && (cbx4 + j) < rc->lf_mapw4; j++) {
-                size_t off = (size_t)(cby4 + i) * rc->lf_b4stride + (cbx4 + j);
+        int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                        stbv_av1_tx_dims[tx0].lw : 0;
+        int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
+                        stbv_av1_tx_dims[tx0].lh : 0;
+        int txwh_skip = txlw_skip | (txlh_skip << 3);
+        int ii, jj;
+        for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
+            for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
+                size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
                 rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
-                rc->lf_txlw_c[off] = rc->cur_ltw4;
+                rc->lf_txlw_c[off] = (stbv_u8)txwh_skip;
             }
     }
 }
@@ -15659,7 +15709,7 @@ static void stb_avif_extend_right_edge_u16(stbv_u16 *plane, int stride,
     int y0 = y4 << 2;
     int tw = stbv_av1_tx_dims[tx].w << 2;
     int th = stbv_av1_tx_dims[tx].h << 2;
-    int aw = (frame_w + 7) & ~7;
+    int aw = stride;
     int yy, xx;
     if (!plane || x0 + tw < frame_w || x0 >= aw || y0 >= frame_h)
         return;
@@ -15717,9 +15767,13 @@ static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, 
                                  tx, txtp, eob, cf);
     }
     {
-        /* record transform coverage for the deblocking pass */
+        /* record transform coverage for the deblocking pass;
+         * txlw packs log2 width (low bits, for vertical edges) and
+         * log2 height (high bits, for horizontal edges) */
         if (rc->lf_blkid) {
             int tw = stbv_av1_tx_dims[tx].w, th = stbv_av1_tx_dims[tx].h;
+            int txwh = stbv_av1_tx_dims[tx].lw |
+                       (stbv_av1_tx_dims[tx].lh << 3);
             int lx, ly;
             stbv_u32 id = ((stbv_u32)x4 << 16) |
                           (stbv_u32)y4;
@@ -15727,7 +15781,7 @@ static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, 
                 for (lx = x4; lx < x4 + tw && lx < rc->lf_mapw4; lx++) {
                     rc->lf_blkid[(size_t)ly * rc->lf_b4stride + lx] = id;
                     rc->lf_txlw[(size_t)ly * rc->lf_b4stride + lx] =
-                        (stbv_u8)stbv_av1_tx_dims[tx].lw;
+                        (stbv_u8)txwh;
                     rc->lf_done[(size_t)ly * rc->lf_b4stride + lx] = 1;
                 }
         }
@@ -15866,13 +15920,15 @@ static void stb_avif_recon_chroma_txb(void *ud, int pl, int x4, int y4, int tx, 
         int tw = stbv_av1_tx_dims[tx].w << rc->ss_hor;
         int th = stbv_av1_tx_dims[tx].h << rc->ss_ver;
         int lx0 = x4 << rc->ss_hor, ly0 = y4 << rc->ss_ver;
+        int txwh = stbv_av1_tx_dims[tx].lw |
+                   (stbv_av1_tx_dims[tx].lh << 3);
         int lx, ly;
         stbv_u32 id = ((stbv_u32)x4 << 16) | (stbv_u32)y4;
         for (ly = ly0; ly < ly0 + th && ly < rc->lf_maph4; ly++)
             for (lx = lx0; lx < lx0 + tw && lx < rc->lf_mapw4; lx++) {
                 rc->lf_blkid_c[(size_t)ly * rc->lf_b4stride + lx] = id;
                 rc->lf_txlw_c[(size_t)ly * rc->lf_b4stride + lx] =
-                    (stbv_u8)stbv_av1_tx_dims[tx].lw;
+                    (stbv_u8)txwh;
             }
     }
 #endif
@@ -16072,18 +16128,18 @@ static void stb_avif_recon_luma_pal(void *ud, const stbv_u8 *idx, int sz, int bw
     if (rc->lf_blkid) {
         stbv_u32 blkid = ((stbv_u32)rc->cur_bx4 << 16) |
                           (stbv_u32)rc->cur_by4;
-        int bw4_log2 = 0, bh4_log2 = 0, tmp;
+        int bw4_log2 = 0, bh4_log2 = 0, tmp, txwh;
         tmp = bw4; while (tmp > 1) { tmp >>= 1; ++bw4_log2; }
         tmp = bh4; while (tmp > 1) { tmp >>= 1; ++bh4_log2; }
+        txwh = bw4_log2 | (bh4_log2 << 3);
         for (i = 0; i < bh4 && (rc->cur_by4 + i) < rc->lf_maph4; i++)
             for (j = 0; j < bw4 && (rc->cur_bx4 + j) < rc->lf_mapw4; j++) {
                 size_t off = (size_t)(rc->cur_by4 + i) * rc->lf_b4stride
                            + (rc->cur_bx4 + j);
                 rc->lf_blkid[off] = blkid;
-                rc->lf_txlw[off] = (stbv_u8)bw4_log2;
+                rc->lf_txlw[off] = (stbv_u8)txwh;
                 rc->lf_done[off] = 1;
             }
-        (void)bh4_log2;
     }
 }
 
@@ -16120,15 +16176,16 @@ static void stb_avif_recon_chroma_pal(void *ud, int pl, const stbv_u8 *idx, int 
         int ly0 = cy4 << rc->ss_ver;
         int lx, ly;
         stbv_u32 id = ((stbv_u32)cx4 << 16) | (stbv_u32)cy4;
-        int cbw4_log2 = 0, tmp;
+        int cbw4_log2 = 0, cbh4_log2 = 0, tmp, txwh;
         tmp = cbw4; while (tmp > 1) { tmp >>= 1; ++cbw4_log2; }
+        tmp = cbh4; while (tmp > 1) { tmp >>= 1; ++cbh4_log2; }
+        txwh = cbw4_log2 | (cbh4_log2 << 3);
         for (ly = ly0; ly < ly0 + lh && ly < rc->lf_maph4; ly++)
             for (lx = lx0; lx < lx0 + lw && lx < rc->lf_mapw4; lx++) {
                 rc->lf_blkid_c[(size_t)ly * rc->lf_b4stride + lx] = id;
                 rc->lf_txlw_c[(size_t)ly * rc->lf_b4stride + lx] =
-                    (stbv_u8)cbw4_log2;
+                    (stbv_u8)txwh;
             }
-        (void)lh;
     }
 }
 
@@ -16714,6 +16771,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
         }
 
     /* CDEF filtering (after deblocking, before loop restoration). */
+#ifndef STB_AVIF_NO_CDEF
     if (!r && stream->seq.cdef && cdef_idx_grid) {
         const struct stb_av1_framehdr *fh = &stream->frame;
         int y_pri_arr[8], y_sec_arr[8], uv_pri_arr[8], uv_sec_arr[8];
@@ -16732,9 +16790,10 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                            cdef_idx_grid, cdef_grid_stride,
                            y_pri_arr, y_sec_arr,
                            uv_pri_arr, uv_sec_arr,
-                               (int)fh->cdef.damping,
-                               cdef_noskip_mask, cdef_noskip_stride);
+                                (int)fh->cdef.damping,
+                                cdef_noskip_mask, cdef_noskip_stride);
     }
+#endif /* !STB_AVIF_NO_CDEF */
 
     /* Loop restoration filtering (after CDEF, before 8-bit conversion). */
 #ifndef STB_AVIF_NO_LR
