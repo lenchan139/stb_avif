@@ -15298,8 +15298,11 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
         int impl;
         const int filt_idx = (mode == STBV_AV1_INTRA_FILTER) ? y_angle : 0;
 
-        cw = rc->frame_w - x; if (cw > w) cw = w;
-        ch = rc->frame_h - y; if (ch > h) ch = h;
+        /* Write back the full padded extent (buffer capacity), not just
+         * the visible frame: dav1d reconstructs overhanging tx/block
+         * areas into the padded stride, and the loop filter reads them. */
+        cw = rc->stride_y - x; if (cw > w) cw = w;
+        ch = (rc->frame_h + 64) - y; if (ch > h) ch = h;
         if (mode == STBV_AV1_INTRA_FILTER)
             mode = STBV_AV1_IPRED_FILTER;
         if (cw <= 0 || ch <= 0) return;
@@ -15343,8 +15346,10 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
         if (cbw4 <= 0 || cbh4 <= 0) return;
         w = cbw4 << 2;
         h = cbh4 << 2;
-        cw = ((rc->frame_w + ss_hor) >> ss_hor) - x; if (cw > w) cw = w;
-        ch = ((rc->frame_h + ss_ver) >> ss_ver) - y; if (ch > h) ch = h;
+        /* Full padded extent (buffer capacity), not the visible frame. */
+        cw = rc->stride_u - x; if (cw > w) cw = w;
+        ch = ((((rc->frame_h + ss_ver) >> ss_ver)) + 32) - y;
+        if (ch > h) ch = h;
         if (cw <= 0 || ch <= 0) return;
     /* Predict U and V separately: each plane has different reference edges. */
     {
@@ -15352,6 +15357,10 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
         for (pl_idx = 0; pl_idx < 2; pl_idx++) {
             stbv_u16 *cur_plane = pl_idx == 0 ? rc->plane_u : rc->plane_v;
             int cur_stride = pl_idx == 0 ? rc->stride_u : rc->stride_v;
+            int cw_p = cur_stride - x; if (cw_p > w) cw_p = w;
+            int ch_p = ((((rc->frame_h + ss_ver) >> ss_ver)) + 32) - y;
+            if (ch_p > h) ch_p = h;
+            if (cw_p <= 0 || ch_p <= 0) continue;
             cimpl = stbv_av1_prepare_intra_edges_16(cx4, stb_avif_recon_have_left(rc, 0, cx4),
                                                    cy4, stb_avif_recon_have_top(rc, 0, cy4),
                                                    cfw4, cfh4,
@@ -15363,11 +15372,11 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
                                                    rc->intra_edge_filter,
                                                    edge, rc->bit_depth);
             stbv_av1_ipred_run_16(cimpl, rc->pred, w, edge, w, h,
-                                  cangle | stb_avif_recon_edge_flags(rc, 0, bx4, by4),
-                                  0, (cfw4 - cx4) << 2, (cfh4 - cy4) << 2, rc->bit_depth);
-            for (i = 0; i < ch; i++) {
+                                   cangle | stb_avif_recon_edge_flags(rc, 0, bx4, by4),
+                                   0, (cfw4 - cx4) << 2, (cfh4 - cy4) << 2, rc->bit_depth);
+            for (i = 0; i < ch_p; i++) {
                 memcpy(cur_plane + (y + i) * cur_stride + x,
-                       rc->pred + i * w, (size_t)(cw * sizeof(stbv_u16)));
+                       rc->pred + i * w, (size_t)(cw_p * sizeof(stbv_u16)));
             }
         }
     }
@@ -15437,13 +15446,15 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
         dst_px_y = by4 * 4;
         pw = bw4 << 2;
         ph = bh4 << 2;
-        /* Clamp to frame bounds. */
+        /* Clamp to buffer bounds (stride/padded rows), not the visible
+         * frame: overhang areas hold true reconstructed content that
+         * the loop filter reads. */
         if (src_px_x < 0) { pw += src_px_x; src_px_x = 0; }
         if (src_px_y < 0) { ph += src_px_y; src_px_y = 0; }
-        if (src_px_x + pw > rc->frame_w) pw = rc->frame_w - src_px_x;
-        if (src_px_y + ph > rc->frame_h) ph = rc->frame_h - src_px_y;
-        cw = rc->frame_w - dst_px_x; if (cw > pw) cw = pw;
-        ch = rc->frame_h - dst_px_y; if (ch > ph) ch = ph;
+        if (src_px_x + pw > rc->stride_y) pw = rc->stride_y - src_px_x;
+        if (src_px_y + ph > rc->frame_h + 64) ph = rc->frame_h + 64 - src_px_y;
+        cw = rc->stride_y - dst_px_x; if (cw > pw) cw = pw;
+        ch = (rc->frame_h + 64) - dst_px_y; if (ch > ph) ch = ph;
         /* Reference-availability check: source must be within decoded
          * region (above or to the left of current position).  AV1 decode
          * order guarantees this when src is within the current tile. */
@@ -15467,16 +15478,23 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
             int ch4 = (bh4 + ss_v) >> ss_v;
             int cpw = cw4 << 2;
             int cph = ch4 << 2;
-            int ccw, cch, j;
+            int j;
             if (cx_src < 0) { cpw += cx_src; cx_src = 0; }
             if (cy_src < 0) { cph += cy_src; cy_src = 0; }
-            ccw = ((rc->frame_w + ss_h) >> ss_h) - cx_dst; if (ccw > cpw) ccw = cpw;
-            cch = ((rc->frame_h + ss_v) >> ss_v) - cy_dst; if (cch > cph) cch = cph;
-            if (ccw > 0 && cch > 0) {
-                for (j = 0; j < 2; j++) {
-                    stbv_u16 *plane = j == 0 ? rc->plane_u : rc->plane_v;
-                    int stride = j == 0 ? rc->stride_u : rc->stride_v;
-                    if (!plane) continue;
+            for (j = 0; j < 2; j++) {
+                stbv_u16 *plane = j == 0 ? rc->plane_u : rc->plane_v;
+                int stride = j == 0 ? rc->stride_u : rc->stride_v;
+                int ch_h = (((rc->frame_h + ss_v) >> ss_v) + 32);
+                int spw = cpw, sph = cph;
+                int ccw, cch;
+                if (!plane) continue;
+                /* Clamp the source against this plane's buffer bounds so
+                 * copies can reference true overhang content. */
+                if (cx_src + spw > stride) spw = stride - cx_src;
+                if (cy_src + sph > ch_h) sph = ch_h - cy_src;
+                ccw = stride - cx_dst; if (ccw > spw) ccw = spw;
+                cch = ch_h - cy_dst; if (cch > sph) cch = sph;
+                if (ccw > 0 && cch > 0) {
                     for (i = 0; i < cch; i++)
                         memmove(plane + (size_t)(cy_dst + i) * stride + cx_dst,
                                plane + (size_t)(cy_src + i) * stride + cx_src,
@@ -15701,26 +15719,6 @@ static void stb_avif_recon_add_res(struct stb_avif_scalar_recon *rc,
 static void stb_avif_recon_predict_txb_luma(struct stb_avif_scalar_recon *rc, int x4, int y4, int tx);
 static void stb_avif_recon_predict_txb_chroma(struct stb_avif_scalar_recon *rc, int pl, int x4, int y4, int tx);
 
-static void stb_avif_extend_right_edge_u16(stbv_u16 *plane, int stride,
-                                           int frame_w, int frame_h,
-                                           int x4, int y4, int tx)
-{
-    int x0 = x4 << 2;
-    int y0 = y4 << 2;
-    int tw = stbv_av1_tx_dims[tx].w << 2;
-    int th = stbv_av1_tx_dims[tx].h << 2;
-    int aw = stride;
-    int yy, xx;
-    if (!plane || x0 + tw < frame_w || x0 >= aw || y0 >= frame_h)
-        return;
-    if (y0 + th > frame_h) th = frame_h - y0;
-    for (yy = 0; yy < th; yy++) {
-        stbv_u16 v = plane[(size_t)(y0 + yy) * stride + frame_w - 1];
-        for (xx = frame_w; xx < aw; xx++)
-            plane[(size_t)(y0 + yy) * stride + xx] = v;
-    }
-}
-
 static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, int eob, stbv_i32 *cf)
 {
     struct stb_avif_scalar_recon *rc;
@@ -15786,8 +15784,10 @@ static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, 
                 }
         }
     }
-    stb_avif_extend_right_edge_u16(rc->plane_y, rc->stride_y,
-                                   rc->frame_w, rc->frame_h, x4, y4, tx);
+    /* NOTE: no right-edge replicate fill here.  Prediction + residual
+     * above already wrote true reconstructed content into the padded
+     * stride (matching dav1d), which the loop filter reads.  Flat
+     * replication would clobber it and diverge right-edge filtering. */
 #endif
 #endif
 }
@@ -15876,7 +15876,7 @@ static void stb_avif_recon_chroma_txb(void *ud, int pl, int x4, int y4, int tx, 
     /* pw unused for clipping now; ph = ALLOCATED chroma rows. */
     pw = (rc->frame_w + rc->ss_hor) >> rc->ss_hor;
     ph = ((rc->frame_h + rc->ss_ver) >> rc->ss_ver) + 32;
-    (void)txw4; (void)txh4;
+    (void)pw; (void)txw4; (void)txh4;
 #ifdef STB_AVIF_PRED_ONLY
     (void)cf; (void)tx; (void)txtp;
 #else
@@ -15909,10 +15909,8 @@ static void stb_avif_recon_chroma_txb(void *ud, int pl, int x4, int y4, int tx, 
         stb_avif_recon_add_res(rc, plane, stride,
                                x4 << 2, y4 << 2, stride, ph + 32,
                                tx, txtp, eob, cf);
-    if (pl == 0)
-        stb_avif_extend_right_edge_u16(rc->plane_u, rc->stride_u, pw, ph, x4, y4, tx);
-    else
-        stb_avif_extend_right_edge_u16(rc->plane_v, rc->stride_v, pw, ph, x4, y4, tx);
+    /* NOTE: no right-edge replicate fill (see luma_txb note): the padded
+     * stride already holds true reconstructed content. */
     if (pl == 0 && rc->lf_blkid_c && rc->has_chroma) {
         /* record this chroma txb's own extent (mapped to luma units);
          * identity = chroma-plane origin so chroma-internal boundaries
@@ -16115,8 +16113,8 @@ static void stb_avif_recon_luma_pal(void *ud, const stbv_u8 *idx, int sz, int bw
     y = rc->cur_by4 << 2;
     w = bw4 << 2;
     h = bh4 << 2;
-    cw = rc->frame_w - x; if (cw > w) cw = w;
-    ch = rc->frame_h - y; if (ch > h) ch = h;
+    cw = rc->stride_y - x; if (cw > w) cw = w;
+    ch = (rc->frame_h + 64) - y; if (ch > h) ch = h;
     for (i = 0; i < ch; i++)
         for (j = 0; j < cw; j++) {
             int id = idx[i * w + j];
@@ -16158,8 +16156,9 @@ static void stb_avif_recon_chroma_pal(void *ud, int pl, const stbv_u8 *idx, int 
     plane = pl == 0 ? rc->plane_u : rc->plane_v;
     stride = pl == 0 ? rc->stride_u : rc->stride_v;
     if (!plane) return;
-    cw = (((rc->frame_w + rc->ss_hor) >> rc->ss_hor)) - x; if (cw > w) cw = w;
-    ch = (((rc->frame_h + rc->ss_ver) >> rc->ss_ver)) - y; if (ch > h) ch = h;
+    cw = stride - x; if (cw > w) cw = w;
+    ch = ((((rc->frame_h + rc->ss_ver) >> rc->ss_ver)) + 32) - y;
+    if (ch > h) ch = h;
     for (i = 0; i < ch; i++)
         for (j = 0; j < cw; j++) {
             int id = idx[i * w + j];
