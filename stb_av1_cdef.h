@@ -431,13 +431,8 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                             int abs_row8 = (by + ly) >> 3;
                             int abs_col8 = (bx + lx) >> 3;
                             int byte_idx = abs_row8 * noskip_stride + sb64_x;
-                            if (!(noskip_mask[byte_idx] & (1 << (abs_col8 & 7)))) {
-#ifdef STB_AVIF_DUMP_CDEF
-                                fprintf(stderr, "CDEFSKIP bx=%d by=%d idx=%d\n",
-                                        bx + lx, by + ly, cdef_idx);
-#endif
+                            if (!(noskip_mask[byte_idx] & (1 << (abs_col8 & 7))))
                                 continue;
-                            }
                         }
                         if (ly > 0) bedges |= CDEF_HAVE_TOP;
                         if (ly + 8 < bh) bedges |= CDEF_HAVE_BOTTOM;
@@ -454,12 +449,6 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                          * the secondary-only call takes a literal dir of 0. */
                         if (y_pri_lvl) {
                             if (block_y_pri_lvl || y_sec_lvl) {
-#ifdef STB_AVIF_DUMP_CDEF
-                                fprintf(stderr, "CDEF8 bx=%d by=%d idx=%d dir=%d var=%u adj=%d sec=%d\n",
-                                        bx + lx, by + ly, cdef_idx,
-                                        block_dir, block_var,
-                                        block_y_pri_lvl, y_sec_lvl);
-#endif
                                 stb_av1_cdef_filter_block(
                                     src_y, stride_y, plane_y, stride_y,
                                     bx + lx, by + ly,
@@ -469,11 +458,6 @@ static void stb_av1_cdef_frame(stbv_u16 *plane_y, stbv_u16 *plane_u,
                                     bitdepth_min_8);
                             }
                         } else if (y_sec_lvl) {
-#ifdef STB_AVIF_DUMP_CDEF
-                            fprintf(stderr, "CDEF8 bx=%d by=%d idx=%d dir=0 var=%u adj=0 sec=%d\n",
-                                    bx + lx, by + ly, cdef_idx,
-                                    block_var, y_sec_lvl);
-#endif
                             stb_av1_cdef_filter_block(
                                 src_y, stride_y, plane_y, stride_y,
                                 bx + lx, by + ly,

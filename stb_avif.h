@@ -2411,14 +2411,16 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
             }
         }
         if (skip && has_chroma && rc->lf_blkid_c && bw4 > 0 && bh4 > 0) {
+            /* Chroma id origin is in chroma units, but map cells are in
+             * luma 4x4 units (like the txb/palette writers): cover the
+             * block's full luma extent.  Skip blocks have no inner
+             * chroma edges, so one id covers the whole block. */
             int cbx4 = bx4 >> ss_h;
             int cby4 = by4 >> ss_v;
-            int cbw4_u = (bw4 + ss_h) >> ss_h;
-            int cbh4_u = (bh4 + ss_v) >> ss_v;
             int ii, jj;
-            for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
-                for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
-                    size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
+            for (ii = 0; ii < bh4 && (by4 + ii) < rc->lf_maph4; ii++)
+                for (jj = 0; jj < bw4 && (bx4 + jj) < rc->lf_mapw4; jj++) {
+                    size_t off = (size_t)(by4 + ii) * rc->lf_b4stride + (bx4 + jj);
                     rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
                     rc->lf_txlw_c[off] = (stbv_u8)uv_wh;
                 }
@@ -2481,12 +2483,10 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
     if (skip && has_chroma && rc->lf_blkid_c && rc->cur_bw4 > 0 && rc->cur_bh4 > 0) {
         int cbx4 = bx4 >> rc->ss_hor;
         int cby4 = by4 >> rc->ss_ver;
-        int cbw4_u = (rc->cur_bw4 + rc->ss_hor) >> rc->ss_hor;
-        int cbh4_u = (rc->cur_bh4 + rc->ss_ver) >> rc->ss_ver;
         int ii, jj;
-        for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
-            for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
-                size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
+        for (ii = 0; ii < rc->cur_bh4 && (by4 + ii) < rc->lf_maph4; ii++)
+            for (jj = 0; jj < rc->cur_bw4 && (bx4 + jj) < rc->lf_mapw4; jj++) {
+                size_t off = (size_t)(by4 + ii) * rc->lf_b4stride + (bx4 + jj);
                 rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
                 rc->lf_txlw_c[off] = (stbv_u8)uv_wh;
             }
