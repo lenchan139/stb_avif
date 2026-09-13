@@ -155,7 +155,9 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
  *   sharpness   - frame sharpness
  *   is_chroma   - caps filter width at 6
  *   blkid       - per-4x4-unit block-identity map
- *   txlw        - per-4x4-unit log2-width of the covering transform
+ *   txlw        - per-4x4-unit packed transform size: low 3 bits hold
+ *                 the log2 width (for vertical edges), high 3 bits hold
+ *                 the log2 height (for horizontal edges)
  *   b4stride    - row stride of the blkid/txlw maps (4x4 units)
  *   mapw4, maph4 - map extent in 4x4 units
  *   ssx, ssy    - plane subsampling relative to the maps' grid
@@ -217,8 +219,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                 int yl = yy < maph4 ? yy : maph4 - 1;
                 stbv_u32 bl = blkid[(size_t)yl * b4stride + xl_c];
                 stbv_u32 br = blkid[(size_t)yl * b4stride + xr_c];
-                int ll = txlw[(size_t)yl * b4stride + xl_c];
-                int lr = txlw[(size_t)yl * b4stride + xr_c];
+                int ll = txlw[(size_t)yl * b4stride + xl_c] & 7;
+                int lr = txlw[(size_t)yl * b4stride + xr_c] & 7;
                 if (bl != br || ll != lr) {
                     int bucket = ll < lr ? ll : lr;
                     ptrdiff_t sb_p = 1;
@@ -267,8 +269,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                 int xt_c = xx < mapw4 ? xx : mapw4 - 1;
                 stbv_u32 bu = blkid[(size_t)yt_c * b4stride + xt_c];
                 stbv_u32 bd = blkid[(size_t)yb_c * b4stride + xt_c];
-                int lu = txlw[(size_t)yt_c * b4stride + xt_c];
-                int ld = txlw[(size_t)yb_c * b4stride + xt_c];
+                int lu = (txlw[(size_t)yt_c * b4stride + xt_c] >> 3) & 7;
+                int ld = (txlw[(size_t)yb_c * b4stride + xt_c] >> 3) & 7;
                 if (bu != bd || lu != ld) {
                     int bucket = lu < ld ? lu : ld;
                     ptrdiff_t sb_p = stride;
