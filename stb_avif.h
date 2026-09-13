@@ -2237,11 +2237,37 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
     }
 }
 
+/* Mark every 8x8 overlapped by a non-skipped block in the CDEF noskip
+ * mask (dav1d decode_b: per-4x4 bits for !skip blocks).  Layout: one
+ * byte per (8x8-row, 64px-column); bit (c8 & 7) covers 8x8 column c8.
+ * Each overlapped 8x8 is filed under its OWN row/SB (blocks may span
+ * SB boundaries). */
+static void stb_avif_cdef_mark_noskip(struct stb_avif_scalar_recon *rc,
+                                      int bx4, int by4, int bw4, int bh4)
+{
+    int sb_cols = (rc->above_n + 15) / 16;
+    int r8_start = by4 >> 1;
+    int r8_end = (by4 + bh4 - 1) >> 1;
+    int col_start8 = bx4 >> 1;
+    int col_end8 = (bx4 + bw4 - 1) >> 1;
+    int r8, c8;
+    if (!rc->cdef_noskip_mask) return;
+    for (r8 = r8_start; r8 <= r8_end; r8++)
+        for (c8 = col_start8; c8 <= col_end8; c8++) {
+            int byte_idx = r8 * sb_cols + (c8 >> 3);
+            rc->cdef_noskip_mask[byte_idx] |= (stbv_u8)(1u << (c8 & 7));
+        }
+}
+
 static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int by4, int has_chroma, int cbw4, int cbh4, int uv_tx, int tx0, int pal_sz_y, int pal_sz_uv, int skip, int y_mode, int y_angle, int uv_mode, int uv_angle, int cfl_alpha_u, int cfl_alpha_v, int ibc_mv_y, int ibc_mv_x, int seg_id)
 {
     struct stb_avif_scalar_recon *rc;
     int bw4, bh4;
-    (void)cbw4; (void)cbh4; (void)uv_tx;
+    int uv_valid = (uv_tx >= 0 && uv_tx < STBV_AV1_N_TX_SIZES);
+    int uv_lw = uv_valid ? stbv_av1_tx_dims[uv_tx].lw : 0;
+    int uv_lh = uv_valid ? stbv_av1_tx_dims[uv_tx].lh : 0;
+    int uv_wh = uv_lw | (uv_lh << 3);
+    (void)cbw4; (void)cbh4;
     (void)pal_sz_y; (void)pal_sz_uv;
     rc = (struct stb_avif_scalar_recon *)ud;
     if (!rc) return;
@@ -2389,17 +2415,12 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
             int cby4 = by4 >> ss_v;
             int cbw4_u = (bw4 + ss_h) >> ss_h;
             int cbh4_u = (bh4 + ss_v) >> ss_v;
-            int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
-                            stbv_av1_tx_dims[tx0].lw : 0;
-            int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
-                            stbv_av1_tx_dims[tx0].lh : 0;
-            int txwh_skip = txlw_skip | (txlh_skip << 3);
             int ii, jj;
             for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
                 for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
                     size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
                     rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
-                    rc->lf_txlw_c[off] = (stbv_u8)txwh_skip;
+                    rc->lf_txlw_c[off] = (stbv_u8)uv_wh;
                 }
         }
         return;
@@ -2413,25 +2434,10 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
     rc->cfl_alpha_v = cfl_alpha_v;
     rc->block_skip = skip;
     rc->has_chroma = has_chroma;
-    /* Populate CDEF noskip_mask: for non-skipped blocks, set bits for each
-     * 8x8 block that overlaps the current 4x4-unit block.
-     * Layout: (sb_rows*8) rows x sb_cols bytes. Row r, SB-column sb_x is
-     * at byte sb_y*sb_cols*8 + r*sb_cols + sb_x, bit = block_col & 7. */
-    if (rc->cdef_noskip_mask) {
-        int sb_cols = (rc->above_n + 15) / 16;
-        int sb64_x = bx4 >> 4;
-        int sb64_y = by4 >> 4;
-        if (!skip) {
-            int row8 = by4 >> 1;  /* absolute 8x8 row in frame */
-            int col_start8 = bx4 >> 1;
-            int col_end8 = (bx4 + bw4 - 1) >> 1;
-            int c8;
-            for (c8 = col_start8; c8 <= col_end8; c8++) {
-                int byte_idx = row8 * sb_cols + sb64_x;
-                rc->cdef_noskip_mask[byte_idx] |= (stbv_u8)(1u << (c8 & 7));
-            }
-        }
-    }
+    /* Populate CDEF noskip_mask for non-skipped blocks (dav1d: every
+     * 4x4 of a !skip block is marked). */
+    if (!skip)
+        stb_avif_cdef_mark_noskip(rc, bx4, by4, bw4, bh4);
     rc->pal_y = pal_sz_y;
     rc->pal_uv = pal_sz_uv;
     /* dav1d predicts PER TRANSFORM so every txb sees freshly reconstructed
@@ -2477,17 +2483,12 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
         int cby4 = by4 >> rc->ss_ver;
         int cbw4_u = (rc->cur_bw4 + rc->ss_hor) >> rc->ss_hor;
         int cbh4_u = (rc->cur_bh4 + rc->ss_ver) >> rc->ss_ver;
-        int txlw_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
-                        stbv_av1_tx_dims[tx0].lw : 0;
-        int txlh_skip = (tx0 >= 0 && tx0 < STBV_AV1_N_TX_SIZES) ?
-                        stbv_av1_tx_dims[tx0].lh : 0;
-        int txwh_skip = txlw_skip | (txlh_skip << 3);
         int ii, jj;
         for (ii = 0; ii < cbh4_u && (cby4 + ii) < rc->lf_maph4; ii++)
             for (jj = 0; jj < cbw4_u && (cbx4 + jj) < rc->lf_mapw4; jj++) {
                 size_t off = (size_t)(cby4 + ii) * rc->lf_b4stride + (cbx4 + jj);
                 rc->lf_blkid_c[off] = ((stbv_u32)cbx4 << 16) | (stbv_u32)cby4;
-                rc->lf_txlw_c[off] = (stbv_u8)txwh_skip;
+                rc->lf_txlw_c[off] = (stbv_u8)uv_wh;
             }
     }
 }

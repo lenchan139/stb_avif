@@ -1836,14 +1836,18 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
      * For palette blocks this still fires but luma_pal/chroma_pal will
      * overwrite the prediction afterwards. */
     if (c.recon && c.recon->block_info) {
-        /* Compute max_tx before block_info so skip blocks get the correct tx0 */
-        int block_max_tx;
-        if (lossless)
+        /* Compute max_tx before block_info so skip blocks get the correct
+         * tx0 (luma) and uv_tx (chroma max, dav1d mask_edges_chroma tx). */
+        int block_max_tx, block_uv_tx;
+        if (lossless) {
             block_max_tx = STBV_AV1_TX_4X4;
-        else
+            block_uv_tx = STBV_AV1_TX_4X4;
+        } else {
             block_max_tx = stbv_av1_max_tx_for_bs[bs][0];
+            block_uv_tx = stbv_av1_max_tx_for_bs[bs][layout];
+        }
         c.recon->block_info(c.recon->ud, intra_flag, bs, bx4, by4,
-                            has_chroma, cbw4, cbh4, 0, block_max_tx,
+                            has_chroma, cbw4, cbh4, block_uv_tx, block_max_tx,
                             state->pal_sz_y, state->pal_sz_uv,
                             (int)block_skip,
                             intra.y_mode, intra.y_angle, intra.uv_mode,
