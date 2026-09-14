@@ -100,6 +100,9 @@ static unsigned char *stb_avif_g_last_yuv_v;
 static int stb_avif_g_last_yuv_stride_y;
 static int stb_avif_g_last_yuv_stride_u;
 static int stb_avif_g_last_yuv_stride_v;
+static int stb_avif_g_last_mono;
+static int stb_avif_g_last_ss_hor;
+static int stb_avif_g_last_ss_ver;
 
 /* Returns the 8-bit alpha plane (w-strided) decoded from the AVIF
  * auxiliary alpha item of the most recent load, or NULL. */
@@ -121,6 +124,18 @@ static void stb_avif_last_yuv(unsigned char **y, unsigned char **u, unsigned cha
     if (stride_y) *stride_y = stb_avif_g_last_yuv_stride_y;
     if (stride_u) *stride_u = stb_avif_g_last_yuv_stride_u;
     if (stride_v) *stride_v = stb_avif_g_last_yuv_stride_v;
+}
+
+/* Frame properties of the most recent load: monochrome flag and chroma
+ * subsampling shifts (ss_hor/ss_ver are 0/1; both 0 for 4:4:4 and for
+ * monochrome). The YUV planes are always 8-bit; size chroma planes as
+ * uv_w = (w + ss_hor) >> ss_hor, uv_h = (h + ss_ver) >> ss_ver, and
+ * emit Cmono with luma only when mono is set. */
+static void stb_avif_last_frame_info(int *mono, int *ss_hor, int *ss_ver)
+{
+    if (mono) *mono = stb_avif_g_last_mono;
+    if (ss_hor) *ss_hor = stb_avif_g_last_ss_hor;
+    if (ss_ver) *ss_ver = stb_avif_g_last_ss_ver;
 }
 
 const char *stb_avif_failure_reason(void);
@@ -1735,7 +1750,8 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
     *width = pic.p.w;
     *height = pic.p.h;
     *bit_depth = pic.p.bpc;
-    *monochrome = 0;
+    /* Monochrome (I400) has no chroma planes (data[1]/data[2] are NULL). */
+    *monochrome = (pic.p.layout == DAV1D_PIXEL_LAYOUT_I400) ? 1 : 0;
 
     /* Extract colour properties from the decoded sequence header */
     if (pic.seq_hdr) {
@@ -1768,13 +1784,19 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
         *y_plane = (unsigned char *)malloc((size_t)(*y_stride * *height));
         if (!*y_plane) { dav1d_picture_unref(&pic); dav1d_close(&ctx); return 0; }
 
-        *u_stride = (uv_w + 31) & ~31;
-        *u_plane = (unsigned char *)malloc((size_t)(*u_stride * uv_h));
-        if (!*u_plane) { free(*y_plane); dav1d_picture_unref(&pic); dav1d_close(&ctx); return 0; }
+        *u_plane = NULL;
+        *v_plane = NULL;
+        *u_stride = 0;
+        *v_stride = 0;
+        if (!*monochrome) {
+            *u_stride = (uv_w + 31) & ~31;
+            *u_plane = (unsigned char *)malloc((size_t)(*u_stride * uv_h));
+            if (!*u_plane) { free(*y_plane); dav1d_picture_unref(&pic); dav1d_close(&ctx); return 0; }
 
-        *v_stride = *u_stride;
-        *v_plane = (unsigned char *)malloc((size_t)(*v_stride * uv_h));
-        if (!*v_plane) { free(*y_plane); free(*u_plane); dav1d_picture_unref(&pic); dav1d_close(&ctx); return 0; }
+            *v_stride = *u_stride;
+            *v_plane = (unsigned char *)malloc((size_t)(*v_stride * uv_h));
+            if (!*v_plane) { free(*y_plane); free(*u_plane); dav1d_picture_unref(&pic); dav1d_close(&ctx); return 0; }
+        }
     }
 
     /* Copy Y plane (convert from 16-bit/10-bit to 8-bit if needed) */
@@ -1790,8 +1812,8 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
         }
     }
 
-    /* Copy U plane */
-    {
+    /* Copy U plane (absent for monochrome) */
+    if (!*monochrome && *u_plane && pic.data[1]) {
         int uv_h = (*height + (1 << *subsampling_y) - 1) >> *subsampling_y;
         int uv_w = (*width + (1 << *subsampling_x) - 1) >> *subsampling_x;
         for (i = 0; i < uv_h; i++) {
@@ -1807,18 +1829,18 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
         }
     }
 
-    /* Copy V plane */
-    {
+    /* Copy V plane (absent for monochrome) */
+    if (!*monochrome && *v_plane && pic.data[2]) {
         int uv_h = (*height + (1 << *subsampling_y) - 1) >> *subsampling_y;
         int uv_w = (*width + (1 << *subsampling_x) - 1) >> *subsampling_x;
         for (i = 0; i < uv_h; i++) {
             int si;
             for (si = 0; si < uv_w; si++) {
                 if (pic.p.bpc > 8) {
-                    uint16_t *src = (uint16_t *)((uint8_t *)pic.data[2] + i * pic.stride[1]);
+                    uint16_t *src = (uint16_t *)((uint8_t *)pic.data[2] + i * pic.stride[2]);
                     (*v_plane)[i * *v_stride + si] = (unsigned char)(src[si] >> (pic.p.bpc - 8));
                 } else {
-                    (*v_plane)[i * *v_stride + si] = ((unsigned char *)pic.data[2])[i * pic.stride[1] + si];
+                    (*v_plane)[i * *v_stride + si] = ((unsigned char *)pic.data[2])[i * pic.stride[2] + si];
                 }
             }
         }
@@ -4581,6 +4603,9 @@ ivf_decoded:
     stb_avif_g_last_yuv_stride_y = info.stride_y;
     stb_avif_g_last_yuv_stride_u = info.stride_u;
     stb_avif_g_last_yuv_stride_v = info.stride_v;
+    stb_avif_g_last_mono = sh.monochrome ? 1 : 0;
+    stb_avif_g_last_ss_hor = sh.subsampling_x;
+    stb_avif_g_last_ss_ver = sh.subsampling_y;
     info.plane_y = NULL;  /* prevent free — ownership transferred to global */
     info.plane_u = NULL;
     info.plane_v = NULL;
