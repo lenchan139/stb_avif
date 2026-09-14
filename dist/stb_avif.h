@@ -11026,6 +11026,9 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
 {
     const int F = 1 << bd8;
     int i;
+    E <<= bd8;
+    I <<= bd8;
+    H <<= bd8;
 
     for (i = 0; i < 4; i++, dst += stridea) {
         int p6, p5, p4, p3, p2;
@@ -11122,19 +11125,21 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
         } else {
             /* hev branch */
             int hev = abs(p1 - p0) > H || abs(q1 - q0) > H;
-#define STB_DB_ICLIP_DIFF(v) stb_av1_db_iclip((v), -128, 127)
+            int clip_max = (128 << bd8) - 1;
+            int clip_min = -(128 << bd8);
+#define STB_DB_ICLIP_DIFF(v) stb_av1_db_iclip((v), clip_min, clip_max)
             if (hev) {
                 int f = STB_DB_ICLIP_DIFF(p1 - q1);
                 int f1, f2;
                 f = STB_DB_ICLIP_DIFF(3 * (q0 - p0) + f);
-                f1 = ((f + 4) > 127 ? 127 : (f + 4)) >> 3;
-                f2 = ((f + 3) > 127 ? 127 : (f + 3)) >> 3;
+                f1 = ((f + 4) > clip_max ? clip_max : (f + 4)) >> 3;
+                f2 = ((f + 3) > clip_max ? clip_max : (f + 3)) >> 3;
                 dst[strideb * -1] = (stbv_u16)stb_av1_db_iclip(p0 + f2, 0, maxv);
                 dst[strideb * +0] = (stbv_u16)stb_av1_db_iclip(q0 - f1, 0, maxv);
             } else {
                 int f = STB_DB_ICLIP_DIFF(3 * (q0 - p0));
-                int f1 = ((f + 4) > 127 ? 127 : (f + 4)) >> 3;
-                int f2 = ((f + 3) > 127 ? 127 : (f + 3)) >> 3;
+                int f1 = ((f + 4) > clip_max ? clip_max : (f + 4)) >> 3;
+                int f2 = ((f + 3) > clip_max ? clip_max : (f + 3)) >> 3;
                 dst[strideb * -1] = (stbv_u16)stb_av1_db_iclip(p0 + f2, 0, maxv);
                 dst[strideb * +0] = (stbv_u16)stb_av1_db_iclip(q0 - f1, 0, maxv);
                 f = (f1 + 1) >> 1;
