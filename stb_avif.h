@@ -2211,8 +2211,9 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
         for (pl_idx = 0; pl_idx < 2; pl_idx++) {
             stbv_u16 *cur_plane = pl_idx == 0 ? rc->plane_u : rc->plane_v;
             int cur_stride = pl_idx == 0 ? rc->stride_u : rc->stride_v;
-            int cw_p = cur_stride - x; if (cw_p > w) cw_p = w;
-            int ch_p = ((((rc->frame_h + ss_ver) >> ss_ver)) + 32) - y;
+            int cw_p, ch_p;
+            cw_p = cur_stride - x; if (cw_p > w) cw_p = w;
+            ch_p = ((((rc->frame_h + ss_ver) >> ss_ver)) + 32) - y;
             if (ch_p > h) ch_p = h;
             if (cw_p <= 0 || ch_p <= 0) continue;
             cimpl = stbv_av1_prepare_intra_edges_16(cx4, stb_avif_recon_have_left(rc, 0, cx4),
