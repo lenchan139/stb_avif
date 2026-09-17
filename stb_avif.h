@@ -3653,7 +3653,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        recon->ss_hor, recon->ss_ver,
                                        NULL, 0);
             stb_avif_deblock_plane_u16(pv16, tc->stride_v, cw, ch,
-                                       lvl_v ? lvl_v : lvl_u, lvl_v ? lvl_v : lvl_u,
+                                       lvl_v, lvl_v,
                                        sharp, 1, maxv, recon->bit_depth - 8,
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
