@@ -2612,6 +2612,13 @@ static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, 
     rc = (struct stb_avif_scalar_recon *)ud;
     if (!rc) return;
     (void)txw4; (void)txh4;
+    /* dav1d's CFL w_pad/h_pad (recon_tmpl.c:1354) round the clamped block
+     * extent up to b->tx, the DECODED luma tx -- not the block's max tx,
+     * which is all block_info knows (block_info runs before the tx-size
+     * symbol is decoded).  Record the real one here; luma txs are always
+     * decoded before the chroma txs of the same block. */
+    rc->cur_ltw4 = stbv_av1_tx_dims[tx].w;
+    rc->cur_lth4 = stbv_av1_tx_dims[tx].h;
 #ifdef STB_AVIF_PRED_ONLY
     (void)cf; (void)tx; (void)txtp;
 #else
@@ -2895,7 +2902,6 @@ static void stb_avif_recon_predict_txb_chroma(struct stb_avif_scalar_recon *rc,
             int cw4u = rc->cur_bw4, ch4u = rc->cur_bh4;
             int cbw4, cbh4, W, H, i, j;
             const stbv_u16 mx = (stbv_u16)((1 << rc->bit_depth) - 1);
-            (void)fw4; (void)fh4;
             cbw4 = (cw4u + ss_h) >> ss_h;
             cbh4 = (ch4u + ss_v) >> ss_v;
             W = cbw4 << 2;
@@ -2911,15 +2917,34 @@ static void stb_avif_recon_predict_txb_chroma(struct stb_avif_scalar_recon *rc,
                 long acc;
                 if (!rc->cfl_ac_ok || rc->cfl_ac_bx != rc->cur_bx4 ||
                     rc->cfl_ac_by != rc->cur_by4) {
-                    /* w_pad/h_pad from the UV transform dims (dav1d
-                     * furthest_r/furthest_b use b->uvtx's t_dim);
-                     * padded cols replicate. */
-                    int twu = stbv_av1_tx_dims[tx].w;
-                    int thu = stbv_av1_tx_dims[tx].h;
-                    int furthest_r = ((cw4u << ss_h) + twu - 1) & ~(twu - 1);
-                    int furthest_b = ((ch4u << ss_v) + thu - 1) & ~(thu - 1);
-                    int w_pad = cbw4 - (furthest_r >> ss_h);
-                    int h_pad = cbh4 - (furthest_b >> ss_v);
+                    /* dav1d cfl_ac: w_pad/h_pad = how many chroma 4-unit
+                     * columns/rows of the AC array are OUTSIDE the luma
+                     * the decoder actually reconstructs, and are filled by
+                     * replicating the last gathered column/row.
+                     * furthest_r/b round the CLAMPED chroma block extent up
+                     * to the LUMA tx size: the last tx that STARTS inside
+                     * the 8-aligned frame is reconstructed over its full
+                     * extent, but txs beyond it are never decoded, so their
+                     * luma is not valid (dav1d recon_tmpl.c:1354).
+                     * The previous formula used the UNCLIPPED block dims and
+                     * the UV tx size, so w_pad/h_pad came out <= 0 and the
+                     * gather read the zero-filled padding past the 8-aligned
+                     * frame edge (kimono's trailing block columns). */
+                    int w4c = rc->cur_bw4, h4c = rc->cur_bh4;
+                    int cw4c, ch4c, ltw = rc->cur_ltw4, lth = rc->cur_lth4;
+                    int furthest_r, furthest_b, w_pad, h_pad;
+                    if (fw4 - rc->cur_bx4 < w4c) w4c = fw4 - rc->cur_bx4;
+                    if (fh4 - rc->cur_by4 < h4c) h4c = fh4 - rc->cur_by4;
+                    if (w4c < 0) w4c = 0;
+                    if (h4c < 0) h4c = 0;
+                    cw4c = (w4c + ss_h) >> ss_h;
+                    ch4c = (h4c + ss_v) >> ss_v;
+                    if (ltw < 1) ltw = 1;
+                    if (lth < 1) lth = 1;
+                    furthest_r = ((cw4c << ss_h) + ltw - 1) & ~(ltw - 1);
+                    furthest_b = ((ch4c << ss_v) + lth - 1) & ~(lth - 1);
+                    w_pad = cbw4 - (furthest_r >> ss_h);
+                    h_pad = cbh4 - (furthest_b >> ss_v);
                     if (w_pad < 0) w_pad = 0;
                     if (h_pad < 0) h_pad = 0;
                     for (y = 0; y < H - 4 * h_pad; y++) {
