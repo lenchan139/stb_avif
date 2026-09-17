@@ -105,7 +105,9 @@ static int stb_avif_g_last_ss_hor;
 static int stb_avif_g_last_ss_ver;
 
 /* Returns the 8-bit alpha plane (w-strided) decoded from the AVIF
- * auxiliary alpha item of the most recent load, or NULL. */
+ * auxiliary alpha item of the most recent load, or NULL.
+ * The pointer is owned by the library and freed on the next load; do NOT
+ * call stb_avif_free() on it. */
 static unsigned char *stb_avif_last_alpha(int *stride)
 {
     if (stride) *stride = stb_avif_g_last_alpha_stride;
@@ -113,8 +115,9 @@ static unsigned char *stb_avif_last_alpha(int *stride)
 }
 
 /* Returns the 8-bit YUV planes from the most recent load, or NULL.
- * Pointers are owned by the library and freed on the next stb_avif_load()
- * or stb_avif_close(); do NOT call stb_avif_free() on them. */
+ * Pointers are owned by the library and freed on the next
+ * stb_avif_load_from_memory()/stb_avif_load_from_file(); do NOT call
+ * stb_avif_free() on them. */
 static void stb_avif_last_yuv(unsigned char **y, unsigned char **u, unsigned char **v,
                                int *stride_y, int *stride_u, int *stride_v)
 {
@@ -3835,6 +3838,15 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
     if (stb_avif_g_last_yuv_y) { stb_avif_free_internal(stb_avif_g_last_yuv_y); stb_avif_g_last_yuv_y = NULL; }
     if (stb_avif_g_last_yuv_u) { stb_avif_free_internal(stb_avif_g_last_yuv_u); stb_avif_g_last_yuv_u = NULL; }
     if (stb_avif_g_last_yuv_v) { stb_avif_free_internal(stb_avif_g_last_yuv_v); stb_avif_g_last_yuv_v = NULL; }
+
+    /* Free the alpha plane from the previous load as well. Without this the
+     * pointer is overwritten below and the buffer is leaked (w*h bytes per
+     * decode of a file that carries an auxiliary alpha item). */
+    if (stb_avif_g_last_alpha) {
+        stb_avif_free_internal(stb_avif_g_last_alpha);
+        stb_avif_g_last_alpha = NULL;
+    }
+    stb_avif_g_last_alpha_stride = 0;
 
     /* Initialize info struct */
     memset(&info, 0, sizeof(info));
