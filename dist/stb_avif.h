@@ -12563,12 +12563,15 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
 
          /* Bottom context rows (y >= uh) come from lpf (deblocked),
           * source rows come from src (CDEF'd frame).
-          * lpf[r*stride] = frame[r]. Frame row F → lpf[F*stride].
+          * lpf is pre-positioned at row uy0-2, column ux0 by the caller
+          * (same convention as the top-context reads above), so frame row
+          * uy0+y is at lpf + (y + 2)*lpf_stride with NO further column
+          * offset: adding ux0 again would read column 2*ux0.
           * At the frame bottom there is nothing below: replicate the
           * last SRC row instead (dav1d vert_2/odd tails). */
          if (y >= uh) {
              if (uy0 + uh < frame_h)
-                 src_ptr = lpf + (y + 2) * lpf_stride + ux0;
+                 src_ptr = lpf + (y + 2) * lpf_stride;
              else
                  src_ptr = src + (frame_h - 1) * src_stride + ux0;
          } else
@@ -16918,7 +16921,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        recon->ss_hor, recon->ss_ver,
                                        NULL, 0);
             stb_avif_deblock_plane_u16(pv16, tc->stride_v, cw, ch,
-                                       lvl_v ? lvl_v : lvl_u, lvl_v ? lvl_v : lvl_u,
+                                       lvl_v, lvl_v,
                                        sharp, 1, maxv, recon->bit_depth - 8,
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
