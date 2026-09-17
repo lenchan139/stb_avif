@@ -976,27 +976,30 @@ static void stb_avif_parse_meta(struct stb_av1_getbits *gb,
     /* Now read the mdat data */
     {
         size_t saved = stb_av1_getbits_bytepos(gb);
+        const stbv_u64 total = (stbv_u64)stb_av1_getbits_size(gb);
 
         stb_av1_getbits_seek(gb, 0);
         if (stb_avif_find_box(gb, STB_AVIF_BOX_MDAT, 0, NULL)) {
                     info->av1_data = gb->ptr_start + stb_av1_getbits_bytepos(gb);
             info->av1_size = stb_av1_getbits_size(gb) - stb_av1_getbits_bytepos(gb); /* Rest of file is mdat content */
 
-            /* If we have iloc info, use that offset instead */
-            if (data_size > 0 && data_offset > 0) {
+            /* If we have iloc info, use that offset instead.
+             * The extent is only trusted when it lies inside the input buffer:
+             * with a malformed iloc (corrupt offset/length field sizes) the
+             * parsed values point far outside the file and the AV1 parser would
+             * dereference them. */
+            if (data_offset > 0 && (stbv_u64)data_offset <= total &&
+                data_size > 0 && data_size <= total - (stbv_u64)data_offset) {
                 info->av1_data = gb->ptr_start + data_offset;
                 info->av1_size = (size_t)data_size;
             } else {
                 /* Conservative: mdat may contain more than just our image.
                    Use iloc info. But if we don't have it, use all remaining. */
                 /* The actual av1 data starts at data_offset from the beginning of mdat */
-                if (data_offset > 0) {
+                if (data_offset > 0 && (stbv_u64)data_offset <= total) {
                     /* data_offset is absolute in the file */
                     info->av1_data = gb->ptr_start + data_offset;
-                    if (data_size > 0)
-                        info->av1_size = (size_t)data_size;
-                    else
-                        info->av1_size = stb_av1_getbits_size(gb) - data_offset;
+                    info->av1_size = (size_t)(total - (stbv_u64)data_offset);
                 }
             }
         }
