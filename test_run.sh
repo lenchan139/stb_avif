@@ -38,11 +38,11 @@ fi
 if [ -n "$DAV1D_FLAGS" ]; then
     echo "  Building WITH dav1d (correct output)"
 else
-    echo "  Building WITHOUT dav1d (internal decoder - snow)"
+    echo "  Building WITHOUT dav1d (using the built-in scalar decoder)"
 fi
 
 cc -std=c89 -Wall -Wextra ${DAV1D_FLAGS} -o "${SCRIPT_DIR}/test_avif2png" \
-   "${SCRIPT_DIR}/test_avif2png.c" -lm ${DAV1D_LIBS} 2>&1
+   "${SCRIPT_DIR}/test_avif2pnm.c" -lm ${DAV1D_LIBS} 2>&1
 echo "Compilation OK"
 echo
 
