@@ -1253,6 +1253,15 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
                                  (const int *const *)sum3_ptrs,
                                  A3_ptrs[3], B3_ptrs[3], uw);
         stbv_av1_sgr_calc_ab(A3_ptrs[3], B3_ptrs[3], uw, s1, 9, 455);
+        /* dav1d's sgr_box3_vert() rotates the 3x3 horizontal-sum ring as part
+         * of the call (sgr_box3_row_v + sgr_calc_row_ab + rotate(ptrs, 3)).
+         * Without it the r4 row below overwrites the slot still holding row
+         * B's horizontal sums, and the vertical box for the stripe's last
+         * output row reads rows (B-2, B-1, B+1) instead of (B-1, B, B+1).
+         * The main loop above rotates explicitly after every row_v; this
+         * branch has to do the same. */
+        stbv_av1_rotate3(sumsq3_ptrs);
+        stbv_av1_rotate3(sum3_ptrs);
         stbv_av1_rotate4(A3_ptrs);
         stbv_av1_rotate4(B3_ptrs);
         stbv_av1_sgr_box5_row_h(sumsq5_ptrs[4], sum5_ptrs[4], r4, ew, ux0);
