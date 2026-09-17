@@ -16,7 +16,7 @@
  *   To use it, #define STB_AVIF_IMPLEMENTATION in exactly one C file
  *   that includes this header.
  *
- *   Example (without dav1d, internal decoder produces garbage/snow):
+ *   Example (without dav1d, internal decoder is used):
  *      #define STB_AVIF_IMPLEMENTATION
  *      #include "stb_avif.h"
  *      ...
@@ -105,7 +105,9 @@ static int stb_avif_g_last_ss_hor;
 static int stb_avif_g_last_ss_ver;
 
 /* Returns the 8-bit alpha plane (w-strided) decoded from the AVIF
- * auxiliary alpha item of the most recent load, or NULL. */
+ * auxiliary alpha item of the most recent load, or NULL.
+ * The pointer is owned by the library and freed on the next load; do NOT
+ * call stb_avif_free() on it. */
 static unsigned char *stb_avif_last_alpha(int *stride)
 {
     if (stride) *stride = stb_avif_g_last_alpha_stride;
@@ -113,8 +115,9 @@ static unsigned char *stb_avif_last_alpha(int *stride)
 }
 
 /* Returns the 8-bit YUV planes from the most recent load, or NULL.
- * Pointers are owned by the library and freed on the next stb_avif_load()
- * or stb_avif_close(); do NOT call stb_avif_free() on them. */
+ * Pointers are owned by the library and freed on the next
+ * stb_avif_load_from_memory()/stb_avif_load_from_file(); do NOT call
+ * stb_avif_free() on them. */
 static void stb_avif_last_yuv(unsigned char **y, unsigned char **u, unsigned char **v,
                                int *stride_y, int *stride_u, int *stride_v)
 {
@@ -10379,13 +10382,13 @@ static int stb_av1_parse_tile_group(const struct stb_av1_framehdr *fh,
         if (i != end) {
             sz = 0;
             if ((size_t)(pend - p) < tile_size_bytes) {
-                fprintf(stderr, "TG_FAIL: tile %u not enough bytes for size (%zu < %u)\n", i, (size_t)(pend - p), tile_size_bytes);
+                fprintf(stderr, "TG_FAIL: tile %u not enough bytes for size (%lu < %u)\n", i, (unsigned long)(pend - p), tile_size_bytes);
                 return -1;
             }
             for (k = 0; k < tile_size_bytes; k++) sz |= (size_t)p[k] << (k * 8);
             sz += 1; p += tile_size_bytes;
             if (sz > (size_t)(pend - p)) {
-                fprintf(stderr, "TG_FAIL: tile %u size %zu > remaining %zu\n", i, sz, (size_t)(pend - p));
+                fprintf(stderr, "TG_FAIL: tile %u size %lu > remaining %lu\n", i, (unsigned long)sz, (unsigned long)(pend - p));
                 return -1;
             }
         } else sz = (size_t)(pend - p);
@@ -14258,27 +14261,30 @@ static void stb_avif_parse_meta(struct stb_av1_getbits *gb,
     /* Now read the mdat data */
     {
         size_t saved = stb_av1_getbits_bytepos(gb);
+        const stbv_u64 total = (stbv_u64)stb_av1_getbits_size(gb);
 
         stb_av1_getbits_seek(gb, 0);
         if (stb_avif_find_box(gb, STB_AVIF_BOX_MDAT, 0, NULL)) {
                     info->av1_data = gb->ptr_start + stb_av1_getbits_bytepos(gb);
             info->av1_size = stb_av1_getbits_size(gb) - stb_av1_getbits_bytepos(gb); /* Rest of file is mdat content */
 
-            /* If we have iloc info, use that offset instead */
-            if (data_size > 0 && data_offset > 0) {
+            /* If we have iloc info, use that offset instead.
+             * The extent is only trusted when it lies inside the input buffer:
+             * with a malformed iloc (corrupt offset/length field sizes) the
+             * parsed values point far outside the file and the AV1 parser would
+             * dereference them. */
+            if (data_offset > 0 && (stbv_u64)data_offset <= total &&
+                data_size > 0 && data_size <= total - (stbv_u64)data_offset) {
                 info->av1_data = gb->ptr_start + data_offset;
                 info->av1_size = (size_t)data_size;
             } else {
                 /* Conservative: mdat may contain more than just our image.
                    Use iloc info. But if we don't have it, use all remaining. */
                 /* The actual av1 data starts at data_offset from the beginning of mdat */
-                if (data_offset > 0) {
+                if (data_offset > 0 && (stbv_u64)data_offset <= total) {
                     /* data_offset is absolute in the file */
                     info->av1_data = gb->ptr_start + data_offset;
-                    if (data_size > 0)
-                        info->av1_size = (size_t)data_size;
-                    else
-                        info->av1_size = stb_av1_getbits_size(gb) - data_offset;
+                    info->av1_size = (size_t)(total - (stbv_u64)data_offset);
                 }
             }
         }
@@ -16464,7 +16470,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     int cdef_grid_stride = 0;
     stbv_u8 *cdef_noskip_mask = 0;
     int cdef_noskip_stride = 0;
-    stbv_av1_lr_mask lr_mask;
+    stbv_av1_lr_mask lr_mask = {0};
     int lr_mask_ok = 0;
     int bw8al, bh8al;
     stbv_u8 *above_cre0 = 0, *above_cre1 = 0, *left_cre0 = 0, *left_cre1 = 0;
@@ -17114,6 +17120,15 @@ unsigned char *stb_avif_load_from_memory(const unsigned char *data, int len,
     if (stb_avif_g_last_yuv_y) { stb_avif_free_internal(stb_avif_g_last_yuv_y); stb_avif_g_last_yuv_y = NULL; }
     if (stb_avif_g_last_yuv_u) { stb_avif_free_internal(stb_avif_g_last_yuv_u); stb_avif_g_last_yuv_u = NULL; }
     if (stb_avif_g_last_yuv_v) { stb_avif_free_internal(stb_avif_g_last_yuv_v); stb_avif_g_last_yuv_v = NULL; }
+
+    /* Free the alpha plane from the previous load as well. Without this the
+     * pointer is overwritten below and the buffer is leaked (w*h bytes per
+     * decode of a file that carries an auxiliary alpha item). */
+    if (stb_avif_g_last_alpha) {
+        stb_avif_free_internal(stb_avif_g_last_alpha);
+        stb_avif_g_last_alpha = NULL;
+    }
+    stb_avif_g_last_alpha_stride = 0;
 
     /* Initialize info struct */
     memset(&info, 0, sizeof(info));
