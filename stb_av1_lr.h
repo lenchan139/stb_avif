@@ -647,7 +647,7 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
           * last SRC row instead (dav1d vert_2/odd tails). */
          if (y >= uh) {
              if (uy0 + uh < frame_h)
-                 src_ptr = lpf + row_clamped * lpf_stride + ux0;
+                 src_ptr = lpf + (y + 2) * lpf_stride + ux0;
              else
                  src_ptr = src + (frame_h - 1) * src_stride + ux0;
          } else

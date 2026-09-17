@@ -2387,6 +2387,14 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
             int ch4 = (bh4 + ss_v) >> ss_v;
             int cpw = cw4 << 2;
             int cph = ch4 << 2;
+            /* Intrabc prediction is inter prediction at the signalled MV
+             * (dav1d recon_tmpl.c:1584-1595 -> mc() with FILTER_2D_BILINEAR).
+             * MVs are integer in LUMA samples only, so the chroma displacement
+             * can be fractional: 4:2:0/4:2:2 halve it and a luma-odd MV is a
+             * half-pel chroma offset.  dav1d: dx = bx*(4>>ss) + (mv>>(3+ss)),
+             * filter fraction (mv & (15>>!ss)) << !ss in 1/16 chroma-px units. */
+            int fx = (ibc_mv_x & (15 >> !ss_h)) << !ss_h;
+            int fy = (ibc_mv_y & (15 >> !ss_v)) << !ss_v;
             int j;
             if (cx_src < 0) { cpw += cx_src; cx_src = 0; }
             if (cy_src < 0) { cph += cy_src; cy_src = 0; }
@@ -2404,10 +2412,36 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                 ccw = stride - cx_dst; if (ccw > spw) ccw = spw;
                 cch = ch_h - cy_dst; if (cch > sph) cch = sph;
                 if (ccw > 0 && cch > 0) {
-                    for (i = 0; i < cch; i++)
-                        memmove(plane + (size_t)(cy_dst + i) * stride + cx_dst,
-                               plane + (size_t)(cy_src + i) * stride + cx_src,
-                               (size_t)ccw * sizeof(stbv_u16));
+                    if (!fx && !fy) {
+                        for (i = 0; i < cch; i++)
+                            memmove(plane + (size_t)(cy_dst + i) * stride + cx_dst,
+                                   plane + (size_t)(cy_src + i) * stride + cx_src,
+                                   (size_t)ccw * sizeof(stbv_u16));
+                    } else {
+                        /* Bilinear (dav1d put_bilin).  Stage the row: src and dst
+                         * are the same plane and may overlap (e.g. dy = -1). */
+                        stbv_u16 rowbuf[130];   /* max chroma block width is 128 */
+                        int row;
+                        for (row = 0; row < cch; row++) {
+                            const stbv_u16 *s0 =
+                                plane + (size_t)(cy_src + row) * stride + cx_src;
+                            const stbv_u16 *s1 =
+                                (fy && cy_src + row + 1 < ch_h) ? s0 + stride : s0;
+                            for (i = 0; i < ccw; i++) {
+                                int a = s0[i], b, c, d, h0, h1;
+                                b = (fx && cx_src + i + 1 < stride) ? s0[i + 1] : a;
+                                c = (fy) ? s1[i] : a;
+                                d = (fy) ? ((fx && cx_src + i + 1 < stride) ?
+                                            s1[i + 1] : c) : b;
+                                h0 = a * (16 - fx) + b * fx;
+                                h1 = c * (16 - fx) + d * fx;
+                                rowbuf[i] = (stbv_u16)((h0 * (16 - fy) +
+                                                        h1 * fy + 128) >> 8);
+                            }
+                            memcpy(plane + (size_t)(cy_dst + row) * stride + cx_dst,
+                                   rowbuf, (size_t)ccw * sizeof(stbv_u16));
+                        }
+                    }
                 }
             }
         }
