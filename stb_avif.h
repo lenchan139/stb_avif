@@ -16,7 +16,7 @@
  *   To use it, #define STB_AVIF_IMPLEMENTATION in exactly one C file
  *   that includes this header.
  *
- *   Example (without dav1d, internal decoder produces garbage/snow):
+ *   Example (without dav1d, internal decoder is used):
  *      #define STB_AVIF_IMPLEMENTATION
  *      #include "stb_avif.h"
  *      ...

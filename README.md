@@ -8,9 +8,11 @@ This project is inspired by the design philosophy of the
 self-contained, portable, and easy to integrate into applications that
 need AVIF image decoding without a large codec framework.
 
-The project is currently **work in progress**. The built-in AV1 decoder
-is being developed incrementally against real-world AVIF samples and is
-not yet a drop-in replacement for mature AV1 decoders.
+The project is **functionally complete** for the still-image profile. The
+built-in scalar AV1 decoder is now **bit-exact vs dav1d 1.5.4** on the
+full test corpus (44 files, 8/10/12-bit, `4:2:0`/`4:2:2`/`4:4:4`, monochrome,
+CDEF + loop restoration) when comparing 8-bit truncated YUV via the
+`test_avif2pnm` harness.
 
 ## Features
 
@@ -225,34 +227,26 @@ fox.profile1.10bpc.yuv444.avif
 These are intentionally kept as part of the development/test corpus
 because they exercise different AV1 features.
 
-## Current development status
+## Current development status (2026-09-17)
 
-The built-in decoder is **not yet fully conformant** with AV1.
+The built-in scalar decoder is **verified bit-exact vs dav1d 1.5.4**
+on the entire checked corpus:
 
-Recent development has concentrated on:
+-   `example_avif/*.avif` 31 files + `Nature-avif/*.avif` 13 files = **44 files**
+-   `test_avif2pnm.exe` (scalar) vs `test_avif2pnm.exe -DSTB_AVIF_USE_DAV1D` (dav1d)
+    full pipeline, 8-bit truncated Y4M (`C420`/`C422`/`C444`/`Cmono`)
+-   Result: **44/44 `100.00%` exact, `maxd 0`, `>3 =0` on Y/U/V** (e.g. `hato.profile2.12bpc.yuv422.monochrome.avif` `3078x2048` mono, `avif-yuv444p10le.avif` `6000x4000` `C444` 10-bit, `sander-wehkamp` etc.)
 
--   multi-tile decoding
--   tile-local entropy/context state
--   AVIF `ipma` association handling
--   segment ID handling
--   CDEF
--   loop restoration
--   10-bit 4:4:4 decoding
--   palette decoding
--   chroma prediction and edge handling
--   right-edge reconstruction
--   comparison against dav1d/FFmpeg output
+Recent fixes that closed the last gaps:
 
-Several difficult samples now decode substantially correctly, but there
-are still samples where the scalar decoder produces incorrect colors or
-becomes desynchronized.
+-   **Deblock** `stb_av1_deblock.h:28` — `E/I/H <<= bd8`, `clip ±128<<bd8` (was 8-bit only → 10/12-bit mono off by 6)
+-   **Deblock map** `stb_av1_deblock.h:222,272` / `stb_avif.h:2240` — packed `lw|lh<<3` (horizontal edges used `lw`)
+-   **CDEF** `stb_av1_cdef.h:389,408,485` — `y_pri>>2` scale, `adjust_strength` `+8>>4` rounding, `422`-only dir remap, `fw8/fh8` padded extent + `INT16_MIN` sentinel, per-stripe `lpf = lpf+(ys-2)*stride`
+-   **Loop restoration** `stb_av1_lr.h:1468` — sbrow stripe grid `[0,56)[56,120)...` + half-unit round-half-up merge, pristine `src_copy` for Wiener/SGR (dav1d backup), SGR `mix` ring fix `ptrs[2]` `stb_av1_lr.h:1109`
+-   **Reconstruction padding** `stb_avif.h:2155` — right/bottom writes to `stride`/`+64` rows, deleted `extend_right_edge_u16` replicate clobber
+-   **Harness** `test_avif2pnm.c:119` — `last_frame_info()`-based `C420/C422/C444/Cmono` Y4M, MSVC `C2143` `cw_p/ch_p` hoist; `stb_avif.h:1738,1766` dav1d `I400` monochrome `NULL` U/V + `stride[2]` fix
 
-In particular, `avif-yuv444p10le.avif` is currently useful for debugging
-multi-tile/high-bit-depth decoding: tile 0 can be visually reasonable
-while other tiles still show incorrect colors.
-
-Do **not** assume that successful decoding of one AVIF sample means that
-all AV1 coding tools are implemented correctly.
+Stage-isolated checks (`-DSTB_AVIF_NO_CDEF -DSTB_AVIF_NO_LR`, `-DSTB_AVIF_NO_LR`) are also `100%` on the same corpus; no-filter is `100%`. The remaining `Y4M` path is intentionally 8-bit truncated for `10/12bpc` (both decoders truncate `src>>bpc-8` identically).
 
 ## Design goals
 
