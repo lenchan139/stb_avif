@@ -1588,13 +1588,30 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
             if (bw4 > 16) state->cdef_idx[idx + 1] = v;
             if (bh4 > 16) state->cdef_idx[idx + 2] = v;
             if (bw4 == 32 && bh4 == 32) state->cdef_idx[idx + 3] = v;
-            /* Write to cdef_idx output grid for post-decode CDEF filtering. */
+            /* Write to cdef_idx output grid for post-decode CDEF filtering.
+             * dav1d stores the coded value in every 64x64 slot the block
+             * covers (decode.c:951-954: idx+1 when bw4 > 16, idx+2 when
+             * bh4 > 16, idx+3 for a full 128x128 superblock) and its apply
+             * stage reads exactly those slots (cdef_apply_tmpl.c:148-149).
+             * Writing only slot idx leaves the propagated quadrants at -1,
+             * and stb_av1_cdef_frame then skips those whole 64x64 blocks.
+             * bw4/bh4 are already clipped to the frame extent here, which
+             * keeps every propagated quadrant inside the 64x64-aligned
+             * grid (a block with bh4 > 16 has >= 64 px of itself inside
+             * the frame below its origin). */
             if (state->cdef_idx_grid && state->cdef_grid_stride > 0) {
-                int gx = sbx / 16 + (idx & 1);
-                int gy = sby / 16 + (idx >> 1);
-                if (gx >= 0 && gx < state->cdef_grid_stride &&
-                    gy >= 0)
-                    state->cdef_idx_grid[gy * state->cdef_grid_stride + gx] = v;
+                int q[4], nq = 1, qi;
+                q[0] = idx;
+                if (bw4 > 16) q[nq++] = idx + 1;
+                if (bh4 > 16) q[nq++] = idx + 2;
+                if (bw4 == 32 && bh4 == 32) q[nq++] = idx + 3;
+                for (qi = 0; qi < nq; qi++) {
+                    int gx = sbx / 16 + (q[qi] & 1);
+                    int gy = sby / 16 + (q[qi] >> 1);
+                    if (gx >= 0 && gx < state->cdef_grid_stride && gy >= 0)
+                        state->cdef_idx_grid[
+                            gy * state->cdef_grid_stride + gx] = v;
+                }
             }
         }
     }
