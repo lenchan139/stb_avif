@@ -66,13 +66,13 @@ static int stb_av1_parse_tile_group(const struct stb_av1_framehdr *fh,
         if (i != end) {
             sz = 0;
             if ((size_t)(pend - p) < tile_size_bytes) {
-                fprintf(stderr, "TG_FAIL: tile %u not enough bytes for size (%zu < %u)\n", i, (size_t)(pend - p), tile_size_bytes);
+                fprintf(stderr, "TG_FAIL: tile %u not enough bytes for size (%lu < %u)\n", i, (unsigned long)(pend - p), tile_size_bytes);
                 return -1;
             }
             for (k = 0; k < tile_size_bytes; k++) sz |= (size_t)p[k] << (k * 8);
             sz += 1; p += tile_size_bytes;
             if (sz > (size_t)(pend - p)) {
-                fprintf(stderr, "TG_FAIL: tile %u size %zu > remaining %zu\n", i, sz, (size_t)(pend - p));
+                fprintf(stderr, "TG_FAIL: tile %u size %lu > remaining %lu\n", i, (unsigned long)sz, (unsigned long)(pend - p));
                 return -1;
             }
         } else sz = (size_t)(pend - p);
