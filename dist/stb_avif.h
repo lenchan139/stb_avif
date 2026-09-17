@@ -13191,6 +13191,15 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
                                  (const int *const *)sum3_ptrs,
                                  A3_ptrs[3], B3_ptrs[3], uw);
         stbv_av1_sgr_calc_ab(A3_ptrs[3], B3_ptrs[3], uw, s1, 9, 455);
+        /* dav1d's sgr_box3_vert() rotates the 3x3 horizontal-sum ring as part
+         * of the call (sgr_box3_row_v + sgr_calc_row_ab + rotate(ptrs, 3)).
+         * Without it the r4 row below overwrites the slot still holding row
+         * B's horizontal sums, and the vertical box for the stripe's last
+         * output row reads rows (B-2, B-1, B+1) instead of (B-1, B, B+1).
+         * The main loop above rotates explicitly after every row_v; this
+         * branch has to do the same. */
+        stbv_av1_rotate3(sumsq3_ptrs);
+        stbv_av1_rotate3(sum3_ptrs);
         stbv_av1_rotate4(A3_ptrs);
         stbv_av1_rotate4(B3_ptrs);
         stbv_av1_sgr_box5_row_h(sumsq5_ptrs[4], sum5_ptrs[4], r4, ew, ux0);
@@ -16466,6 +16475,18 @@ static void stb_av1_calc_lf_values(stbv_u8 lflvl[8][4][8][2],
             if (bseg < 0) bseg = 0;
             if (bseg > 63) bseg = 63;
 
+            /* dav1d's calc_lf_value_chroma(): a chroma direction whose *header*
+             * level is 0 yields an all-zero table -- the mode/ref deltas are
+             * not applied to it at all.  (app_2048: level_u = 1, level_v = 0,
+             * so V must stay at 0 rather than becoming ref_delta[0] = 1.) */
+            if (dir >= 2 && !(dir == 2 ? hdr->loopfilter.level_u
+                                       : hdr->loopfilter.level_v)) {
+                for (ref = 0; ref < 8; ref++)
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++)
+                        lflvl[s][dir][ref][is_gmv] = 0;
+                continue;
+            }
+
             if (!ref_delta) {
                 for (ref = 0; ref < 8; ref++)
                     for (is_gmv = 0; is_gmv < 2; is_gmv++)
@@ -16902,22 +16923,21 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
 #ifdef STB_AVIF_DEBLOCK
     if (!r) {
         const struct stb_av1_framehdr *fh = &stream->frame;
-        int lvl_yv = (int)fh->loopfilter.level_y[0];
-        int lvl_yh = (int)fh->loopfilter.level_y[1];
-        int lvl_u = (int)fh->loopfilter.level_u;
-        int lvl_v = (int)fh->loopfilter.level_v;
+        /* Per-direction frame levels, exactly the values dav1d uses
+         * (`f->lf.lvl`, filled by dav1d_calc_lf_values with a zero lf_delta)
+         * and exactly what `lf_level_map` already holds per block.  Deriving
+         * them from the raw header fields plus an ad-hoc ref_delta application
+         * is not equivalent: a direction whose header level is 0 can still come
+         * out nonzero once ref_delta[0] is added (app_2048 has level_y[1] = 0
+         * in the header but 1 in the LUT), and this scalar gates whether the
+         * whole pass runs.  dav1d runs both luma passes unconditionally
+         * (dav1d_loopfilter_sbrow_rows has no level_y[1] test). */
+        int lvl_yv = (int)recon->lf_lut[0][0][0][0];
+        int lvl_yh = (int)recon->lf_lut[0][1][0][0];
+        int lvl_u = (int)recon->lf_lut[0][2][0][0];
+        int lvl_v = (int)recon->lf_lut[0][3][0][0];
         int sharp = (int)fh->loopfilter.sharpness;
         int maxv = (1 << recon->bit_depth) - 1;
-        /* Apply mode/ref deltas (dav1d_calc_lf_values equivalent for key frames).
-         * For intra blocks (all blocks in key frames): level += ref_delta[0] * (1 << sh)
-         * where sh = (base >= 32). This matches dav1d's per-block level computation. */
-        if (fh->loopfilter.mode_ref_delta_enabled) {
-            int sh;
-            if (lvl_yv) { sh = lvl_yv >= 32; lvl_yv = stb_av1_db_iclip(lvl_yv + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_yh) { sh = lvl_yh >= 32; lvl_yh = stb_av1_db_iclip(lvl_yh + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_u) { sh = lvl_u >= 32; lvl_u = stb_av1_db_iclip(lvl_u + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_v) { sh = lvl_v >= 32; lvl_v = stb_av1_db_iclip(lvl_v + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-        }
         if (recon->ss_ver && !lvl_u) lvl_u = lvl_v;
         if (py16)
             stb_avif_deblock_plane_u16(py16, tc->stride_y,
