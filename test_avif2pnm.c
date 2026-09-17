@@ -116,33 +116,61 @@ static int decode_to_ppm(const char *avif_path, const char *ppm_path, int req_ch
 
     printf("  OK: %dx%d, %d chan -> %s\n", w, h, c, ppm_path);
 
-    /* Dump Y4M (raw YUV420P) for comparison with dav1d output. */
+    /* Dump Y4M (raw 8-bit YUV) for comparison with dav1d output.
+     * Planes from stb_avif_last_yuv() are always 8-bit; geometry comes
+     * from stb_avif_last_frame_info() (stride guessing mislabels 4:2:2
+     * and drops monochrome). */
     {
         unsigned char *uy = NULL, *uu = NULL, *uv = NULL;
         int sy = 0, su = 0, sv = 0;
+        int mono = 0, ss_hor = 1, ss_ver = 1;
+        int uv_w, uv_h;
+        const char *chroma;
+        char y4m_path[1024];
+        FILE *fy;
+        size_t nl;
         stb_avif_last_yuv(&uy, &uu, &uv, &sy, &su, &sv);
-        if (uy && uu && uv) {
-            char y4m_path[1024];
-            FILE *fy;
-            size_t nl = strlen(ppm_path);
+        stb_avif_last_frame_info(&mono, &ss_hor, &ss_ver);
+        nl = strlen(ppm_path);
+        if (!uy) {
+            /* No Y plane (should not happen on success); skip Y4M. */
+        } else {
+            if (mono || !uu || !uv)
+                mono = 1;
+            if (mono) {
+                uv_w = 0;
+                uv_h = 0;
+                chroma = "Cmono";
+            } else if (ss_hor == 0 && ss_ver == 0) {
+                uv_w = w;
+                uv_h = h;
+                chroma = "C444";
+            } else if (ss_hor == 1 && ss_ver == 0) {
+                uv_w = (w + 1) >> 1;
+                uv_h = h;
+                chroma = "C422";
+            } else {
+                uv_w = (w + 1) >> 1;
+                uv_h = (h + 1) >> 1;
+                chroma = "C420";
+            }
             memcpy(y4m_path, ppm_path, nl + 1);
             { char *dot = strrchr(y4m_path, '.'); if (dot) strcpy(dot, ".y4m"); else strcat(y4m_path, ".y4m"); }
             fy = fopen(y4m_path, "wb");
             if (fy) {
-                int uv_w = (su == sy) ? w : ((w + 1) / 2);
-                int uv_h = (sv == sy) ? h : ((h + 1) / 2);
-                const char *chroma = (su == sy) ? "C444" : "C420";
                 fprintf(fy, "YUV4MPEG2 W%d H%d F1:1 Ip %s\n", w, h, chroma);
                 fprintf(fy, "FRAME\n");
                 /* Y plane: w*h bytes, stride may be padded */
                 for (row = 0; row < h; row++)
                     fwrite(uy + (size_t)row * sy, 1, (size_t)w, fy);
-                /* U plane */
-                for (row = 0; row < uv_h; row++)
-                    fwrite(uu + (size_t)row * su, 1, (size_t)uv_w, fy);
-                /* V plane */
-                for (row = 0; row < uv_h; row++)
-                    fwrite(uv + (size_t)row * sv, 1, (size_t)uv_w, fy);
+                if (!mono) {
+                    /* U plane */
+                    for (row = 0; row < uv_h; row++)
+                        fwrite(uu + (size_t)row * su, 1, (size_t)uv_w, fy);
+                    /* V plane */
+                    for (row = 0; row < uv_h; row++)
+                        fwrite(uv + (size_t)row * sv, 1, (size_t)uv_w, fy);
+                }
                 fclose(fy);
                 printf("  Y4M: -> %s\n", y4m_path);
             }

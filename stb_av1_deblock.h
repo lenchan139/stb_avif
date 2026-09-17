@@ -2,13 +2,11 @@
  * stb_av1_deblock.h - scalar AV1 in-loop deblocking filter
  *
  * Faithful port of dav1d's loopfilter_tmpl.c kernel plus the edge
- * selection rules: an 8-pixel-aligned edge segment (one 4-pixel band at
- * a time) is filtered when a transform-block or prediction-block
- * boundary crosses it; skip suppresses nothing on intra still frames
- * (single transform per intra block).  Filter width per edge =
+ * selection rules: each 4x4 row independently checks for a transform-
+ * block or prediction-block boundary.  Filter width per edge =
  * 4 << min(lw_left, lw_right, cap), cap 2 for luma / 1 for chroma
- * (uv widths 4 or 6).  Levels come straight from the frame header
- * (segmentation / delta-lf are not supported here).
+ * (uv widths 4 or 6).  Per-block levels from lf_level map when
+ * provided; otherwise falls back to frame-global level.
  */
 #ifndef STB_AV1_DEBLOCK_H
 #define STB_AV1_DEBLOCK_H
@@ -29,6 +27,9 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
 {
     const int F = 1 << bd8;
     int i;
+    E <<= bd8;
+    I <<= bd8;
+    H <<= bd8;
 
     for (i = 0; i < 4; i++, dst += stridea) {
         int p6, p5, p4, p3, p2;
@@ -125,19 +126,21 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
         } else {
             /* hev branch */
             int hev = abs(p1 - p0) > H || abs(q1 - q0) > H;
-#define STB_DB_ICLIP_DIFF(v) stb_av1_db_iclip((v), -128, 127)
+            int clip_max = (128 << bd8) - 1;
+            int clip_min = -(128 << bd8);
+#define STB_DB_ICLIP_DIFF(v) stb_av1_db_iclip((v), clip_min, clip_max)
             if (hev) {
                 int f = STB_DB_ICLIP_DIFF(p1 - q1);
                 int f1, f2;
                 f = STB_DB_ICLIP_DIFF(3 * (q0 - p0) + f);
-                f1 = ((f + 4) > 127 ? 127 : (f + 4)) >> 3;
-                f2 = ((f + 3) > 127 ? 127 : (f + 3)) >> 3;
+                f1 = ((f + 4) > clip_max ? clip_max : (f + 4)) >> 3;
+                f2 = ((f + 3) > clip_max ? clip_max : (f + 3)) >> 3;
                 dst[strideb * -1] = (stbv_u16)stb_av1_db_iclip(p0 + f2, 0, maxv);
                 dst[strideb * +0] = (stbv_u16)stb_av1_db_iclip(q0 - f1, 0, maxv);
             } else {
                 int f = STB_DB_ICLIP_DIFF(3 * (q0 - p0));
-                int f1 = ((f + 4) > 127 ? 127 : (f + 4)) >> 3;
-                int f2 = ((f + 3) > 127 ? 127 : (f + 3)) >> 3;
+                int f1 = ((f + 4) > clip_max ? clip_max : (f + 4)) >> 3;
+                int f2 = ((f + 3) > clip_max ? clip_max : (f + 3)) >> 3;
                 dst[strideb * -1] = (stbv_u16)stb_av1_db_iclip(p0 + f2, 0, maxv);
                 dst[strideb * +0] = (stbv_u16)stb_av1_db_iclip(q0 - f1, 0, maxv);
                 f = (f1 + 1) >> 1;
@@ -153,14 +156,18 @@ static void stb_av1_loop_filter_edge(stbv_u16 *dst, ptrdiff_t stridea,
  * Deblock one plane.
  *   p, stride   - 16-bit plane
  *   w, h        - visible extent in pixels
- *   level       - base LF level for this plane (0 disables)
+ *   level_v/h   - base LF level for vertical/horizontal edges (0 disables)
  *   sharpness   - frame sharpness
  *   is_chroma   - caps filter width at 6
- *   blkid       - per-4x4-unit block-identity map (any stable id per block)
- *   txlw        - per-4x4-unit log2-width of the covering transform
- *   b4stride    - row stride of the maps (4x4 units)
- *   maph, mapw  - map extent in 4x4 units
+ *   blkid       - per-4x4-unit block-identity map
+ *   txlw        - per-4x4-unit packed transform size: low 3 bits hold
+ *                 the log2 width (for vertical edges), high 3 bits hold
+ *                 the log2 height (for horizontal edges)
+ *   b4stride    - row stride of the blkid/txlw maps (4x4 units)
+ *   mapw4, maph4 - map extent in 4x4 units
  *   ssx, ssy    - plane subsampling relative to the maps' grid
+ *   lf_level    - per-4x4-block [vert,horiz] LF level (NULL = use scalar)
+ *   b4stride_lf - row stride of lf_level map
  */
 static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                                        int w, int h,
@@ -176,16 +183,14 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                                        int tile_cols,
                                        const unsigned int *tile_row_start_sb,
                                        int tile_rows,
-                                       int sb_size)
+                                       int sb_size,
+                                       const stbv_u8 *lf_level,
+                                       ptrdiff_t b4stride_lf)
 {
-    int e_lim, lut_i[64], lut_e[64];
-    int L, x, y, X, Y;
+    int lut_i[64], lut_e[64];
+    int L, X, Y;
 
     if (!level_v && !level_h) return;
-
-    /* Loop filtering must not cross a tile boundary.  The reconstruction
-     * maps are frame-wide, so a plain blkid comparison would otherwise
-     * make every tile boundary look like an ordinary block edge. */
 
     /* dav1d_calc_eih */
     for (L = 0; L < 64; L++) {
@@ -202,53 +207,47 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
     /* ---- vertical edges (at px X = multiples of 4) ---- */
     if (level_v) {
         for (X = 4; X < w; X += 4) {
+            int bx_r = (X << ssx) >> 2;
+            int xl_c = (bx_r - 1) < mapw4 ? bx_r - 1 : mapw4 - 1;
+            int xr_c = bx_r < mapw4 ? bx_r : mapw4 - 1;
+            int tile_blocked = 0;
+            if (tile_col_start_sb && tile_cols > 1) {
+                int tc;
+                for (tc = 1; tc < tile_cols; tc++) {
+                    int tbx = (int)((tile_col_start_sb[tc] * (unsigned int)sb_size) >> ssx);
+                    if (X == tbx) { tile_blocked = 1; break; }
+                }
+            }
+            if (tile_blocked) continue;
             for (Y = 0; Y < h; Y += 4) {
-                int bx_r = (X << ssx) >> 2;          /* unit col right of edge */
-                int by_a = (Y << ssy) >> 2;          /* first unit row of band */
-                int band_rows = 4 >> ssy;
-                int edge = 0, bucket = 99;
-                int r;
-                if (band_rows < 1) band_rows = 1;
-                for (r = 0; r < band_rows; r++) {
-                    int yy = by_a + r;
-                    int yl = yy < maph4 ? yy : maph4 - 1;
-                    int xl = bx_r - 1 < mapw4 ? bx_r - 1 : mapw4 - 1;
-                    int xr = bx_r < mapw4 ? bx_r : mapw4 - 1;
-                    stbv_u32 bl = blkid[(size_t)yl * b4stride + xl];
-                    stbv_u32 br = blkid[(size_t)yl * b4stride + xr];
-                    int ll = txlw[(size_t)yl * b4stride + xl];
-                    int lr = txlw[(size_t)yl * b4stride + xr];
-                    if (bl != br || ll != lr) {
-                        edge = 1;
-                        if (ll < bucket) bucket = ll;
-                        if (lr < bucket) bucket = lr;
+                int yy = (Y << ssy) >> 2;
+                int yl = yy < maph4 ? yy : maph4 - 1;
+                stbv_u32 bl = blkid[(size_t)yl * b4stride + xl_c];
+                stbv_u32 br = blkid[(size_t)yl * b4stride + xr_c];
+                int ll = txlw[(size_t)yl * b4stride + xl_c] & 7;
+                int lr = txlw[(size_t)yl * b4stride + xr_c] & 7;
+                if (bl != br || ll != lr) {
+                    int bucket = ll < lr ? ll : lr;
+                    ptrdiff_t sb_p = 1;
+                    ptrdiff_t sa_p = stride;
+                    stbv_u16 *q0;
+                    int wd;
+                    if (bucket > (is_chroma ? 1 : 2)) bucket = is_chroma ? 1 : 2;
+                    if (bucket < 0) bucket = 0;
+                    if (lf_level) {
+                        L = lf_level[((size_t)yl * b4stride_lf + xr_c) * 2 + 0];
+                        if (!L) L = level_v;
+                    } else {
+                        L = level_v;
                     }
-                }
-                if (!edge) continue;
-                /* No deblock across a tile-column boundary.  X is in this
-                 * plane's pixel coordinates; tile starts are in SB units. */
-                if (tile_col_start_sb && tile_cols > 1) {
-                    int tc;
-                    for (tc = 1; tc < tile_cols; tc++) {
-                        int tbx = (int)((tile_col_start_sb[tc] * (unsigned int)sb_size) >> ssx);
-                        if (X == tbx) { edge = 0; break; }
-                    }
-                }
-                if (!edge) continue;
-                if (bucket > (is_chroma ? 1 : 2)) bucket = is_chroma ? 1 : 2;
-                if (bucket < 0) bucket = 0;
-                L = level_v;
-                {
-                    ptrdiff_t sb = 1;                 /* across = x */
-                    ptrdiff_t sa = stride;            /* along  = y */
-                    stbv_u16 *q0 = p + (size_t)Y * stride + X;
-                    int wd = 4 << bucket;
+                    q0 = p + (size_t)Y * stride + X;
+                    wd = 4 << bucket;
                     if (is_chroma) wd = 4 + 2 * bucket;
-                    if (wd >= 16 && (X < 7 || w - X < 6)) wd = 8;
-                    if (wd >= 8 && (X < 4 || w - X < 3)) wd = is_chroma ? 6 : 4;
-                    if (wd >= 6 && (X < 3 || w - X < 2)) wd = 4;
-                    if (wd >= 4 && (X < 2 || w - X < 1)) continue;
-                    stb_av1_loop_filter_edge(q0, sa, sb, lut_e[L], lut_i[L],
+                    if (wd >= 16 && X < 7) wd = 8;
+                    if (wd >= 8 && X < 4) wd = is_chroma ? 6 : 4;
+                    if (wd >= 6 && X < 3) wd = 4;
+                    if (wd >= 4 && X < 2) continue;
+                    stb_av1_loop_filter_edge(q0, sa_p, sb_p, lut_e[L], lut_i[L],
                                              L >> 4, wd, maxv, bd8);
                 }
             }
@@ -258,52 +257,47 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
     /* ---- horizontal edges (at px Y = multiples of 4) ---- */
     if (level_h) {
         for (Y = 4; Y < h; Y += 4) {
+            int by_r = (Y << ssy) >> 2;
+            int yt_c = (by_r - 1) < maph4 ? by_r - 1 : maph4 - 1;
+            int yb_c = by_r < maph4 ? by_r : maph4 - 1;
+            int tile_blocked = 0;
+            if (tile_row_start_sb && tile_rows > 1) {
+                int tr;
+                for (tr = 1; tr < tile_rows; tr++) {
+                    int tby = (int)((tile_row_start_sb[tr] * (unsigned int)sb_size) >> ssy);
+                    if (Y == tby) { tile_blocked = 1; break; }
+                }
+            }
+            if (tile_blocked) continue;
             for (X = 0; X < w; X += 4) {
-                int by_r = (Y << ssy) >> 2;
-                int bx_a = (X << ssx) >> 2;
-                int band_cols = 4 >> ssx;
-                int edge = 0, bucket = 99;
-                int c;
-                if (band_cols < 1) band_cols = 1;
-                for (c = 0; c < band_cols; c++) {
-                    int xx = bx_a + c;
-                    int xt = xx < mapw4 ? xx : mapw4 - 1;
-                    int yt = by_r - 1 < maph4 ? by_r - 1 : maph4 - 1;
-                    int yb = by_r < maph4 ? by_r : maph4 - 1;
-                    stbv_u32 bu = blkid[(size_t)yt * b4stride + xt];
-                    stbv_u32 bd = blkid[(size_t)yb * b4stride + xt];
-                    int lu = txlw[(size_t)yt * b4stride + xt];
-                    int ld = txlw[(size_t)yb * b4stride + xt];
-                    if (bu != bd || lu != ld) {
-                        edge = 1;
-                        if (lu < bucket) bucket = lu;
-                        if (ld < bucket) bucket = ld;
+                int xx = (X << ssx) >> 2;
+                int xt_c = xx < mapw4 ? xx : mapw4 - 1;
+                stbv_u32 bu = blkid[(size_t)yt_c * b4stride + xt_c];
+                stbv_u32 bd = blkid[(size_t)yb_c * b4stride + xt_c];
+                int lu = (txlw[(size_t)yt_c * b4stride + xt_c] >> 3) & 7;
+                int ld = (txlw[(size_t)yb_c * b4stride + xt_c] >> 3) & 7;
+                if (bu != bd || lu != ld) {
+                    int bucket = lu < ld ? lu : ld;
+                    ptrdiff_t sb_p = stride;
+                    ptrdiff_t sa_p = 1;
+                    stbv_u16 *q0;
+                    int wd;
+                    if (bucket > (is_chroma ? 1 : 2)) bucket = is_chroma ? 1 : 2;
+                    if (bucket < 0) bucket = 0;
+                    if (lf_level) {
+                        L = lf_level[((size_t)yb_c * b4stride_lf + xt_c) * 2 + 1];
+                        if (!L) L = level_h;
+                    } else {
+                        L = level_h;
                     }
-                }
-                if (!edge) continue;
-                /* No deblock across a tile-row boundary. */
-                if (tile_row_start_sb && tile_rows > 1) {
-                    int tr;
-                    for (tr = 1; tr < tile_rows; tr++) {
-                        int tby = (int)((tile_row_start_sb[tr] * (unsigned int)sb_size) >> ssy);
-                        if (Y == tby) { edge = 0; break; }
-                    }
-                }
-                if (!edge) continue;
-                if (bucket > (is_chroma ? 1 : 2)) bucket = is_chroma ? 1 : 2;
-                if (bucket < 0) bucket = 0;
-                L = level_h;
-                {
-                    ptrdiff_t sb = stride;
-                    ptrdiff_t sa = 1;
-                    stbv_u16 *q0 = p + (size_t)Y * stride + X;
-                    int wd = 4 << bucket;
+                    q0 = p + (size_t)Y * stride + X;
+                    wd = 4 << bucket;
                     if (is_chroma) wd = 4 + 2 * bucket;
-                    if (wd >= 16 && (Y < 7 || h - Y < 6)) wd = 8;
-                    if (wd >= 8 && (Y < 4 || h - Y < 3)) wd = is_chroma ? 6 : 4;
-                    if (wd >= 6 && (Y < 3 || h - Y < 2)) wd = 4;
-                    if (wd >= 4 && (Y < 2 || h - Y < 1)) continue;
-                    stb_av1_loop_filter_edge(q0, sa, sb, lut_e[L], lut_i[L],
+                    if (wd >= 16 && Y < 7) wd = 8;
+                    if (wd >= 8 && Y < 4) wd = is_chroma ? 6 : 4;
+                    if (wd >= 6 && Y < 3) wd = 4;
+                    if (wd >= 4 && Y < 2) continue;
+                    stb_av1_loop_filter_edge(q0, sa_p, sb_p, lut_e[L], lut_i[L],
                                              L >> 4, wd, maxv, bd8);
                 }
             }
