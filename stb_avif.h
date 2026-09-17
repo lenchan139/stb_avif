@@ -3582,11 +3582,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        recon->bit_depth - 8,
                                        lf_blkid_map, lf_txlw_map, res_w4,
                                        res_w4, res_h4, 0, 0,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        lf_level_map, res_w4);
         if (pu16 && !stream->seq.monochrome) {
             int cw = (tc->frame_width + (recon->ss_hor ? 1 : 0)) >> recon->ss_hor;
@@ -3597,11 +3592,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
                                        recon->ss_hor, recon->ss_ver,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        NULL, 0);
             stb_avif_deblock_plane_u16(pv16, tc->stride_v, cw, ch,
                                        lvl_v ? lvl_v : lvl_u, lvl_v ? lvl_v : lvl_u,
@@ -3609,11 +3599,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
                                        recon->ss_hor, recon->ss_ver,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        NULL, 0);
         }
     }

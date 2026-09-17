@@ -179,11 +179,6 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                                        ptrdiff_t b4stride,
                                        int mapw4, int maph4,
                                        int ssx, int ssy,
-                                       const unsigned int *tile_col_start_sb,
-                                       int tile_cols,
-                                       const unsigned int *tile_row_start_sb,
-                                       int tile_rows,
-                                       int sb_size,
                                        const stbv_u8 *lf_level,
                                        ptrdiff_t b4stride_lf)
 {
@@ -210,15 +205,10 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
             int bx_r = (X << ssx) >> 2;
             int xl_c = (bx_r - 1) < mapw4 ? bx_r - 1 : mapw4 - 1;
             int xr_c = bx_r < mapw4 ? bx_r : mapw4 - 1;
-            int tile_blocked = 0;
-            if (tile_col_start_sb && tile_cols > 1) {
-                int tc;
-                for (tc = 1; tc < tile_cols; tc++) {
-                    int tbx = (int)((tile_col_start_sb[tc] * (unsigned int)sb_size) >> ssx);
-                    if (X == tbx) { tile_blocked = 1; break; }
-                }
-            }
-            if (tile_blocked) continue;
+            /* Edges at tile boundaries are filtered too. The per-4x4 level map
+             * is frame-global, so the minimum of the two adjacent blocks'
+             * levels below already yields the clamped level dav1d derives from
+             * tx_lpf_right_edge ("fix lpf strength at tile col boundaries"). */
             for (Y = 0; Y < h; Y += 4) {
                 int yy = (Y << ssy) >> 2;
                 int yl = yy < maph4 ? yy : maph4 - 1;
@@ -260,15 +250,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
             int by_r = (Y << ssy) >> 2;
             int yt_c = (by_r - 1) < maph4 ? by_r - 1 : maph4 - 1;
             int yb_c = by_r < maph4 ? by_r : maph4 - 1;
-            int tile_blocked = 0;
-            if (tile_row_start_sb && tile_rows > 1) {
-                int tr;
-                for (tr = 1; tr < tile_rows; tr++) {
-                    int tby = (int)((tile_row_start_sb[tr] * (unsigned int)sb_size) >> ssy);
-                    if (Y == tby) { tile_blocked = 1; break; }
-                }
-            }
-            if (tile_blocked) continue;
+            /* Tile row boundaries: filter as well, with the same min-level rule
+             * (see the vertical pass above). */
             for (X = 0; X < w; X += 4) {
                 int xx = (X << ssx) >> 2;
                 int xt_c = xx < mapw4 ? xx : mapw4 - 1;
