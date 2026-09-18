@@ -3263,7 +3263,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     int cdef_noskip_stride = 0;
     stbv_av1_lr_mask lr_mask = {0};
     int lr_mask_ok = 0;
-    memset(&lr_mask, 0, sizeof(lr_mask)); /* free path runs unconditionally */
     int bw8al, bh8al;
     stbv_u8 *above_cre0 = 0, *above_cre1 = 0, *left_cre0 = 0, *left_cre1 = 0;
     stbv_u8 *above_skip = 0, *left_skip = 0, *above_pal_sz = 0;
