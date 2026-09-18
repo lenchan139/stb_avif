@@ -9623,13 +9623,30 @@ static int stbv_av1_decode_leaf_syntax(struct stb_av1_msac *msac,
             if (bw4 > 16) state->cdef_idx[idx + 1] = v;
             if (bh4 > 16) state->cdef_idx[idx + 2] = v;
             if (bw4 == 32 && bh4 == 32) state->cdef_idx[idx + 3] = v;
-            /* Write to cdef_idx output grid for post-decode CDEF filtering. */
+            /* Write to cdef_idx output grid for post-decode CDEF filtering.
+             * dav1d stores the coded value in every 64x64 slot the block
+             * covers (decode.c:951-954: idx+1 when bw4 > 16, idx+2 when
+             * bh4 > 16, idx+3 for a full 128x128 superblock) and its apply
+             * stage reads exactly those slots (cdef_apply_tmpl.c:148-149).
+             * Writing only slot idx leaves the propagated quadrants at -1,
+             * and stb_av1_cdef_frame then skips those whole 64x64 blocks.
+             * bw4/bh4 are already clipped to the frame extent here, which
+             * keeps every propagated quadrant inside the 64x64-aligned
+             * grid (a block with bh4 > 16 has >= 64 px of itself inside
+             * the frame below its origin). */
             if (state->cdef_idx_grid && state->cdef_grid_stride > 0) {
-                int gx = sbx / 16 + (idx & 1);
-                int gy = sby / 16 + (idx >> 1);
-                if (gx >= 0 && gx < state->cdef_grid_stride &&
-                    gy >= 0)
-                    state->cdef_idx_grid[gy * state->cdef_grid_stride + gx] = v;
+                int q[4], nq = 1, qi;
+                q[0] = idx;
+                if (bw4 > 16) q[nq++] = idx + 1;
+                if (bh4 > 16) q[nq++] = idx + 2;
+                if (bw4 == 32 && bh4 == 32) q[nq++] = idx + 3;
+                for (qi = 0; qi < nq; qi++) {
+                    int gx = sbx / 16 + (q[qi] & 1);
+                    int gy = sby / 16 + (q[qi] >> 1);
+                    if (gx >= 0 && gx < state->cdef_grid_stride && gy >= 0)
+                        state->cdef_idx_grid[
+                            gy * state->cdef_grid_stride + gx] = v;
+                }
             }
         }
     }
@@ -11181,11 +11198,6 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
                                        ptrdiff_t b4stride,
                                        int mapw4, int maph4,
                                        int ssx, int ssy,
-                                       const unsigned int *tile_col_start_sb,
-                                       int tile_cols,
-                                       const unsigned int *tile_row_start_sb,
-                                       int tile_rows,
-                                       int sb_size,
                                        const stbv_u8 *lf_level,
                                        ptrdiff_t b4stride_lf)
 {
@@ -11212,15 +11224,10 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
             int bx_r = (X << ssx) >> 2;
             int xl_c = (bx_r - 1) < mapw4 ? bx_r - 1 : mapw4 - 1;
             int xr_c = bx_r < mapw4 ? bx_r : mapw4 - 1;
-            int tile_blocked = 0;
-            if (tile_col_start_sb && tile_cols > 1) {
-                int tc;
-                for (tc = 1; tc < tile_cols; tc++) {
-                    int tbx = (int)((tile_col_start_sb[tc] * (unsigned int)sb_size) >> ssx);
-                    if (X == tbx) { tile_blocked = 1; break; }
-                }
-            }
-            if (tile_blocked) continue;
+            /* Edges at tile boundaries are filtered too. The per-4x4 level map
+             * is frame-global, so the minimum of the two adjacent blocks'
+             * levels below already yields the clamped level dav1d derives from
+             * tx_lpf_right_edge ("fix lpf strength at tile col boundaries"). */
             for (Y = 0; Y < h; Y += 4) {
                 int yy = (Y << ssy) >> 2;
                 int yl = yy < maph4 ? yy : maph4 - 1;
@@ -11262,15 +11269,8 @@ static void stb_avif_deblock_plane_u16(stbv_u16 *p, ptrdiff_t stride,
             int by_r = (Y << ssy) >> 2;
             int yt_c = (by_r - 1) < maph4 ? by_r - 1 : maph4 - 1;
             int yb_c = by_r < maph4 ? by_r : maph4 - 1;
-            int tile_blocked = 0;
-            if (tile_row_start_sb && tile_rows > 1) {
-                int tr;
-                for (tr = 1; tr < tile_rows; tr++) {
-                    int tby = (int)((tile_row_start_sb[tr] * (unsigned int)sb_size) >> ssy);
-                    if (Y == tby) { tile_blocked = 1; break; }
-                }
-            }
-            if (tile_blocked) continue;
+            /* Tile row boundaries: filter as well, with the same min-level rule
+             * (see the vertical pass above). */
             for (X = 0; X < w; X += 4) {
                 int xx = (X << ssx) >> 2;
                 int xt_c = xx < mapw4 ? xx : mapw4 - 1;
@@ -12580,12 +12580,15 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
 
          /* Bottom context rows (y >= uh) come from lpf (deblocked),
           * source rows come from src (CDEF'd frame).
-          * lpf[r*stride] = frame[r]. Frame row F → lpf[F*stride].
+          * lpf is pre-positioned at row uy0-2, column ux0 by the caller
+          * (same convention as the top-context reads above), so frame row
+          * uy0+y is at lpf + (y + 2)*lpf_stride with NO further column
+          * offset: adding ux0 again would read column 2*ux0.
           * At the frame bottom there is nothing below: replicate the
           * last SRC row instead (dav1d vert_2/odd tails). */
          if (y >= uh) {
              if (uy0 + uh < frame_h)
-                 src_ptr = lpf + row_clamped * lpf_stride + ux0;
+                 src_ptr = lpf + (y + 2) * lpf_stride;
              else
                  src_ptr = src + (frame_h - 1) * src_stride + ux0;
          } else
@@ -13188,6 +13191,15 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
                                  (const int *const *)sum3_ptrs,
                                  A3_ptrs[3], B3_ptrs[3], uw);
         stbv_av1_sgr_calc_ab(A3_ptrs[3], B3_ptrs[3], uw, s1, 9, 455);
+        /* dav1d's sgr_box3_vert() rotates the 3x3 horizontal-sum ring as part
+         * of the call (sgr_box3_row_v + sgr_calc_row_ab + rotate(ptrs, 3)).
+         * Without it the r4 row below overwrites the slot still holding row
+         * B's horizontal sums, and the vertical box for the stripe's last
+         * output row reads rows (B-2, B-1, B+1) instead of (B-1, B, B+1).
+         * The main loop above rotates explicitly after every row_v; this
+         * branch has to do the same. */
+        stbv_av1_rotate3(sumsq3_ptrs);
+        stbv_av1_rotate3(sum3_ptrs);
         stbv_av1_rotate4(A3_ptrs);
         stbv_av1_rotate4(B3_ptrs);
         stbv_av1_sgr_box5_row_h(sumsq5_ptrs[4], sum5_ptrs[4], r4, ew, ux0);
@@ -15669,6 +15681,14 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
             int ch4 = (bh4 + ss_v) >> ss_v;
             int cpw = cw4 << 2;
             int cph = ch4 << 2;
+            /* Intrabc prediction is inter prediction at the signalled MV
+             * (dav1d recon_tmpl.c:1584-1595 -> mc() with FILTER_2D_BILINEAR).
+             * MVs are integer in LUMA samples only, so the chroma displacement
+             * can be fractional: 4:2:0/4:2:2 halve it and a luma-odd MV is a
+             * half-pel chroma offset.  dav1d: dx = bx*(4>>ss) + (mv>>(3+ss)),
+             * filter fraction (mv & (15>>!ss)) << !ss in 1/16 chroma-px units. */
+            int fx = (ibc_mv_x & (15 >> !ss_h)) << !ss_h;
+            int fy = (ibc_mv_y & (15 >> !ss_v)) << !ss_v;
             int j;
             if (cx_src < 0) { cpw += cx_src; cx_src = 0; }
             if (cy_src < 0) { cph += cy_src; cy_src = 0; }
@@ -15686,10 +15706,36 @@ static void stb_avif_recon_block_info(void *ud, int intra, int bs, int bx4, int 
                 ccw = stride - cx_dst; if (ccw > spw) ccw = spw;
                 cch = ch_h - cy_dst; if (cch > sph) cch = sph;
                 if (ccw > 0 && cch > 0) {
-                    for (i = 0; i < cch; i++)
-                        memmove(plane + (size_t)(cy_dst + i) * stride + cx_dst,
-                               plane + (size_t)(cy_src + i) * stride + cx_src,
-                               (size_t)ccw * sizeof(stbv_u16));
+                    if (!fx && !fy) {
+                        for (i = 0; i < cch; i++)
+                            memmove(plane + (size_t)(cy_dst + i) * stride + cx_dst,
+                                   plane + (size_t)(cy_src + i) * stride + cx_src,
+                                   (size_t)ccw * sizeof(stbv_u16));
+                    } else {
+                        /* Bilinear (dav1d put_bilin).  Stage the row: src and dst
+                         * are the same plane and may overlap (e.g. dy = -1). */
+                        stbv_u16 rowbuf[130];   /* max chroma block width is 128 */
+                        int row;
+                        for (row = 0; row < cch; row++) {
+                            const stbv_u16 *s0 =
+                                plane + (size_t)(cy_src + row) * stride + cx_src;
+                            const stbv_u16 *s1 =
+                                (fy && cy_src + row + 1 < ch_h) ? s0 + stride : s0;
+                            for (i = 0; i < ccw; i++) {
+                                int a = s0[i], b, c, d, h0, h1;
+                                b = (fx && cx_src + i + 1 < stride) ? s0[i + 1] : a;
+                                c = (fy) ? s1[i] : a;
+                                d = (fy) ? ((fx && cx_src + i + 1 < stride) ?
+                                            s1[i + 1] : c) : b;
+                                h0 = a * (16 - fx) + b * fx;
+                                h1 = c * (16 - fx) + d * fx;
+                                rowbuf[i] = (stbv_u16)((h0 * (16 - fy) +
+                                                        h1 * fy + 128) >> 8);
+                            }
+                            memcpy(plane + (size_t)(cy_dst + row) * stride + cx_dst,
+                                   rowbuf, (size_t)ccw * sizeof(stbv_u16));
+                        }
+                    }
                 }
             }
         }
@@ -15894,6 +15940,13 @@ static void stb_avif_recon_luma_txb(void *ud, int x4, int y4, int tx, int txtp, 
     rc = (struct stb_avif_scalar_recon *)ud;
     if (!rc) return;
     (void)txw4; (void)txh4;
+    /* dav1d's CFL w_pad/h_pad (recon_tmpl.c:1354) round the clamped block
+     * extent up to b->tx, the DECODED luma tx -- not the block's max tx,
+     * which is all block_info knows (block_info runs before the tx-size
+     * symbol is decoded).  Record the real one here; luma txs are always
+     * decoded before the chroma txs of the same block. */
+    rc->cur_ltw4 = stbv_av1_tx_dims[tx].w;
+    rc->cur_lth4 = stbv_av1_tx_dims[tx].h;
 #ifdef STB_AVIF_PRED_ONLY
     (void)cf; (void)tx; (void)txtp;
 #else
@@ -16177,7 +16230,6 @@ static void stb_avif_recon_predict_txb_chroma(struct stb_avif_scalar_recon *rc,
             int cw4u = rc->cur_bw4, ch4u = rc->cur_bh4;
             int cbw4, cbh4, W, H, i, j;
             const stbv_u16 mx = (stbv_u16)((1 << rc->bit_depth) - 1);
-            (void)fw4; (void)fh4;
             cbw4 = (cw4u + ss_h) >> ss_h;
             cbh4 = (ch4u + ss_v) >> ss_v;
             W = cbw4 << 2;
@@ -16193,15 +16245,34 @@ static void stb_avif_recon_predict_txb_chroma(struct stb_avif_scalar_recon *rc,
                 long acc;
                 if (!rc->cfl_ac_ok || rc->cfl_ac_bx != rc->cur_bx4 ||
                     rc->cfl_ac_by != rc->cur_by4) {
-                    /* w_pad/h_pad from the UV transform dims (dav1d
-                     * furthest_r/furthest_b use b->uvtx's t_dim);
-                     * padded cols replicate. */
-                    int twu = stbv_av1_tx_dims[tx].w;
-                    int thu = stbv_av1_tx_dims[tx].h;
-                    int furthest_r = ((cw4u << ss_h) + twu - 1) & ~(twu - 1);
-                    int furthest_b = ((ch4u << ss_v) + thu - 1) & ~(thu - 1);
-                    int w_pad = cbw4 - (furthest_r >> ss_h);
-                    int h_pad = cbh4 - (furthest_b >> ss_v);
+                    /* dav1d cfl_ac: w_pad/h_pad = how many chroma 4-unit
+                     * columns/rows of the AC array are OUTSIDE the luma
+                     * the decoder actually reconstructs, and are filled by
+                     * replicating the last gathered column/row.
+                     * furthest_r/b round the CLAMPED chroma block extent up
+                     * to the LUMA tx size: the last tx that STARTS inside
+                     * the 8-aligned frame is reconstructed over its full
+                     * extent, but txs beyond it are never decoded, so their
+                     * luma is not valid (dav1d recon_tmpl.c:1354).
+                     * The previous formula used the UNCLIPPED block dims and
+                     * the UV tx size, so w_pad/h_pad came out <= 0 and the
+                     * gather read the zero-filled padding past the 8-aligned
+                     * frame edge (kimono's trailing block columns). */
+                    int w4c = rc->cur_bw4, h4c = rc->cur_bh4;
+                    int cw4c, ch4c, ltw = rc->cur_ltw4, lth = rc->cur_lth4;
+                    int furthest_r, furthest_b, w_pad, h_pad;
+                    if (fw4 - rc->cur_bx4 < w4c) w4c = fw4 - rc->cur_bx4;
+                    if (fh4 - rc->cur_by4 < h4c) h4c = fh4 - rc->cur_by4;
+                    if (w4c < 0) w4c = 0;
+                    if (h4c < 0) h4c = 0;
+                    cw4c = (w4c + ss_h) >> ss_h;
+                    ch4c = (h4c + ss_v) >> ss_v;
+                    if (ltw < 1) ltw = 1;
+                    if (lth < 1) lth = 1;
+                    furthest_r = ((cw4c << ss_h) + ltw - 1) & ~(ltw - 1);
+                    furthest_b = ((ch4c << ss_v) + lth - 1) & ~(lth - 1);
+                    w_pad = cbw4 - (furthest_r >> ss_h);
+                    h_pad = cbh4 - (furthest_b >> ss_v);
                     if (w_pad < 0) w_pad = 0;
                     if (h_pad < 0) h_pad = 0;
                     for (y = 0; y < H - 4 * h_pad; y++) {
@@ -16403,6 +16474,18 @@ static void stb_av1_calc_lf_values(stbv_u8 lflvl[8][4][8][2],
             int bseg = b + sd;
             if (bseg < 0) bseg = 0;
             if (bseg > 63) bseg = 63;
+
+            /* dav1d's calc_lf_value_chroma(): a chroma direction whose *header*
+             * level is 0 yields an all-zero table -- the mode/ref deltas are
+             * not applied to it at all.  (app_2048: level_u = 1, level_v = 0,
+             * so V must stay at 0 rather than becoming ref_delta[0] = 1.) */
+            if (dir >= 2 && !(dir == 2 ? hdr->loopfilter.level_u
+                                       : hdr->loopfilter.level_v)) {
+                for (ref = 0; ref < 8; ref++)
+                    for (is_gmv = 0; is_gmv < 2; is_gmv++)
+                        lflvl[s][dir][ref][is_gmv] = 0;
+                continue;
+            }
 
             if (!ref_delta) {
                 for (ref = 0; ref < 8; ref++)
@@ -16840,22 +16923,21 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
 #ifdef STB_AVIF_DEBLOCK
     if (!r) {
         const struct stb_av1_framehdr *fh = &stream->frame;
-        int lvl_yv = (int)fh->loopfilter.level_y[0];
-        int lvl_yh = (int)fh->loopfilter.level_y[1];
-        int lvl_u = (int)fh->loopfilter.level_u;
-        int lvl_v = (int)fh->loopfilter.level_v;
+        /* Per-direction frame levels, exactly the values dav1d uses
+         * (`f->lf.lvl`, filled by dav1d_calc_lf_values with a zero lf_delta)
+         * and exactly what `lf_level_map` already holds per block.  Deriving
+         * them from the raw header fields plus an ad-hoc ref_delta application
+         * is not equivalent: a direction whose header level is 0 can still come
+         * out nonzero once ref_delta[0] is added (app_2048 has level_y[1] = 0
+         * in the header but 1 in the LUT), and this scalar gates whether the
+         * whole pass runs.  dav1d runs both luma passes unconditionally
+         * (dav1d_loopfilter_sbrow_rows has no level_y[1] test). */
+        int lvl_yv = (int)recon->lf_lut[0][0][0][0];
+        int lvl_yh = (int)recon->lf_lut[0][1][0][0];
+        int lvl_u = (int)recon->lf_lut[0][2][0][0];
+        int lvl_v = (int)recon->lf_lut[0][3][0][0];
         int sharp = (int)fh->loopfilter.sharpness;
         int maxv = (1 << recon->bit_depth) - 1;
-        /* Apply mode/ref deltas (dav1d_calc_lf_values equivalent for key frames).
-         * For intra blocks (all blocks in key frames): level += ref_delta[0] * (1 << sh)
-         * where sh = (base >= 32). This matches dav1d's per-block level computation. */
-        if (fh->loopfilter.mode_ref_delta_enabled) {
-            int sh;
-            if (lvl_yv) { sh = lvl_yv >= 32; lvl_yv = stb_av1_db_iclip(lvl_yv + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_yh) { sh = lvl_yh >= 32; lvl_yh = stb_av1_db_iclip(lvl_yh + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_u) { sh = lvl_u >= 32; lvl_u = stb_av1_db_iclip(lvl_u + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-            if (lvl_v) { sh = lvl_v >= 32; lvl_v = stb_av1_db_iclip(lvl_v + fh->loopfilter.ref_delta[0] * (1 << sh), 0, 63); }
-        }
         if (recon->ss_ver && !lvl_u) lvl_u = lvl_v;
         if (py16)
             stb_avif_deblock_plane_u16(py16, tc->stride_y,
@@ -16864,11 +16946,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        recon->bit_depth - 8,
                                        lf_blkid_map, lf_txlw_map, res_w4,
                                        res_w4, res_h4, 0, 0,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        lf_level_map, res_w4);
         if (pu16 && !stream->seq.monochrome) {
             int cw = (tc->frame_width + (recon->ss_hor ? 1 : 0)) >> recon->ss_hor;
@@ -16879,23 +16956,13 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
                                        recon->ss_hor, recon->ss_ver,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        NULL, 0);
             stb_avif_deblock_plane_u16(pv16, tc->stride_v, cw, ch,
-                                       lvl_v ? lvl_v : lvl_u, lvl_v ? lvl_v : lvl_u,
+                                       lvl_v, lvl_v,
                                        sharp, 1, maxv, recon->bit_depth - 8,
                                        lf_blkid_map_c, lf_txlw_map_c, res_w4,
                                        res_w4, res_h4,
                                        recon->ss_hor, recon->ss_ver,
-                                       stream->frame.tiling.col_start_sb,
-                                       (int)stream->frame.tiling.cols,
-                                       stream->frame.tiling.row_start_sb,
-                                       (int)stream->frame.tiling.rows,
-                                       (int)(1U << (6U + stream->seq.sb128)),
                                        NULL, 0);
         }
     }

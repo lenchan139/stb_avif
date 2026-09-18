@@ -642,12 +642,15 @@ static void stbv_av1_sgr_compute_3x3(signed short *out_tmp,
 
          /* Bottom context rows (y >= uh) come from lpf (deblocked),
           * source rows come from src (CDEF'd frame).
-          * lpf[r*stride] = frame[r]. Frame row F → lpf[F*stride].
+          * lpf is pre-positioned at row uy0-2, column ux0 by the caller
+          * (same convention as the top-context reads above), so frame row
+          * uy0+y is at lpf + (y + 2)*lpf_stride with NO further column
+          * offset: adding ux0 again would read column 2*ux0.
           * At the frame bottom there is nothing below: replicate the
           * last SRC row instead (dav1d vert_2/odd tails). */
          if (y >= uh) {
              if (uy0 + uh < frame_h)
-                 src_ptr = lpf + row_clamped * lpf_stride + ux0;
+                 src_ptr = lpf + (y + 2) * lpf_stride;
              else
                  src_ptr = src + (frame_h - 1) * src_stride + ux0;
          } else
@@ -1250,6 +1253,15 @@ static void stbv_av1_sgr_mix(unsigned short *dst, int stride,
                                  (const int *const *)sum3_ptrs,
                                  A3_ptrs[3], B3_ptrs[3], uw);
         stbv_av1_sgr_calc_ab(A3_ptrs[3], B3_ptrs[3], uw, s1, 9, 455);
+        /* dav1d's sgr_box3_vert() rotates the 3x3 horizontal-sum ring as part
+         * of the call (sgr_box3_row_v + sgr_calc_row_ab + rotate(ptrs, 3)).
+         * Without it the r4 row below overwrites the slot still holding row
+         * B's horizontal sums, and the vertical box for the stripe's last
+         * output row reads rows (B-2, B-1, B+1) instead of (B-1, B, B+1).
+         * The main loop above rotates explicitly after every row_v; this
+         * branch has to do the same. */
+        stbv_av1_rotate3(sumsq3_ptrs);
+        stbv_av1_rotate3(sum3_ptrs);
         stbv_av1_rotate4(A3_ptrs);
         stbv_av1_rotate4(B3_ptrs);
         stbv_av1_sgr_box5_row_h(sumsq5_ptrs[4], sum5_ptrs[4], r4, ew, ux0);
