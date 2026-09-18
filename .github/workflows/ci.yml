@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & decode (${{ matrix.os }} / ${{ matrix.cc }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc }
+          - { os: ubuntu-latest, cc: clang }
+          - { os: macos-latest,  cc: clang }
+          - { os: windows-latest, cc: msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & run test suite (Unix)
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          set -e
+          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic -o test_avif     test_avif.c     -lm
+          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic -o test_avif2pnm test_avif2pnm.c -lm
+          ./test_avif
+          ./test_avif2pnm
+
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build & run test suite (Windows MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cl /nologo /W4 /O2 /Fetest_avif.exe test_avif.c
+          cl /nologo /W4 /O2 /Fetest_avif2pnm.exe test_avif2pnm.c
+          .\test_avif.exe
+          .\test_avif2pnm.exe
+
+  dav1d-compare:
+    name: Compare vs dav1d
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dav1d development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdav1d-dev
+      - name: Run scalar-vs-dav1d comparison
+        run: ./test_compare_dav1d.sh
+
+  sanitize:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with sanitizers
+        run: |
+          clang -std=c89 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o test_avif_asan     test_avif.c     -lm
+          clang -std=c89 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o test_avif2pnm_asan test_avif2pnm.c -lm
+      - name: Run smoke test (test_avif)
+        run: ./test_avif_asan
+      - name: Run full corpus (test_avif2pnm)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ./test_avif2pnm_asan
+
+  dist-check:
+    name: dist consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Regenerate single header and verify git-clean
+        run: |
+          python3 build_single_header.py
+          git diff --exit-code -- dist/stb_avif.h
+
+  coverage:
+    name: Line coverage
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build with coverage instrumentation
+        run: |
+          gcc -std=c89 -O0 --coverage -o test_avif_cov     test_avif.c     -lm
+          gcc -std=c89 -O0 --coverage -o test_avif2pnm_cov test_avif2pnm.c -lm
+      - name: Run coverage-instrumented binaries
+        run: |
+          ./test_avif_cov
+          ./test_avif2pnm_cov
+          pip install gcovr
+      - name: Generate coverage report
+        run: |
+          gcovr -r . \
+            --filter 'stb_avif.h' --filter 'stb_av1_.*\.h' \
+            --html --html-details -o coverage_report/coverage.html \
+            --fail-under-line 50
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage_report/
+          if-no-files-found: warn

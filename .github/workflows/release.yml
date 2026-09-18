@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish single header
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build single header (also runs a compile sanity check)
+        run: python3 build_single_header.py
+
+      - name: Create GitHub release
+        run: |
+          artifacts=(dist/stb_avif.h build_single_header.py README.md)
+          existing=()
+          for f in "${artifacts[@]}"; do
+            [ -f "$f" ] && existing+=("$f")
+          done
+          gh release create "$GITHUB_REF_NAME" "${existing[@]}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -7360,7 +7360,7 @@ STBV_AV1_IPRED_UNUSED static void stbv_av1_ipred_z1_##sfx( \
     upsample_above = enable_intra_edge_filter ? \
         stbv_av1_get_upsample(max_wh, 90 - angle, is_sm) : 0; \
     base_inc = 1 + upsample_above; \
-    dx = stbv_av1_dr_deriv[angle >> 1]; \
+    dx = stbv_av1_dr_deriv[stbv_av1_ipred_iclip(angle >> 1, 0, 43)]; \
     if (upsample_above) { \
         stbv_av1_upsample_edge_##sfx(top_out, max_wh, &topleft_in[1], -1, \
                                      width + stbv_av1_ipred_imin(width, \
@@ -7417,8 +7417,8 @@ STBV_AV1_IPRED_UNUSED static void stbv_av1_ipred_z2_##sfx( \
     upsample_above = enable_intra_edge_filter ? \
         stbv_av1_get_upsample(max_wh, angle - 90, is_sm) : 0; \
     base_inc_x = 1 + upsample_above; \
-    dy = stbv_av1_dr_deriv[(angle - 90) >> 1]; \
-    dx = stbv_av1_dr_deriv[(180 - angle) >> 1]; \
+    dy = stbv_av1_dr_deriv[stbv_av1_ipred_iclip((angle - 90) >> 1, 0, 43)]; \
+    dx = stbv_av1_dr_deriv[stbv_av1_ipred_iclip((180 - angle) >> 1, 0, 43)]; \
     if (upsample_above) { \
         stbv_av1_upsample_edge_##sfx(topleft, width + 1, topleft_in, 0, \
                                      width + 1, bd); \
@@ -7488,7 +7488,7 @@ STBV_AV1_IPRED_UNUSED static void stbv_av1_ipred_z3_##sfx( \
     upsample_left = enable_intra_edge_filter ? \
         stbv_av1_get_upsample(max_wh, angle - 180, is_sm) : 0; \
     base_inc = 1 + upsample_left; \
-    dy = stbv_av1_dr_deriv[(270 - angle) >> 1]; \
+    dy = stbv_av1_dr_deriv[stbv_av1_ipred_iclip((270 - angle) >> 1, 0, 43)]; \
     if (upsample_left) { \
         stbv_av1_upsample_edge_##sfx(left_out, max_wh, \
                                      &topleft_in[-max_wh], \
@@ -15129,7 +15129,9 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
         }
     }
 
-    /* Copy V plane (absent for monochrome) */
+    /* Copy V plane (absent for monochrome).
+     * dav1d stores both chroma planes with the SAME stride: Dav1dPicture
+     * has stride[2] (luma [0], chroma [1] only) — there is no stride[2]. */
     if (!*monochrome && *v_plane && pic.data[2]) {
         int uv_h = (*height + (1 << *subsampling_y) - 1) >> *subsampling_y;
         int uv_w = (*width + (1 << *subsampling_x) - 1) >> *subsampling_x;
@@ -15137,10 +15139,10 @@ static int stb_avif_decode_with_dav1d(const unsigned char *av1_data, size_t av1_
             int si;
             for (si = 0; si < uv_w; si++) {
                 if (pic.p.bpc > 8) {
-                    uint16_t *src = (uint16_t *)((uint8_t *)pic.data[2] + i * pic.stride[2]);
+                    uint16_t *src = (uint16_t *)((uint8_t *)pic.data[2] + i * pic.stride[1]);
                     (*v_plane)[i * *v_stride + si] = (unsigned char)(src[si] >> (pic.p.bpc - 8));
                 } else {
-                    (*v_plane)[i * *v_stride + si] = ((unsigned char *)pic.data[2])[i * pic.stride[2] + si];
+                    (*v_plane)[i * *v_stride + si] = ((unsigned char *)pic.data[2])[i * pic.stride[1] + si];
                 }
             }
         }
@@ -16555,6 +16557,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     int cdef_noskip_stride = 0;
     stbv_av1_lr_mask lr_mask = {0};
     int lr_mask_ok = 0;
+    memset(&lr_mask, 0, sizeof(lr_mask)); /* free path runs unconditionally */
     int bw8al, bh8al;
     stbv_u8 *above_cre0 = 0, *above_cre1 = 0, *left_cre0 = 0, *left_cre1 = 0;
     stbv_u8 *above_skip = 0, *left_skip = 0, *above_pal_sz = 0;
