@@ -2217,7 +2217,13 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
         int cbw4 = (bw4c + ss_hor) >> ss_hor;
         int cbh4 = (bh4c + ss_ver) >> ss_ver;
         int cm = uv_mode == STBV_AV1_INTRA_CFL ? STBV_AV1_INTRA_DC : uv_mode;
-        int cangle = 0;
+        /* NOTE: the chroma angle was previously hoisted here and shared by
+         * both planes, so the V plane re-accumulated the U plane's finished
+         * angle (VERT -> 360, HOR -> 720).  prepare_intra_edges() treats the
+         * incoming value as a delta, so that steered V into IPRED_Z3 with an
+         * out-of-range dr_deriv index (reads before the table).  Declared per
+         * plane below, matching the luma path above and the per-transform
+         * chroma path in stb_avif_recon_predict_txb_chroma(). */
         int cimpl;
         int x = cx4 << 2;
         int y = cy4 << 2;
@@ -2242,6 +2248,7 @@ static void stb_avif_recon_predict_block(struct stb_avif_scalar_recon *rc,
             stbv_u16 *cur_plane = pl_idx == 0 ? rc->plane_u : rc->plane_v;
             int cur_stride = pl_idx == 0 ? rc->stride_u : rc->stride_v;
             int cw_p, ch_p;
+            int cangle = 0;
             cw_p = cur_stride - x; if (cw_p > w) cw_p = w;
             ch_p = ((((rc->frame_h + ss_ver) >> ss_ver)) + 32) - y;
             if (ch_p > h) ch_p = h;
