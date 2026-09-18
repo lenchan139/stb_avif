@@ -30,8 +30,8 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           set -e
-          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic -o test_avif     test_avif.c     -lm
-          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic -o test_avif2pnm test_avif2pnm.c -lm
+          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic-errors -o test_avif     test_avif.c     -lm
+          "$CC" -std=c89 -O2 -Wall -Wextra -pedantic-errors -o test_avif2pnm test_avif2pnm.c -lm
           ./test_avif
           ./test_avif2pnm
 

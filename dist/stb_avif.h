@@ -202,7 +202,9 @@ typedef signed int stbv_i32;
 #if defined(_MSC_VER)
 typedef unsigned __int64 stbv_u64;
 #else
-typedef unsigned long long stbv_u64;
+/* 64-bit is not available in strict C89; use the documented extension marker
+ * so -pedantic-errors does not reject this deliberate use of 'long long'. */
+__extension__ typedef unsigned long long stbv_u64;
 #endif
 #define STBV_U64_DEFINED 1
 #endif
@@ -16557,7 +16559,6 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     int cdef_noskip_stride = 0;
     stbv_av1_lr_mask lr_mask = {0};
     int lr_mask_ok = 0;
-    memset(&lr_mask, 0, sizeof(lr_mask)); /* free path runs unconditionally */
     int bw8al, bh8al;
     stbv_u8 *above_cre0 = 0, *above_cre1 = 0, *left_cre0 = 0, *left_cre1 = 0;
     stbv_u8 *above_skip = 0, *left_skip = 0, *above_pal_sz = 0;
@@ -16573,6 +16574,7 @@ static int stb_avif_decode_frame_scalar(struct stb_av1_tile_context *tc, const u
     stbv_refmvs_cell *refmvs_r = 0;
     int cframe_w8 = 0, cframe_h8 = 0;
     int i, j, h2, w2;
+    memset(&lr_mask, 0, sizeof(lr_mask)); /* free path runs unconditionally */
     stream = (struct stb_av1_internal_stream *)stb_avif_calloc(1, sizeof(*stream));
     recon = (struct stb_avif_scalar_recon *)stb_avif_calloc(1, sizeof(*recon));
     if (!stream || !recon) { stb_avif_free(stream); stb_avif_free(recon); return -1; }
