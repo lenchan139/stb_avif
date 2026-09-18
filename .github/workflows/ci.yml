@@ -110,6 +110,7 @@ jobs:
           pip install gcovr
       - name: Generate coverage report
         run: |
+          mkdir -p coverage_report
           gcovr -r . \
             --filter 'stb_avif.h' --filter 'stb_av1_.*\.h' \
             --html --html-details -o coverage_report/coverage.html \
